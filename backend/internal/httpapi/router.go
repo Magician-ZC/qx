@@ -61,20 +61,35 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	}
 	duelAuth := newDuelSessionAuthStoreWithDB(deps.Store)
 
+	debugSnapshotRequested := func(c *gin.Context) bool {
+		if c == nil {
+			return false
+		}
+		value := strings.ToLower(strings.TrimSpace(c.Query("debug")))
+		if value == "1" || value == "true" || value == "yes" {
+			return true
+		}
+		value = strings.ToLower(strings.TrimSpace(c.GetHeader("X-Qunxiang-Debug")))
+		return value == "1" || value == "true" || value == "yes"
+	}
+	publicForRequest := func(c *gin.Context, snapshot session.Snapshot) session.Snapshot {
+		return session.PublicSnapshot(snapshot, debugSnapshotRequested(c))
+	}
 	broadcastSessionSnapshot := func(reason string, snapshot session.Snapshot, extra map[string]any) {
 		if strings.TrimSpace(snapshot.ID) == "" {
 			return
 		}
+		publicSnapshot := session.PublicSnapshot(snapshot, false)
 		payload := map[string]any{
 			"reason":  strings.TrimSpace(reason),
-			"session": snapshot,
+			"session": publicSnapshot,
 		}
 		for key, value := range extra {
 			payload[key] = value
 		}
 		hub.BroadcastSessionEvent(snapshot.ID, "session_snapshot", payload)
 
-		interactions := snapshot.LLMInteractions
+		interactions := publicSnapshot.LLMInteractions
 		if len(interactions) > 4 {
 			interactions = interactions[len(interactions)-4:]
 		}
@@ -90,9 +105,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if strings.TrimSpace(snapshot.ID) == "" {
 			return
 		}
+		publicSnapshot := session.PublicSnapshot(snapshot, false)
 		payload := map[string]any{
 			"reason":  strings.TrimSpace(reason),
-			"session": snapshot,
+			"session": publicSnapshot,
 		}
 		for key, value := range extra {
 			payload[key] = value
@@ -289,7 +305,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		broadcastSessionSnapshot("session_created", snapshot, nil)
 
-		c.JSON(http.StatusCreated, gin.H{"session": snapshot})
+		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
 	router.POST("/api/sessions/duel", func(c *gin.Context) {
@@ -323,6 +339,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if !ok {
 			return
 		}
+		creatorRole := normalizeDuelRole(c.Query("creator_role"))
 
 		service := newSessionService()
 		snapshot, err := service.CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled)
@@ -333,20 +350,27 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 		playerToken := uuid.NewString()
 		enemyToken := uuid.NewString()
-		roomCode, roomErr := duelAuth.register(c.Request.Context(), snapshot.ID, playerToken, enemyToken)
+		room, roomErr := duelAuth.register(c.Request.Context(), snapshot.ID, playerToken, enemyToken, creatorRole)
 		if roomErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": roomErr.Error()})
 			return
 		}
-		broadcastSessionSnapshot("session_created_duel", snapshot, nil)
+		broadcastSessionSnapshot("session_created_duel", snapshot, map[string]any{
+			"room_status": room.status(),
+		})
+		commanderFactionID := snapshot.PlayerFactionID
+		if creatorRole == duelRoleEnemy {
+			commanderFactionID = snapshot.EnemyFactionID
+		}
 
 		c.JSON(http.StatusCreated, gin.H{
-			"session":              snapshot,
+			"session":              publicForRequest(c, snapshot),
 			"mode":                 "duel",
-			"room_code":            roomCode,
+			"room_code":            room.RoomCode,
 			"player_role_token":    playerToken,
 			"enemy_role_token":     enemyToken,
-			"commander_faction_id": snapshot.PlayerFactionID,
+			"commander_faction_id": commanderFactionID,
+			"room_status":          room.status(),
 		})
 	})
 
@@ -360,7 +384,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 
-		sessionID, roleToken, role, ok := duelAuth.joinByRoomCode(c.Request.Context(), request.RoomCode, request.PreferredRole)
+		sessionID, roleToken, role, room, ok := duelAuth.joinByRoomCode(c.Request.Context(), request.RoomCode, request.PreferredRole)
 		if !ok {
 			c.JSON(http.StatusNotFound, gin.H{"error": "room_code is invalid"})
 			return
@@ -375,13 +399,18 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if role == duelRoleEnemy {
 			commanderFactionID = snapshot.EnemyFactionID
 		}
+		broadcastSessionSnapshot("duel_room_joined", snapshot, map[string]any{
+			"room_status": room.status(),
+			"joined_role": role,
+		})
 		c.JSON(http.StatusOK, gin.H{
-			"session":              snapshot,
+			"session":              publicForRequest(c, snapshot),
 			"mode":                 "duel",
-			"room_code":            duelAuth.roomCodeForSession(c.Request.Context(), snapshot.ID),
+			"room_code":            room.RoomCode,
 			"role":                 role,
 			"role_token":           roleToken,
 			"commander_faction_id": commanderFactionID,
+			"room_status":          room.status(),
 		})
 	})
 
@@ -479,10 +508,21 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role token"})
 			return
 		}
+		previousRoomStatus, hadPreviousRoomStatus := duelAuth.roomStatusForSession(c.Request.Context(), snapshot.ID)
+		roomStatus, hasRoomStatus := duelAuth.markJoinedBySessionRole(c.Request.Context(), snapshot.ID, commanderFactionID)
+		if !hasRoomStatus {
+			roomStatus, _ = duelAuth.roomStatusForSession(c.Request.Context(), snapshot.ID)
+		} else if !hadPreviousRoomStatus || previousRoomStatus.PlayerJoined != roomStatus.PlayerJoined || previousRoomStatus.EnemyJoined != roomStatus.EnemyJoined {
+			broadcastSessionSnapshot("duel_room_joined", snapshot, map[string]any{
+				"room_status": roomStatus,
+				"joined_role": commanderFactionID,
+			})
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"session":              snapshot,
+			"session":              publicForRequest(c, snapshot),
 			"room_code":            duelAuth.roomCodeForSession(c.Request.Context(), snapshot.ID),
 			"commander_faction_id": commanderFactionID,
+			"room_status":          roomStatus,
 		})
 	})
 
@@ -492,6 +532,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
+		includeDebug := debugSnapshotRequested(c)
+		reconnect.Session = session.PublicSnapshot(reconnect.Session, includeDebug)
+		reconnect.BoundarySession = session.PublicSnapshot(reconnect.BoundarySession, includeDebug)
 
 		c.JSON(http.StatusOK, gin.H{"reconnect": reconnect})
 	})
@@ -555,7 +598,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"scope": scope,
 		})
 
-		c.JSON(http.StatusOK, gin.H{"session": snapshot})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
 	router.POST("/api/sessions/:id/opening-draft", func(c *gin.Context) {
@@ -570,7 +613,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		broadcastSessionSnapshot("opening_draft_confirmed", snapshot, nil)
-		c.JSON(http.StatusOK, gin.H{"session": snapshot})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
 	router.POST("/api/sessions/:id/faction-relation", func(c *gin.Context) {
@@ -603,7 +646,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"state":            strings.ToLower(strings.TrimSpace(request.State)),
 		})
 
-		c.JSON(http.StatusOK, gin.H{"session": snapshot})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
 	router.POST("/api/sessions/:id/dialogue", func(c *gin.Context) {
@@ -663,7 +706,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if err != nil {
 			body := gin.H{"error": err.Error()}
 			if snapshot.ID != "" {
-				body["session"] = snapshot
+				body["session"] = publicForRequest(c, snapshot)
 			}
 			c.JSON(http.StatusBadRequest, body)
 			return
@@ -672,7 +715,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"reply": reply,
 		})
 
-		c.JSON(http.StatusOK, gin.H{"session": snapshot, "reply": reply})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "reply": reply})
 	})
 
 	router.POST("/api/sessions/:id/reports", func(c *gin.Context) {
@@ -704,7 +747,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"report": report,
 		})
 
-		c.JSON(http.StatusCreated, gin.H{"session": snapshot, "report": report})
+		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot), "report": report})
 	})
 
 	router.GET("/api/sessions/:id/audit", func(c *gin.Context) {
@@ -755,7 +798,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		broadcastSessionSnapshot("privacy_erased", snapshot, map[string]any{
 			"privacy_erase_result": result,
 		})
-		c.JSON(http.StatusOK, gin.H{"session": snapshot, "result": result})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "result": result})
 	})
 
 	router.POST("/api/privacy/purge", func(c *gin.Context) {
@@ -794,7 +837,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if err != nil {
 			body := gin.H{"error": err.Error()}
 			if snapshot.ID != "" {
-				body["session"] = snapshot
+				body["session"] = publicForRequest(c, snapshot)
 			}
 			c.JSON(http.StatusBadRequest, body)
 			return
@@ -805,7 +848,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		broadcastSessionSnapshot(reason, snapshot, nil)
 
-		c.JSON(http.StatusOK, gin.H{"session": snapshot})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
 	router.POST("/api/units/bootstrap", func(c *gin.Context) {

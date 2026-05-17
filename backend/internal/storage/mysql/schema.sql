@@ -1,0 +1,159 @@
+CREATE TABLE IF NOT EXISTS units (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  faction_id VARCHAR(191) NOT NULL,
+  display_name VARCHAR(191) NOT NULL,
+  profile_json LONGTEXT NOT NULL,
+  personality_json LONGTEXT NOT NULL,
+  status_json LONGTEXT NOT NULL,
+  inventory_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_units_session_id (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS memories (
+  id VARCHAR(191) PRIMARY KEY,
+  unit_id VARCHAR(191) NOT NULL,
+  category VARCHAR(191) NOT NULL,
+  summary TEXT NOT NULL,
+  emotion_weight DOUBLE NOT NULL DEFAULT 1.0,
+  salience DOUBLE NOT NULL DEFAULT 0.0,
+  recall_count INTEGER NOT NULL DEFAULT 0,
+  metadata_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  last_recalled_at VARCHAR(64),
+  INDEX idx_memories_unit_id (unit_id),
+  INDEX idx_memories_salience (salience),
+  INDEX idx_memories_unit_sort (unit_id, salience, recall_count, created_at),
+  INDEX idx_memories_unit_category_sort (unit_id, category, salience, created_at),
+  CONSTRAINT fk_memories_unit FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS memories_fts (
+  memory_id VARCHAR(191) PRIMARY KEY,
+  unit_id VARCHAR(191) NOT NULL,
+  summary TEXT NOT NULL,
+  INDEX idx_memories_fts_unit_id (unit_id),
+  FULLTEXT INDEX idx_memories_fts_summary (summary)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS events (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  actor_unit_id VARCHAR(191),
+  target_unit_id VARCHAR(191),
+  event_type VARCHAR(191) NOT NULL,
+  reason_code VARCHAR(191) NOT NULL,
+  payload_json LONGTEXT NOT NULL,
+  occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_events_session_id (session_id),
+  INDEX idx_events_actor_unit_id (actor_unit_id),
+  INDEX idx_events_target_unit_id (target_unit_id),
+  INDEX idx_events_reason_code (reason_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS relations (
+  source_unit_id VARCHAR(191) NOT NULL,
+  target_unit_id VARCHAR(191) NOT NULL,
+  trust DOUBLE NOT NULL DEFAULT 0,
+  fear DOUBLE NOT NULL DEFAULT 0,
+  affection DOUBLE NOT NULL DEFAULT 0,
+  rivalry DOUBLE NOT NULL DEFAULT 0,
+  notes_json LONGTEXT NOT NULL,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (source_unit_id, target_unit_id),
+  INDEX idx_relations_target_unit_id (target_unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS event_reason_codes (
+  code VARCHAR(191) PRIMARY KEY,
+  category VARCHAR(191) NOT NULL,
+  display_name VARCHAR(191) NOT NULL,
+  default_reason_text TEXT NOT NULL,
+  stat_domains_json LONGTEXT NOT NULL,
+  importance_min INTEGER NOT NULL,
+  importance_max INTEGER NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS terrain_types (
+  id VARCHAR(191) PRIMARY KEY,
+  display_name VARCHAR(191) NOT NULL,
+  move_cost DOUBLE NOT NULL,
+  vision_range INTEGER NOT NULL,
+  combat_rules_json LONGTEXT NOT NULL,
+  activities_json LONGTEXT NOT NULL,
+  resources_json LONGTEXT NOT NULL,
+  special_rules_json LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS world_maps (
+  id VARCHAR(191) PRIMARY KEY,
+  seed BIGINT NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  generated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_world_maps_generated_at (generated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS world_tiles (
+  map_id VARCHAR(191) NOT NULL,
+  q INTEGER NOT NULL,
+  r INTEGER NOT NULL,
+  terrain_id VARCHAR(191) NOT NULL,
+  region_id VARCHAR(191) NOT NULL DEFAULT '',
+  landmark VARCHAR(191) NOT NULL DEFAULT '',
+  PRIMARY KEY (map_id, q, r),
+  INDEX idx_world_tiles_terrain_id (terrain_id),
+  CONSTRAINT fk_world_tiles_map FOREIGN KEY (map_id) REFERENCES world_maps(id) ON DELETE CASCADE,
+  CONSTRAINT fk_world_tiles_terrain FOREIGN KEY (terrain_id) REFERENCES terrain_types(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS ground_loot_drops (
+  id VARCHAR(191) PRIMARY KEY,
+  location VARCHAR(191) NOT NULL,
+  source_unit_id VARCHAR(191) NOT NULL,
+  inheritor_unit_id VARCHAR(191) NOT NULL,
+  items_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS single_player_sessions (
+  id VARCHAR(191) PRIMARY KEY,
+  state_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_single_player_sessions_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS session_phase_snapshots (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  turn INTEGER NOT NULL,
+  phase VARCHAR(64) NOT NULL,
+  snapshot_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_session_phase (session_id, turn, phase),
+  INDEX idx_session_phase_snapshots_session_created_at (session_id, created_at),
+  CONSTRAINT fk_phase_session FOREIGN KEY (session_id) REFERENCES single_player_sessions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hall_of_fame_entries (
+  id VARCHAR(191) PRIMARY KEY,
+  source_session_id VARCHAR(191) NOT NULL,
+  source_unit_id VARCHAR(191) NOT NULL,
+  unit_name VARCHAR(191) NOT NULL,
+  unit_faction_id VARCHAR(191) NOT NULL,
+  outcome VARCHAR(64) NOT NULL,
+  biography_summary TEXT NOT NULL,
+  top_events_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_hall_source (source_session_id, source_unit_id),
+  INDEX idx_hall_of_fame_entries_unit_name (unit_name, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS opening_candidate_cache (
+  cache_key VARCHAR(191) PRIMARY KEY,
+  payload LONGTEXT NOT NULL,
+  updated_at_unix BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -75,9 +76,7 @@ func (service *Service) persistHallOfFame(
 			Model:        result.Model,
 			UsedFallback: result.UsedFallback,
 		})
-		if _, err := service.db.ExecContext(
-			ctx,
-			`
+		query := `
 			INSERT INTO hall_of_fame_entries (
 				id,
 				source_session_id,
@@ -93,7 +92,29 @@ func (service *Service) persistHallOfFame(
 				biography_summary = excluded.biography_summary,
 				top_events_json = excluded.top_events_json,
 				outcome = excluded.outcome
-			`,
+			`
+		if dbdialect.IsMySQL(service.db) {
+			query = `
+			INSERT INTO hall_of_fame_entries (
+				id,
+				source_session_id,
+				source_unit_id,
+				unit_name,
+				unit_faction_id,
+				outcome,
+				biography_summary,
+				top_events_json,
+				created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				biography_summary = VALUES(biography_summary),
+				top_events_json = VALUES(top_events_json),
+				outcome = VALUES(outcome)
+			`
+		}
+		if _, err := service.db.ExecContext(
+			ctx,
+			query,
 			entryID,
 			state.ID,
 			record.ID,
@@ -434,4 +455,92 @@ func (service *Service) injectHallMemoriesForUnit(
 		)
 	}
 	return nil
+}
+
+func markAsyncHallMemoryRunning(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	asyncHallMemoryRegistry.Lock()
+	defer asyncHallMemoryRegistry.Unlock()
+	if _, exists := asyncHallMemoryRegistry.running[key]; exists {
+		return false
+	}
+	asyncHallMemoryRegistry.running[key] = struct{}{}
+	return true
+}
+
+func unmarkAsyncHallMemoryRunning(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	asyncHallMemoryRegistry.Lock()
+	delete(asyncHallMemoryRegistry.running, key)
+	asyncHallMemoryRegistry.Unlock()
+}
+
+func hallMemoryRefreshKey(sessionID string, unitIDs []string) string {
+	filtered := make([]string, 0, len(unitIDs))
+	for _, unitID := range unitIDs {
+		unitID = strings.TrimSpace(unitID)
+		if unitID == "" {
+			continue
+		}
+		filtered = append(filtered, unitID)
+	}
+	if len(filtered) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(sessionID) + ":" + strings.Join(filtered, ",")
+}
+
+func (service *Service) refreshHallMemoriesAsync(sessionID string, unitIDs []string) {
+	if service == nil || strings.TrimSpace(sessionID) == "" || len(unitIDs) == 0 {
+		return
+	}
+	key := hallMemoryRefreshKey(sessionID, unitIDs)
+	if !markAsyncHallMemoryRunning(key) {
+		return
+	}
+	go func() {
+		defer unmarkAsyncHallMemoryRunning(key)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		state, units, err := service.loadSession(ctx, sessionID)
+		if err != nil {
+			return
+		}
+		byID := mapRecordsByID(units)
+		updated := false
+		for _, unitID := range unitIDs {
+			record := byID[strings.TrimSpace(unitID)]
+			if record == nil {
+				continue
+			}
+			beforeHighlights := len(record.Memory.Highlights)
+			beforeRecent := len(record.Memory.RecentEventIDs)
+			beforeLogs := len(state.Logs)
+			if err := service.injectHallMemoriesForUnit(ctx, &state, record); err != nil {
+				continue
+			}
+			if len(record.Memory.Highlights) != beforeHighlights || len(record.Memory.RecentEventIDs) != beforeRecent || len(state.Logs) != beforeLogs {
+				updated = true
+			}
+		}
+		if !updated {
+			return
+		}
+		if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
+			return
+		}
+		if service.progressReporter != nil {
+			service.progressReporter("hall_memories_refreshed", buildSnapshot(state, snapshotUnitsFromByID(state, byID)), map[string]any{
+				"unit_ids": append([]string{}, unitIDs...),
+			})
+		}
+	}()
 }

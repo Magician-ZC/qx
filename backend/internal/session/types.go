@@ -24,7 +24,7 @@ const (
 )
 const FactionWildling = "wildling"
 
-// UnitCandidate 是开局 30 秒选人阶段展示给玩家的候选单位草案。
+// UnitCandidate 是开局等待阶段展示给玩家的候选单位草案。
 type UnitCandidate struct {
 	ID               string           `json:"id"`
 	Name             string           `json:"name"`
@@ -334,6 +334,8 @@ type LLMInteraction struct {
 	TotalTokens   int                    `json:"total_tokens,omitempty"`
 	EstimatedCost float64                `json:"estimated_cost_usd,omitempty"`
 	Attempts      []ai.CompletionAttempt `json:"attempts,omitempty"`
+	InProgress    bool                   `json:"in_progress,omitempty"`
+	ElapsedMS     int64                  `json:"elapsed_ms,omitempty"`
 }
 
 // RawEventEntry 结构体用于承载该模块的核心数据。
@@ -607,6 +609,7 @@ type Snapshot struct {
 	DialogueHistory     []DialogueMessage  `json:"dialogue_history"`
 	DecisionTraces      []DecisionTrace    `json:"decision_traces"`
 	LLMInteractions     []LLMInteraction   `json:"llm_interactions"`
+	ActiveLLMCalls      []LLMInteraction   `json:"active_llm_calls,omitempty"`
 	PigeonQueue         []PigeonDispatch   `json:"pigeon_queue"`
 	Pregnancies         []PregnancyState   `json:"pregnancies,omitempty"`
 	BattleReports       []BattleReport     `json:"battle_reports"`

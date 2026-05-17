@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // 常量定义区：集中声明该文件使用的共享配置。
@@ -31,11 +33,19 @@ type duelSessionAuthStore struct {
 
 // duelRoomState 结构体用于承载该模块的核心数据。
 type duelRoomState struct {
-	RoomCode    string
-	SessionID   string
-	PlayerToken string
-	EnemyToken  string
-	CreatedAt   time.Time
+	RoomCode       string
+	SessionID      string
+	PlayerToken    string
+	EnemyToken     string
+	PlayerJoinedAt time.Time
+	EnemyJoinedAt  time.Time
+	CreatedAt      time.Time
+}
+
+type duelRoomStatus struct {
+	RoomCode     string `json:"room_code"`
+	PlayerJoined bool   `json:"player_joined"`
+	EnemyJoined  bool   `json:"enemy_joined"`
 }
 
 // newDuelSessionAuthStore 初始化内存态房间鉴权索引。
@@ -62,31 +72,47 @@ func (store *duelSessionAuthStore) ensureSchema(ctx context.Context) error {
 	if store == nil || store.db == nil {
 		return nil
 	}
-	_, err := store.db.ExecContext(
-		ctx,
-		`
+	query := `
 		CREATE TABLE IF NOT EXISTS duel_room_codes (
 			room_code TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL UNIQUE,
 			player_token TEXT NOT NULL,
 			enemy_token TEXT NOT NULL,
+			player_joined_at TEXT NOT NULL DEFAULT '',
+			enemy_joined_at TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		)
-		`,
-	)
-	return err
+		`
+	if dbdialect.IsMySQL(store.db) {
+		query = `
+		CREATE TABLE IF NOT EXISTS duel_room_codes (
+			room_code VARCHAR(191) PRIMARY KEY,
+			session_id VARCHAR(191) NOT NULL UNIQUE,
+			player_token VARCHAR(191) NOT NULL,
+			enemy_token VARCHAR(191) NOT NULL,
+			player_joined_at VARCHAR(64) NOT NULL DEFAULT '',
+			enemy_joined_at VARCHAR(64) NOT NULL DEFAULT '',
+			created_at VARCHAR(64) NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`
+	}
+	if _, err := store.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	return store.ensureJoinColumns(ctx)
 }
 
 // register 为会话分配房间号，并写入 player/enemy 角色令牌。
-func (store *duelSessionAuthStore) register(ctx context.Context, sessionID string, playerToken string, enemyToken string) (string, error) {
+func (store *duelSessionAuthStore) register(ctx context.Context, sessionID string, playerToken string, enemyToken string, creatorRole string) (duelRoomState, error) {
 	if store == nil {
-		return "", nil
+		return duelRoomState{}, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	playerToken = strings.TrimSpace(playerToken)
 	enemyToken = strings.TrimSpace(enemyToken)
+	creatorRole = normalizeDuelRole(creatorRole)
 	if sessionID == "" || playerToken == "" || enemyToken == "" {
-		return "", nil
+		return duelRoomState{}, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -94,20 +120,25 @@ func (store *duelSessionAuthStore) register(ctx context.Context, sessionID strin
 
 	store.mu.Lock()
 	if existing := strings.TrimSpace(store.roomBySession[sessionID]); existing != "" {
+		room := store.byRoomCode[existing]
 		store.mu.Unlock()
-		return existing, nil
+		return room, nil
 	}
 	store.mu.Unlock()
 
 	if store.db != nil {
 		if err := store.ensureSchema(ctx); err != nil {
-			return "", err
+			return duelRoomState{}, err
 		}
 		if persisted, ok, err := store.loadBySessionFromDB(ctx, sessionID); err != nil {
-			return "", err
+			return duelRoomState{}, err
 		} else if ok {
+			persisted = joinedRoomForRole(persisted, creatorRole, time.Now().UTC())
+			if err := store.persistJoined(ctx, persisted); err != nil {
+				return duelRoomState{}, err
+			}
 			store.hydrate(persisted)
-			return persisted.RoomCode, nil
+			return persisted, nil
 		}
 	}
 
@@ -116,23 +147,25 @@ func (store *duelSessionAuthStore) register(ctx context.Context, sessionID strin
 		if roomCode == "" {
 			continue
 		}
+		now := time.Now().UTC()
 		room := duelRoomState{
 			RoomCode:    roomCode,
 			SessionID:   sessionID,
 			PlayerToken: playerToken,
 			EnemyToken:  enemyToken,
-			CreatedAt:   time.Now().UTC(),
+			CreatedAt:   now,
 		}
+		room = joinedRoomForRole(room, creatorRole, now)
 		if err := store.persist(ctx, room); err != nil {
 			if isRoomCodeConflict(err) {
 				continue
 			}
-			return "", err
+			return duelRoomState{}, err
 		}
 		store.hydrate(room)
-		return roomCode, nil
+		return room, nil
 	}
-	return "", fmt.Errorf("failed to allocate duel room code")
+	return duelRoomState{}, fmt.Errorf("failed to allocate duel room code")
 }
 
 // roomCodeForSession 按 session_id 反查房间号（内存优先，数据库回补）。
@@ -169,15 +202,81 @@ func (store *duelSessionAuthStore) roomCodeForSession(ctx context.Context, sessi
 	return room.RoomCode
 }
 
-// joinByRoomCode 按房间号加入并返回对应阵营 token。
-func (store *duelSessionAuthStore) joinByRoomCode(ctx context.Context, roomCode string, preferredRole string) (string, string, string, bool) {
+func (store *duelSessionAuthStore) roomStatusForSession(ctx context.Context, sessionID string) (duelRoomStatus, bool) {
 	if store == nil {
-		return "", "", "", false
+		return duelRoomStatus{}, false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return duelRoomStatus{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	store.mu.RLock()
+	roomCode := strings.TrimSpace(store.roomBySession[sessionID])
+	room := store.byRoomCode[roomCode]
+	store.mu.RUnlock()
+	if roomCode != "" && strings.TrimSpace(room.RoomCode) != "" {
+		return room.status(), true
+	}
+
+	if store.db == nil {
+		return duelRoomStatus{}, false
+	}
+	if err := store.ensureSchema(ctx); err != nil {
+		return duelRoomStatus{}, false
+	}
+	room, ok, err := store.loadBySessionFromDB(ctx, sessionID)
+	if err != nil || !ok {
+		return duelRoomStatus{}, false
+	}
+	store.hydrate(room)
+	return room.status(), true
+}
+
+func (store *duelSessionAuthStore) markJoinedBySessionRole(ctx context.Context, sessionID string, role string) (duelRoomStatus, bool) {
+	if store == nil {
+		return duelRoomStatus{}, false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return duelRoomStatus{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	store.mu.RLock()
+	roomCode := strings.TrimSpace(store.roomBySession[sessionID])
+	room := store.byRoomCode[roomCode]
+	store.mu.RUnlock()
+	if roomCode == "" || strings.TrimSpace(room.RoomCode) == "" {
+		if store.db == nil {
+			return duelRoomStatus{}, false
+		}
+		loaded, ok, err := store.loadBySessionFromDB(ctx, sessionID)
+		if err != nil || !ok {
+			return duelRoomStatus{}, false
+		}
+		room = loaded
+	}
+	room = joinedRoomForRole(room, role, time.Now().UTC())
+	_ = store.persistJoined(ctx, room)
+	store.hydrate(room)
+	return room.status(), true
+}
+
+// joinByRoomCode 按房间号加入并返回对应阵营 token。
+func (store *duelSessionAuthStore) joinByRoomCode(ctx context.Context, roomCode string, preferredRole string) (string, string, string, duelRoomState, bool) {
+	if store == nil {
+		return "", "", "", duelRoomState{}, false
 	}
 	roomCode = normalizeRoomCode(roomCode)
-	preferredRole = strings.ToLower(strings.TrimSpace(preferredRole))
+	preferredRole = normalizeDuelRole(preferredRole)
 	if roomCode == "" {
-		return "", "", "", false
+		return "", "", "", duelRoomState{}, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -196,26 +295,63 @@ func (store *duelSessionAuthStore) joinByRoomCode(ctx context.Context, roomCode 
 		}
 	}
 	if !ok {
-		return "", "", "", false
+		return "", "", "", duelRoomState{}, false
 	}
 	if store.db != nil {
 		exists, err := store.sessionExists(ctx, room.SessionID)
 		if err == nil && !exists {
 			store.dropRoomCode(ctx, room)
-			return "", "", "", false
+			return "", "", "", duelRoomState{}, false
 		}
 	}
+	room = joinedRoomForRole(room, preferredRole, time.Now().UTC())
+	_ = store.persistJoined(ctx, room)
+	store.hydrate(room)
 	switch preferredRole {
 	case duelRolePlayer:
-		return room.SessionID, room.PlayerToken, duelRolePlayer, true
+		return room.SessionID, room.PlayerToken, duelRolePlayer, room, true
 	default:
-		return room.SessionID, room.EnemyToken, duelRoleEnemy, true
+		return room.SessionID, room.EnemyToken, duelRoleEnemy, room, true
 	}
 }
 
 // normalizeRoomCode 统一房间号格式（去空白并转大写）。
 func normalizeRoomCode(roomCode string) string {
 	return strings.ToUpper(strings.TrimSpace(roomCode))
+}
+
+func normalizeDuelRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case duelRoleEnemy:
+		return duelRoleEnemy
+	default:
+		return duelRolePlayer
+	}
+}
+
+func joinedRoomForRole(room duelRoomState, role string, joinedAt time.Time) duelRoomState {
+	if joinedAt.IsZero() {
+		joinedAt = time.Now().UTC()
+	}
+	switch normalizeDuelRole(role) {
+	case duelRoleEnemy:
+		if room.EnemyJoinedAt.IsZero() {
+			room.EnemyJoinedAt = joinedAt
+		}
+	default:
+		if room.PlayerJoinedAt.IsZero() {
+			room.PlayerJoinedAt = joinedAt
+		}
+	}
+	return room
+}
+
+func (room duelRoomState) status() duelRoomStatus {
+	return duelRoomStatus{
+		RoomCode:     strings.TrimSpace(room.RoomCode),
+		PlayerJoined: !room.PlayerJoinedAt.IsZero(),
+		EnemyJoined:  !room.EnemyJoinedAt.IsZero(),
+	}
 }
 
 // requiresToken 判断会话是否属于双人房并需要 token 鉴权。
@@ -302,14 +438,37 @@ func (store *duelSessionAuthStore) persist(ctx context.Context, room duelRoomSta
 	_, err := store.db.ExecContext(
 		ctx,
 		`
-		INSERT INTO duel_room_codes (room_code, session_id, player_token, enemy_token, created_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO duel_room_codes (room_code, session_id, player_token, enemy_token, player_joined_at, enemy_joined_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		`,
 		room.RoomCode,
 		room.SessionID,
 		room.PlayerToken,
 		room.EnemyToken,
+		formatOptionalTime(room.PlayerJoinedAt),
+		formatOptionalTime(room.EnemyJoinedAt),
 		room.CreatedAt.Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func (store *duelSessionAuthStore) persistJoined(ctx context.Context, room duelRoomState) error {
+	if store == nil || store.db == nil {
+		return nil
+	}
+	if err := store.ensureSchema(ctx); err != nil {
+		return err
+	}
+	_, err := store.db.ExecContext(
+		ctx,
+		`
+		UPDATE duel_room_codes
+		SET player_joined_at = ?, enemy_joined_at = ?
+		WHERE room_code = ?
+		`,
+		formatOptionalTime(room.PlayerJoinedAt),
+		formatOptionalTime(room.EnemyJoinedAt),
+		room.RoomCode,
 	)
 	return err
 }
@@ -320,14 +479,16 @@ func (store *duelSessionAuthStore) loadBySessionFromDB(ctx context.Context, sess
 		return duelRoomState{}, false, nil
 	}
 	var (
-		room      duelRoomState
-		createdAt string
+		room           duelRoomState
+		playerJoinedAt string
+		enemyJoinedAt  string
+		createdAt      string
 	)
 	err := store.db.QueryRowContext(
 		ctx,
-		`SELECT room_code, session_id, player_token, enemy_token, created_at FROM duel_room_codes WHERE session_id = ? LIMIT 1`,
+		`SELECT room_code, session_id, player_token, enemy_token, player_joined_at, enemy_joined_at, created_at FROM duel_room_codes WHERE session_id = ? LIMIT 1`,
 		sessionID,
-	).Scan(&room.RoomCode, &room.SessionID, &room.PlayerToken, &room.EnemyToken, &createdAt)
+	).Scan(&room.RoomCode, &room.SessionID, &room.PlayerToken, &room.EnemyToken, &playerJoinedAt, &enemyJoinedAt, &createdAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return duelRoomState{}, false, nil
@@ -337,6 +498,8 @@ func (store *duelSessionAuthStore) loadBySessionFromDB(ctx context.Context, sess
 	if parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdAt)); parseErr == nil {
 		room.CreatedAt = parsed
 	}
+	room.PlayerJoinedAt = parseOptionalTime(playerJoinedAt)
+	room.EnemyJoinedAt = parseOptionalTime(enemyJoinedAt)
 	return room, true, nil
 }
 
@@ -346,14 +509,16 @@ func (store *duelSessionAuthStore) loadByRoomCodeFromDB(ctx context.Context, roo
 		return duelRoomState{}, false, nil
 	}
 	var (
-		room      duelRoomState
-		createdAt string
+		room           duelRoomState
+		playerJoinedAt string
+		enemyJoinedAt  string
+		createdAt      string
 	)
 	err := store.db.QueryRowContext(
 		ctx,
-		`SELECT room_code, session_id, player_token, enemy_token, created_at FROM duel_room_codes WHERE room_code = ? LIMIT 1`,
+		`SELECT room_code, session_id, player_token, enemy_token, player_joined_at, enemy_joined_at, created_at FROM duel_room_codes WHERE room_code = ? LIMIT 1`,
 		roomCode,
-	).Scan(&room.RoomCode, &room.SessionID, &room.PlayerToken, &room.EnemyToken, &createdAt)
+	).Scan(&room.RoomCode, &room.SessionID, &room.PlayerToken, &room.EnemyToken, &playerJoinedAt, &enemyJoinedAt, &createdAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return duelRoomState{}, false, nil
@@ -363,6 +528,8 @@ func (store *duelSessionAuthStore) loadByRoomCodeFromDB(ctx context.Context, roo
 	if parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdAt)); parseErr == nil {
 		room.CreatedAt = parsed
 	}
+	room.PlayerJoinedAt = parseOptionalTime(playerJoinedAt)
+	room.EnemyJoinedAt = parseOptionalTime(enemyJoinedAt)
 	return room, true, nil
 }
 
@@ -486,4 +653,46 @@ func randomRoomCode() string {
 		builder.WriteByte(alphabet[value.Int64()])
 	}
 	return builder.String()
+}
+
+func (store *duelSessionAuthStore) ensureJoinColumns(ctx context.Context) error {
+	if store == nil || store.db == nil {
+		return nil
+	}
+	columnType := "TEXT NOT NULL DEFAULT ''"
+	if dbdialect.IsMySQL(store.db) {
+		columnType = "VARCHAR(64) NOT NULL DEFAULT ''"
+	}
+	for _, column := range []string{"player_joined_at", "enemy_joined_at"} {
+		query := fmt.Sprintf("ALTER TABLE duel_room_codes ADD COLUMN %s %s", column, columnType)
+		if _, err := store.db.ExecContext(ctx, query); err != nil && !isDuplicateColumnError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "duplicate column") ||
+		strings.Contains(text, "duplicate column name") ||
+		strings.Contains(text, "already exists")
+}
+
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func parseOptionalTime(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }

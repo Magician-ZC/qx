@@ -3,6 +3,7 @@ package session
 // 文件说明：集中定义会话内各类 LLM 载荷结构、schema 与主决策调用入口（行动、对话、反思等）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -248,14 +249,15 @@ func (service *Service) generateUnitDecision(
 		Temperature:    0.35,
 		MaxTokens:      220,
 		Timeout:        llmRequestTimeout,
+		Metadata:       sessionLLMMetadata(state, actor.ID),
 	})
 	if err != nil {
 		cause := fmt.Errorf("unit decision generation failed: %w", err)
 		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
 	}
 
-	var choice unitDecisionChoicePayload
-	if err := json.Unmarshal(result.Output, &choice); err != nil {
+	choice, err := decodeUnitDecisionChoice(result.Output)
+	if err != nil {
 		cause := fmt.Errorf("decode unit decision payload: %w", err)
 		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
 	}
@@ -302,6 +304,62 @@ func confusedUnitDecision(
 	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, errorMessage), nil
 }
 
+func decodeUnitDecisionChoice(raw json.RawMessage) (unitDecisionChoicePayload, error) {
+	var choice unitDecisionChoicePayload
+	normalized, err := preserveNonNullDuplicateJSONFields(raw)
+	if err != nil {
+		return choice, err
+	}
+	if err := json.Unmarshal(normalized, &choice); err != nil {
+		return choice, err
+	}
+	return choice, nil
+}
+
+func preserveNonNullDuplicateJSONFields(raw json.RawMessage) (json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return raw, nil
+	}
+
+	fields := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected object key, got %T", token)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if existing, exists := fields[key]; exists && isJSONNull(value) && !isJSONNull(existing) {
+			continue
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	normalized, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.EqualFold(strings.TrimSpace(string(raw)), "null")
+}
+
 // generateDialogueReply 生成单位对玩家输入的对话回复。
 func (service *Service) generateDialogueReply(
 	ctx context.Context,
@@ -346,6 +404,7 @@ func (service *Service) generateDialogueReply(
 		UserPrompt:     userPrompt,
 		Temperature:    0.75,
 		MaxTokens:      220,
+		Metadata:       sessionLLMMetadata(state, record.ID),
 	})
 	if err != nil {
 		return dialogueReplyPayload{}, result, buildLLMInteraction(state, record.ID, "dialogue", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("dialogue generation failed: %w", err)
@@ -407,6 +466,7 @@ func (service *Service) requestUnitDialogueReply(
 		Temperature:    0.65,
 		MaxTokens:      180,
 		Timeout:        llmRequestTimeout,
+		Metadata:       sessionLLMMetadata(state, target.ID),
 	})
 	if err != nil {
 		payload := fallbackUnitDialogueReplyPayload(target, actorLine)
@@ -503,6 +563,7 @@ func (service *Service) generateUnitReflection(
 		Temperature:    0.7,
 		MaxTokens:      160,
 		Timeout:        llmRequestTimeout,
+		Metadata:       sessionLLMMetadata(state, record.ID),
 	})
 	if err != nil {
 		return unitReflectionPayload{}, result, buildLLMInteraction(state, record.ID, interactionKind, "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("unit reflection generation failed: %w", err)
@@ -560,6 +621,7 @@ func (service *Service) generateDeploymentChoice(
 		Temperature:    0.6,
 		MaxTokens:      260,
 		Timeout:        llmRequestTimeout,
+		Metadata:       sessionLLMMetadata(state, left.ID),
 	})
 	if err != nil {
 		return deploymentChoicePayload{}, result, buildLLMInteraction(state, left.ID, "unit_dialogue", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("deployment choice generation failed: %w", err)
@@ -636,6 +698,7 @@ func (service *Service) generateUpkeepChoice(
 		UserPrompt:     userPrompt,
 		Temperature:    0.55,
 		MaxTokens:      180,
+		Metadata:       sessionLLMMetadata(state, record.ID),
 	})
 	if err != nil {
 		return upkeepChoicePayload{}, result, buildLLMInteraction(state, record.ID, "reflection", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("upkeep choice generation failed: %w", err)
@@ -706,6 +769,7 @@ func (service *Service) generateCombatShakeChoice(
 		Temperature:    0.2,
 		MaxTokens:      96,
 		Timeout:        shakeTimeout,
+		Metadata:       sessionLLMMetadata(state, record.ID),
 	})
 	if err != nil {
 		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("combat shake generation failed: %w", err)
@@ -785,6 +849,18 @@ func buildLLMInteraction(
 	}
 }
 
+func sessionLLMMetadata(state State, unitID string) map[string]string {
+	metadata := map[string]string{
+		"session_id": strings.TrimSpace(state.ID),
+		"turn":       fmt.Sprintf("%d", state.TurnState.Turn),
+		"phase":      string(state.TurnState.Phase),
+	}
+	if trimmedUnitID := strings.TrimSpace(unitID); trimmedUnitID != "" {
+		metadata["unit_id"] = trimmedUnitID
+	}
+	return metadata
+}
+
 // prettyJSON 把 JSON 输出格式化为可读字符串，失败时返回原文。
 func prettyJSON(raw json.RawMessage) string {
 	if len(raw) == 0 {
@@ -819,7 +895,7 @@ func normalizeDecisionChoice(choice unitDecisionChoicePayload) unitDecisionChoic
 	choice.TargetUnitID = strings.TrimSpace(choice.TargetUnitID)
 	choice.NextAction = limitTextRunes(strings.TrimSpace(choice.NextAction), llmNextActionRuneLimit)
 	choice.Speak = strings.TrimSpace(choice.Speak)
-	choice.Memory = limitTextRunes(strings.TrimSpace(choice.Memory), llmMemoryRuneLimit)
+	choice.Memory = strings.TrimSpace(choice.Memory)
 	choice.Knowledge = strings.TrimSpace(choice.Knowledge)
 	choice.Reasoning = strings.TrimSpace(choice.Reasoning)
 	if choice.NextAction == "" {
@@ -841,9 +917,9 @@ func normalizeDecisionChoice(choice unitDecisionChoicePayload) unitDecisionChoic
 	if choice.Memory == "" {
 		switch {
 		case choice.Speak != "":
-			choice.Memory = limitTextRunes(choice.Speak, llmMemoryRuneLimit)
+			choice.Memory = strings.TrimSpace(choice.Speak)
 		case choice.Reasoning != "":
-			choice.Memory = limitTextRunes(choice.Reasoning, llmMemoryRuneLimit)
+			choice.Memory = strings.TrimSpace(choice.Reasoning)
 		}
 	}
 	return choice
@@ -852,9 +928,9 @@ func normalizeDecisionChoice(choice unitDecisionChoicePayload) unitDecisionChoic
 // normalizeReflectionPayload 规范化反思输出长度并补齐缺省字段。
 func normalizeReflectionPayload(payload unitReflectionPayload) unitReflectionPayload {
 	payload.Bubble = limitTextRunes(strings.TrimSpace(payload.Bubble), llmBubbleRuneLimit)
-	payload.Memory = limitTextRunes(strings.TrimSpace(payload.Memory), llmMemoryRuneLimit)
+	payload.Memory = strings.TrimSpace(payload.Memory)
 	if payload.Memory == "" {
-		payload.Memory = limitTextRunes(payload.Bubble, llmMemoryRuneLimit)
+		payload.Memory = strings.TrimSpace(payload.Bubble)
 	}
 	return payload
 }
@@ -872,7 +948,7 @@ func normalizeDecision(decision unitDecisionPayload) unitDecisionPayload {
 	decision.TargetUnitID = strings.TrimSpace(decision.TargetUnitID)
 	decision.NextAction = limitTextRunes(strings.TrimSpace(decision.NextAction), llmNextActionRuneLimit)
 	decision.Speak = strings.TrimSpace(decision.Speak)
-	decision.Memory = limitTextRunes(strings.TrimSpace(decision.Memory), llmMemoryRuneLimit)
+	decision.Memory = strings.TrimSpace(decision.Memory)
 	decision.Knowledge = strings.TrimSpace(decision.Knowledge)
 	decision.Reasoning = strings.TrimSpace(decision.Reasoning)
 	if decision.NextAction == "" {
@@ -894,9 +970,9 @@ func normalizeDecision(decision unitDecisionPayload) unitDecisionPayload {
 	if decision.Memory == "" {
 		switch {
 		case decision.Speak != "":
-			decision.Memory = limitTextRunes(decision.Speak, llmMemoryRuneLimit)
+			decision.Memory = strings.TrimSpace(decision.Speak)
 		case decision.Reasoning != "":
-			decision.Memory = limitTextRunes(decision.Reasoning, llmMemoryRuneLimit)
+			decision.Memory = strings.TrimSpace(decision.Reasoning)
 		}
 	}
 	return decision
@@ -947,6 +1023,8 @@ func buildUnitDecisionSchema(candidates []decisionCandidate) []byte {
 	}
 	sort.Strings(actions)
 
+	nullableString := []string{"string", "null"}
+	nullableInteger := []string{"integer", "null"}
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -954,35 +1032,34 @@ func buildUnitDecisionSchema(candidates []decisionCandidate) []byte {
 				"type": "string",
 				"enum": actions,
 			},
-			"activity":       map[string]any{"type": "string"},
-			"skill_id":       map[string]any{"type": "string"},
-			"trade_kind":     map[string]any{"type": "string"},
-			"item_id":        map[string]any{"type": "string"},
-			"item_name":      map[string]any{"type": "string"},
-			"other_item_id":  map[string]any{"type": "string"},
-			"price":          map[string]any{"type": "integer"},
-			"gold_amount":    map[string]any{"type": "integer"},
-			"ground_loot_id": map[string]any{"type": "string"},
-			"structure_id":   map[string]any{"type": "string"},
-			"structure_type": map[string]any{"type": "string"},
-			"target_unit_id": map[string]any{"type": "string"},
-			"target_q":       map[string]any{"type": "integer"},
-			"target_r":       map[string]any{"type": "integer"},
+			"activity":       map[string]any{"type": nullableString},
+			"skill_id":       map[string]any{"type": nullableString},
+			"trade_kind":     map[string]any{"type": nullableString},
+			"item_id":        map[string]any{"type": nullableString},
+			"item_name":      map[string]any{"type": nullableString},
+			"other_item_id":  map[string]any{"type": nullableString},
+			"price":          map[string]any{"type": nullableInteger},
+			"gold_amount":    map[string]any{"type": nullableInteger},
+			"ground_loot_id": map[string]any{"type": nullableString},
+			"structure_id":   map[string]any{"type": nullableString},
+			"structure_type": map[string]any{"type": nullableString},
+			"target_unit_id": map[string]any{"type": nullableString},
+			"target_q":       map[string]any{"type": nullableInteger},
+			"target_r":       map[string]any{"type": nullableInteger},
 			"next_action": map[string]any{
 				"type":      "string",
 				"minLength": 1,
 				"maxLength": llmNextActionRuneLimit,
 			},
 			"speak": map[string]any{
-				"type": "string",
+				"type": nullableString,
 			},
 			"memory": map[string]any{
 				"type":      "string",
 				"minLength": 1,
-				"maxLength": llmMemoryRuneLimit,
 			},
 			"knowledge": map[string]any{
-				"type": "string",
+				"type": nullableString,
 			},
 			"reasoning": map[string]any{
 				"type":      "string",
@@ -1011,7 +1088,7 @@ func buildUnitDecisionSchema(candidates []decisionCandidate) []byte {
 
 	encoded, err := json.Marshal(schema)
 	if err != nil {
-		return []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["hold"]},"next_action":{"type":"string","minLength":1,"maxLength":12},"speak":{"type":"string"},"memory":{"type":"string","minLength":1,"maxLength":60},"knowledge":{"type":"string"},"reasoning":{"type":"string","minLength":1}},"required":["action","next_action","memory","reasoning"],"additionalProperties":false}`)
+		return []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["hold"]},"next_action":{"type":"string","minLength":1,"maxLength":12},"speak":{"type":"string"},"memory":{"type":"string","minLength":1},"knowledge":{"type":"string"},"reasoning":{"type":"string","minLength":1}},"required":["action","next_action","memory","reasoning"],"additionalProperties":false}`)
 	}
 	return encoded
 }
@@ -1560,7 +1637,7 @@ func unitDecisionSystemPrompt(actor *unit.Record) string {
 }
 
 func sharedAIDecisionPrinciplesPrompt() string {
-	return "你不是玩家，你是一名有独立人格、记忆和风险判断的 AI 单位。所有实际操作都由单位自己执行，包括吃饭、吃药、交谈、交易、采集、建造与战斗；指挥官只会给自然语言方针，或在部署阶段和单位说话。请综合人设、性格、记忆、关系、当前状态、周围环境和最新方针，决定本执行阶段要做的一件事。方针很重要，是理解阵营意图的强信号，但不是遥控指令；单位仍要结合自己的性格、亲疏记忆、附近威胁、资源和生存风险做判断。也可以在输出里自行总结新发现的世界规律。探索原则：单位是独立个体，有自己的意识和好奇心；在不违背生存与当前关键目标的前提下，要主动尝试不同可能性，探索这个世界、每一种地形、每一段人际关系、每一个候选动作带来的结果；探索、生存和关键任务稳定后，可以尽量发展伴侣关系、结婚叙事并共同养育孩子。若上下文明确标注 defiant=true，可优先保命或按自身判断行动。生存规则：饥饿度降到 0 会直接死亡；饥饿度高于 80 时每回合自动恢复 3 HP；如果饥饿度低于 30 且候选里有吃口粮，吃口粮是最高优先级生存动作，低于 10 时必须先吃；如果没有口粮且饥饿偏低，要主动寻找食物来源，优先采集、打猎、钓鱼、靠近可产粮地形、向相邻单位交易或索要口粮，不要原地空耗到饿死；受伤时可以选择合法治疗药剂候选恢复 HP。输出时必须先看候选动作和合法 JSON 字段示例，action 与参数只能从候选里复制，坐标和单位 ID 不要自行推断；move 必须同时复制同一行合法候选里的 target_q 和 target_r，不能只填一个坐标或把不同行坐标拼在一起。"
+	return "你不是玩家，你是一名有独立人格、记忆和风险判断的 AI 单位。所有实际操作都由单位自己执行，包括吃饭、吃药、交谈、交易、采集、建造与战斗；指挥官只会给自然语言方针，或在部署阶段和单位说话。请综合人设、性格、记忆、关系、当前状态、周围环境和最新方针，决定本执行阶段要做的一件事。方针很重要，是理解阵营意图的强信号，但不是遥控指令；单位仍要结合自己的性格、亲疏记忆、附近威胁、资源和生存风险做判断。也可以在输出里自行总结新发现的世界规律。探索原则：单位是独立个体，有自己的意识和好奇心；在不违背生存与当前关键目标的前提下，要主动尝试不同可能性，探索这个世界、每一种地形、每一段人际关系、每一个候选动作带来的结果；探索、生存和关键任务稳定后，可以尽量发展伴侣关系、结婚叙事并共同养育孩子。若上下文明确标注 defiant=true，可优先保命或按自身判断行动。生存规则：饥饿度降到 0 会直接死亡；饥饿度高于 80 时每回合自动恢复 3 HP；如果饥饿度低于 30 且候选里有吃口粮，吃口粮是最高优先级生存动作，低于 10 时必须先吃；如果没有口粮且饥饿偏低，要主动寻找食物来源，优先采集、打猎、钓鱼、靠近可产粮地形、向相邻单位交易或索要口粮，不要原地空耗到饿死；受伤时可以选择合法治疗药剂候选恢复 HP。移动占位规则：一个格子只能站一个单位；某个格子已经有人/单位了，就不能 move 去那个格子。输出时必须先看候选动作、可到达坐标和参数填写规则；action 与参数只能从候选里填写，坐标和单位 ID 不要自行推断。move 必须同时复制同一行合法候选里的 target_q 和 target_r，不能只填一个坐标或把不同行坐标拼在一起；任何单位所在格都不是可移动目标，想找某个相邻单位时应选择 dialogue/say/trade/assist，而不是 move 到对方坐标。"
 }
 
 // dialogueSystemPrompt 生成单位对话的 system prompt。
@@ -1606,6 +1683,9 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
 	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
 	fmt.Fprintf(&builder, "你本次可用 AP: %d\n", remainingAP)
+	if movePairs := formatLegalMovePairsForCorrection(candidates); movePairs != "" {
+		fmt.Fprintf(&builder, "MOVE 坐标白名单: %s。一个格子只能站一个单位；某个格子已经有人/单位了，就不能 move 去那个格子。只有选择 action=move 时才填写 target_q/target_r，且只能整对使用白名单中的空地坐标；不要填任何单位所在坐标。\n", movePairs)
+	}
 	fmt.Fprintf(&builder, "你所属阵营: %s\n", actor.FactionID)
 	fmt.Fprintf(&builder, "当前抗命标记(defiant): %t\n", defiant)
 	fmt.Fprintf(&builder, "阵营自然语言方针上下文: %s\n", directiveForUnit(state, actor.ID, actor.FactionID))
@@ -1651,6 +1731,7 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
 	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
 	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "视野内单位动向:\n%s\n", summarizeVisibleUnitActivityForPrompt(state, byID, actor, 10, 8))
 	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, actor, 6))
 	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, actor.ID, state.TurnState.Turn, 6))
 	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 6))
@@ -1661,19 +1742,20 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "本回合可到达地块与可执行事项:\n%s\n", formatMoveOptions(state, actor, reachableMoves))
 	fmt.Fprintf(&builder, "候选动作解释:\n%s\n", formatDecisionActionExplanations(candidates))
 	fmt.Fprintf(&builder, "候选动作列表:\n%s\n", formatDecisionCandidates(candidates, byID))
-	fmt.Fprintf(&builder, "可直接照抄的合法候选 JSON 字段:\n%s\n", formatConcreteDecisionCandidateChoices(candidates, byID))
+	fmt.Fprintf(&builder, "参数填写规则:\n%s\n", formatDecisionParameterGuide(candidates, byID))
 	fmt.Fprintf(&builder, "本轮选择提示:\n%s\n", formatDecisionSelectionHint(state, byID, actor, targetIDs, remainingAP, candidates))
 	fmt.Fprintln(&builder, "决策流程:")
 	fmt.Fprintln(&builder, "1. 先确认本轮真正能执行什么：只能从候选动作列表里选一个 action；环境、视野、可到达地块、脚下机会都只是参考，不是候选就不能选。")
 	fmt.Fprintln(&builder, "2. 再理解方针：方针可能同时给多人分配不同任务。若有明确归属，按与你相关的部分理解；若无明确归属，按全局方向结合你的性格、记忆、关系和局势判断。")
 	fmt.Fprintln(&builder, "3. 然后按风险排序：饥饿/濒死/贴身威胁优先；其次落实与你相关且当前可执行的方针；再考虑关系、交易、装备、建设、探索。")
-	fmt.Fprintln(&builder, "4. 最后填 JSON：优先从“可直接照抄的合法候选 JSON 字段”复制同一行 action 和参数，只自行填写 next_action、speak、memory、reasoning、knowledge。")
+	fmt.Fprintln(&builder, "4. 最后填 JSON：先选一个候选动作类型，再根据周围单位、背包物品、脚下地块和参数填写规则自行填写必要参数；不要编造不存在的单位、物品、坐标或设施。")
 	fmt.Fprintln(&builder, "动作合法性:")
-	fmt.Fprintln(&builder, "1. move 只能移动到本回合可到达列表里的相邻合法地块；target_q/target_r 必须来自同一行合法候选 JSON，必须整对复制，不能只看 q 后自行补 r，不能把两个不同行的坐标拆开重组，不要填当前位置、单位坐标、敌人坐标、友军坐标或视野地形坐标。")
+	fmt.Fprintln(&builder, "1. 一个格子只能站一个单位；某个格子已经有人/单位了，就不能 move 去那个格子。move 只能移动到本回合可到达列表里的相邻合法空地；target_q/target_r 必须来自同一行合法坐标，必须整对填写，不能只看 q 后自行补 r，不能把两个不同行的坐标拆开重组，不要填当前位置、单位坐标、敌人坐标、友军坐标或视野地形坐标。")
 	fmt.Fprintln(&builder, "2. 如果方针或目标需要前往某个地块（例如山地挖矿、废墟/山地建铁匠铺、森林采木、靠近交易对象），但该目标地块不在本回合可到达列表里，不要直接填写那个远处坐标；应从合法 move 候选中选择最能靠近目标的一格，先接近，后续回合再继续移动或执行 gather/build/forge/upgrade。")
-	fmt.Fprintln(&builder, "3. attack/charge/heavy_attack/skill/trade/assist/dialogue/say 的 target_unit_id 必须使用候选中的合法单位 ID；UUID 不要截断，不能用坐标、阵营名或模糊称呼代替。")
-	fmt.Fprintln(&builder, "4. build/gather/forge/upgrade/equip/eat/pickup/demolish 的 structure_type/activity/item_id/ground_loot_id/structure_id 必须来自候选或候选说明。")
-	fmt.Fprintln(&builder, "5. 每次只执行一个动作；不要在一个 JSON 里表达移动后再交易、移动后再攻击、采集后再建造。")
+	fmt.Fprintln(&builder, "3. 如果目标是某个单位且已经在可交谈/相邻范围内，优先选择 dialogue/say/trade/assist 等单位交互；不要为了“靠近他/她”而 move 到该单位所在坐标，因为一个地块只能有一个单位。")
+	fmt.Fprintln(&builder, "4. attack/charge/heavy_attack/skill/trade/assist/dialogue/say 的 target_unit_id 必须使用候选中的合法单位 ID；UUID 不要截断，不能用坐标、阵营名或模糊称呼代替。")
+	fmt.Fprintln(&builder, "5. build/gather/forge/upgrade/equip/eat/pickup/demolish 的 structure_type/activity/item_id/ground_loot_id/structure_id 必须来自候选或候选说明。")
+	fmt.Fprintln(&builder, "6. 每次只执行一个动作；不要在一个 JSON 里表达移动后再交易、移动后再攻击、采集后再建造。")
 	fmt.Fprintln(&builder, "行动取舍:")
 	fmt.Fprintln(&builder, "1. 生存：饥饿度低于 10 且有 eat:ration 必须先吃；低于 30 且有 eat:ration 时优先吃。若没有口粮但饥饿偏低，要优先找吃的：候选里有 gather/hunt/forage/fish 就采集食物，有 trade/dialogue/say 就向相邻单位交易或求口粮，有 move 就朝森林、河谷、村庄、城市、农田或可采集地块移动。受伤且有治疗药剂时，可选择治疗。")
 	fmt.Fprintln(&builder, "2. 方针：defiant=false 时方针是强信号，但不是遥控；能落实且不违背生存、人格、关键记忆、关系和现场风险的候选应优先。defiant=true 时可优先保命或按自身判断。")
@@ -1692,8 +1774,9 @@ func buildDecisionPrompt(
 	fmt.Fprintln(&builder, "5. AP 规则：gather/build/forge/upgrade 都需要 2 AP；equip 需要 1 AP。若你本次只有 1 AP，脚下又是关键材料点或合法建造点，不要随便离开，优先 hold/defend/observe 等待下次 2 AP 再采集、建造、锻造或强化。")
 	fmt.Fprintln(&builder, "输出字段:")
 	fmt.Fprintln(&builder, "1. action 必填；候选参数里出现的 target_unit_id、target_q、target_r、skill_id、activity、structure_type、item_id、trade_kind、gold_amount、price、ground_loot_id 等字段也要一并填写。")
-	fmt.Fprintf(&builder, "2. next_action 必填，最多 12 个字；speak 也必填，建议小于 %d 个字，要像你本人临场脱口而出；选择 say 时 speak 应写实际台词；memory 必填，最多 60 个字，要记录具体事实。\n", llmSpeakPromptLimit)
-	fmt.Fprintln(&builder, "3. reasoning 必填，用一句话说明本次判断受哪些因素影响，例如方针、地形、饥饿、设施、记忆、关系或威胁。knowledge 可选；没学到新规律就留空。")
+	fmt.Fprintf(&builder, "2. next_action 必填，最多 12 个字；speak 必须填写且不能为空，建议小于 %d 个字，要像你本人临场脱口而出。即使选择 hold/defend/observe/move/gather/build/upgrade 等非说话动作，也要写一句短促自语或对身边人的话；选择 say/dialogue 时 speak 应写实际台词。memory 必填，要记录具体事实。\n", llmSpeakPromptLimit)
+	fmt.Fprintln(&builder, "3. 禁止把 speak 留空、写空字符串或省略 speak 字段；如果一时无话可说，也要用角色口吻写一句短句，例如“先稳住”“我去看看”“别急”。")
+	fmt.Fprintln(&builder, "4. reasoning 必填，用一句话说明本次判断受哪些因素影响，例如方针、地形、饥饿、设施、记忆、关系或威胁。knowledge 可选；没学到新规律就留空。")
 
 	return builder.String()
 }
@@ -1743,6 +1826,7 @@ func buildDialoguePrompt(
 	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
 	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
 	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "视野内单位动向:\n%s\n", summarizeVisibleUnitActivityForPrompt(state, byID, &record, 10, 8))
 	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, &record, 6))
 	fmt.Fprintf(&builder, "周围态势:\n%s\n", summarizeFaction(state, byID, &record, opposingIDs(state, record.FactionID)))
 	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, record.ID, state.TurnState.Turn, 8))
@@ -1811,6 +1895,7 @@ func buildUnitDialogueReplyPrompt(
 	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
 	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
 	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "视野内单位动向:\n%s\n", summarizeVisibleUnitActivityForPrompt(state, byID, target, 10, 8))
 	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, target, 6))
 	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, target.ID, state.TurnState.Turn, 8))
 	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 6))
@@ -1995,7 +2080,7 @@ func describeUnit(record unit.Record, perspective *unit.Record) string {
 	}
 
 	description := fmt.Sprintf(
-		"名称=%s[%s] HP=%d ATK=%d DEF=%d MOV=%d 坐标=%d,%d 状态=%s 背包=%s 装备=%s",
+		"名称=%s[%s] HP=%d （最高100）ATK=%d DEF=%d MOV=%d 坐标=%d,%d 状态=%s 背包=%s 装备=%s",
 		record.DisplayName(),
 		record.FactionID,
 		record.Status.HP,
@@ -2484,23 +2569,22 @@ func formatDecisionCandidates(candidates []decisionCandidate, byID map[string]*u
 		if apCost <= 0 {
 			apCost = decisionActionCost(candidate.Action)
 		}
-		params := formatDecisionCandidateParamSlots(candidate)
-		key := fmt.Sprintf("%s{%s}:ap=%d", candidate.Action, params, apCost)
+		key := fmt.Sprintf("%s:ap=%d", candidate.Action, apCost)
 		index, exists := groupIndex[key]
 		if !exists {
 			groupIndex[key] = len(groups)
 			groups = append(groups, decisionCandidatePromptGroup{
 				Action: candidate.Action,
-				Params: params,
 				APCost: apCost,
 			})
 			index = len(groups) - 1
 		}
 		groups[index].Summaries = appendUniqueText(groups[index].Summaries, summary)
-		groups[index].Domains = appendUniqueText(groups[index].Domains, formatDecisionCandidateDomain(candidate, byID))
+		groups[index].Candidates = append(groups[index].Candidates, candidate)
 	}
 	lines := make([]string, 0, len(groups))
 	for _, group := range groups {
+		params := formatDecisionActionParamSlots(group.Action, group.Candidates)
 		detailParts := make([]string, 0, 3)
 		if len(group.Summaries) > 0 {
 			detailParts = append(detailParts, strings.Join(trimSentenceEnds(limitStringSlice(group.Summaries, 3)), "；"))
@@ -2513,57 +2597,270 @@ func formatDecisionCandidates(candidates []decisionCandidate, byID map[string]*u
 				detailParts = append(detailParts, "合法 move 坐标对："+movePairs)
 			}
 		}
-		if len(group.Domains) > 0 {
-			detailParts = append(detailParts, "可填参数："+strings.Join(limitStringSlice(group.Domains, 8), "；"))
-			if len(group.Domains) > 8 {
-				detailParts = append(detailParts, fmt.Sprintf("另有%d组参数可选，见下方合法候选 JSON 字段", len(group.Domains)-8))
-			}
-		}
 		if rule := decisionCandidateGroupRule(group.Action); rule != "" {
 			detailParts = append(detailParts, "规则："+rule)
 		}
 		if len(detailParts) == 0 {
 			detailParts = append(detailParts, "按动作解释和参数槽位填写")
 		}
-		lines = append(lines, fmt.Sprintf("- %s{%s}: AP=%d // %s。", group.Action, group.Params, group.APCost, strings.Join(detailParts, "；")))
+		lines = append(lines, fmt.Sprintf("- %s{%s}: AP=%d // %s。", group.Action, params, group.APCost, strings.Join(detailParts, "；")))
 	}
 	return strings.Join(lines, "\n")
 }
 
 type decisionCandidatePromptGroup struct {
-	Action    DecisionAction
-	Params    string
-	APCost    int
-	Summaries []string
-	Domains   []string
+	Action     DecisionAction
+	APCost     int
+	Summaries  []string
+	Candidates []decisionCandidate
 }
 
-func formatConcreteDecisionCandidateChoices(candidates []decisionCandidate, byID map[string]*unit.Record) string {
+func formatDecisionParameterGuide(candidates []decisionCandidate, byID map[string]*unit.Record) string {
 	if len(candidates) == 0 {
 		return "无"
 	}
-	lines := make([]string, 0, len(candidates))
-	seen := map[string]struct{}{}
+	byAction := make(map[DecisionAction][]decisionCandidate)
 	for _, candidate := range candidates {
-		fields := formatRecommendedJSONFields(candidate)
-		if fields == "" {
-			continue
+		byAction[candidate.Action] = append(byAction[candidate.Action], candidate)
+	}
+	actions := make([]string, 0, len(byAction))
+	for action := range byAction {
+		actions = append(actions, string(action))
+	}
+	sort.Strings(actions)
+
+	lines := make([]string, 0, len(actions))
+	for _, actionText := range actions {
+		action := DecisionAction(actionText)
+		actionCandidates := byAction[action]
+		switch action {
+		case DecisionActionTrade:
+			lines = append(lines, fmt.Sprintf("- trade：target_unit_id 从相邻交易对象中选择（%s）；trade_kind 只能为 gift/gold/sell；gift/sell 的 item_id 从自己背包物品中选（%s）；gold_amount 必须为正且不超过钱包/候选上限（%s）；sell 的 price 必须为正且对方买得起。", summarizeCandidateTargets(actionCandidates, byID), summarizeCandidateItems(actionCandidates), summarizeCandidateGoldRange(actionCandidates)))
+		case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+			lines = append(lines, fmt.Sprintf("- %s：target_unit_id 从可交互单位中选择（%s），可写完整单位ID或准确姓名；目标必须满足视野/相邻/关系规则。", action, summarizeCandidateTargets(actionCandidates, byID)))
+		case DecisionActionMove:
+			lines = append(lines, fmt.Sprintf("- move：target_q 和 target_r 必须来自“本回合可到达地块与可执行事项”里的同一行坐标（%s），不能填写当前坐标、单位坐标或视野列表里的远处坐标。", summarizeCandidateMovePairs(actionCandidates)))
+		case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+			lines = append(lines, fmt.Sprintf("- %s：攻击单位时填写 target_unit_id（%s），攻击设施时填写 structure_id（%s）；目标必须在当前攻击距离内。", action, summarizeCandidateTargets(actionCandidates, byID), summarizeCandidateStructures(actionCandidates)))
+		case DecisionActionSkill:
+			lines = append(lines, fmt.Sprintf("- skill：skill_id 从当前可用技能中选择（%s）；技能需要目标时再填写合法 target_unit_id（%s）。", summarizeCandidateSkills(actionCandidates), summarizeCandidateTargets(actionCandidates, byID)))
+		case DecisionActionGather:
+			lines = append(lines, fmt.Sprintf("- gather：activity 从脚下地块实际支持的采集/生产类型中选择（%s）。", summarizeCandidateActivities(actionCandidates)))
+		case DecisionActionBuild:
+			lines = append(lines, fmt.Sprintf("- build：structure_type 从脚下地块、材料和当前建筑状态允许建设的设施中选择（%s）。", summarizeCandidateStructureTypes(actionCandidates)))
+		case DecisionActionForge:
+			lines = append(lines, fmt.Sprintf("- forge：item_id 从当前铁匠铺和材料允许锻造的装备中选择（%s）。", summarizeCandidateItems(actionCandidates)))
+		case DecisionActionUpgrade:
+			lines = append(lines, fmt.Sprintf("- upgrade：item_id 从当前铁匠铺、材料和背包装备允许强化的物品中选择（%s）。", summarizeCandidateItems(actionCandidates)))
+		case DecisionActionEquip:
+			lines = append(lines, fmt.Sprintf("- equip：item_id 从自己背包中可装备物品里选择（%s）。", summarizeCandidateItems(actionCandidates)))
+		case DecisionActionEat:
+			lines = append(lines, fmt.Sprintf("- eat：item_id 从自己背包中可食用食物或药剂里选择（%s）。", summarizeCandidateItems(actionCandidates)))
+		case DecisionActionPickup:
+			lines = append(lines, fmt.Sprintf("- pickup：ground_loot_id 可留空或填写脚下仍存在的掉落物ID（%s）。", summarizeCandidateGroundLoot(actionCandidates)))
+		case DecisionActionDemolish:
+			lines = append(lines, fmt.Sprintf("- demolish：structure_id 可留空或填写脚下友方设施ID（%s）。", summarizeCandidateStructures(actionCandidates)))
+		default:
+			if len(actionCandidates) > 0 {
+				lines = append(lines, fmt.Sprintf("- %s：该动作不需要额外结构化参数，只填写 action、next_action、speak、memory、reasoning。", action))
+			}
 		}
-		key := string(candidate.Action) + ":" + fields
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		summary := strings.TrimRight(strings.TrimSpace(decisionCandidatePromptSummary(candidate, byID)), "。")
-		if summary == "" {
-			summary = "照抄该行字段即可"
-		}
-		lines = append(lines, fmt.Sprintf("- %s // %s。", fields, summary))
 	}
 	if len(lines) == 0 {
 		return "无"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatDecisionActionParamSlots(action DecisionAction, candidates []decisionCandidate) string {
+	has := func(check func(decisionCandidate) bool) bool {
+		for _, candidate := range candidates {
+			if check(candidate) {
+				return true
+			}
+		}
+		return false
+	}
+	params := make([]string, 0, 6)
+	appendParam := func(key string, slot string) {
+		params = append(params, fmt.Sprintf("%s=<%s>", key, slot))
+	}
+	switch action {
+	case DecisionActionMove:
+		appendParam("target_q", "合法相邻坐标q")
+		appendParam("target_r", "同一坐标行的r")
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		if has(func(candidate decisionCandidate) bool { return candidate.TargetUnitID != "" }) {
+			appendParam("target_unit_id", "可攻击单位ID或姓名")
+		}
+		if has(func(candidate decisionCandidate) bool { return candidate.StructureID != "" }) {
+			appendParam("structure_id", "可攻击设施ID")
+		}
+	case DecisionActionSkill:
+		appendParam("skill_id", "可用技能ID")
+		if has(func(candidate decisionCandidate) bool { return candidate.TargetUnitID != "" }) {
+			appendParam("target_unit_id", "技能合法目标")
+		}
+	case DecisionActionGather:
+		appendParam("activity", "脚下可采集类型")
+	case DecisionActionBuild:
+		appendParam("structure_type", "脚下可建设施")
+	case DecisionActionTrade:
+		appendParam("trade_kind", "gift|gold|sell")
+		appendParam("target_unit_id", "相邻交易对象")
+		if has(func(candidate decisionCandidate) bool { return candidate.ItemID != "" }) {
+			appendParam("item_id", "背包物品ID或名称")
+		}
+		if has(func(candidate decisionCandidate) bool { return candidate.GoldAmount > 0 }) {
+			appendParam("gold_amount", "正整数金币")
+		}
+		if has(func(candidate decisionCandidate) bool { return candidate.Price > 0 }) {
+			appendParam("price", "正整数售价")
+		}
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		appendParam("target_unit_id", "可交互单位ID或姓名")
+	case DecisionActionForge:
+		appendParam("item_id", "可锻造装备ID或名称")
+	case DecisionActionUpgrade:
+		appendParam("item_id", "可强化装备ID或名称")
+	case DecisionActionEquip:
+		appendParam("item_id", "背包装备ID或名称")
+	case DecisionActionEat:
+		appendParam("item_id", "食物或药剂ID或名称")
+	case DecisionActionPickup:
+		if has(func(candidate decisionCandidate) bool { return candidate.GroundLootID != "" }) {
+			appendParam("ground_loot_id", "脚下掉落物ID")
+		}
+	case DecisionActionDemolish:
+		if has(func(candidate decisionCandidate) bool { return candidate.StructureID != "" }) {
+			appendParam("structure_id", "脚下友方设施ID")
+		}
+	}
+	if len(params) == 0 {
+		return "无"
+	}
+	return strings.Join(params, ", ")
+}
+
+func summarizeCandidateTargets(candidates []decisionCandidate, byID map[string]*unit.Record) string {
+	values := make([]string, 0, 4)
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.TargetUnitID) == "" {
+			continue
+		}
+		label := candidate.TargetUnitID
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			label = fmt.Sprintf("%s=%s", target.DisplayName(), target.ID)
+		}
+		values = appendUniqueText(values, label)
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateItems(candidates []decisionCandidate) string {
+	values := make([]string, 0, 6)
+	for _, candidate := range candidates {
+		itemID := strings.TrimSpace(candidate.ItemID)
+		if itemID == "" {
+			continue
+		}
+		values = appendUniqueText(values, fmt.Sprintf("%s=%s", displayItemName(itemID), itemID))
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateGoldRange(candidates []decisionCandidate) string {
+	maxAmount := 0
+	for _, candidate := range candidates {
+		if candidate.GoldAmount > maxAmount {
+			maxAmount = candidate.GoldAmount
+		}
+	}
+	if maxAmount <= 0 {
+		return "无"
+	}
+	return fmt.Sprintf("1..%d", maxAmount)
+}
+
+func summarizeCandidateMovePairs(candidates []decisionCandidate) string {
+	values := make([]string, 0, 6)
+	for _, candidate := range candidates {
+		if candidate.Action != DecisionActionMove {
+			continue
+		}
+		values = appendUniqueText(values, fmt.Sprintf("%d,%d", candidate.TargetQ, candidate.TargetR))
+	}
+	sort.Strings(values)
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateStructures(candidates []decisionCandidate) string {
+	values := make([]string, 0, 4)
+	for _, candidate := range candidates {
+		structureID := strings.TrimSpace(candidate.StructureID)
+		if structureID == "" {
+			continue
+		}
+		values = appendUniqueText(values, structureID)
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateSkills(candidates []decisionCandidate) string {
+	values := make([]string, 0, 3)
+	for _, candidate := range candidates {
+		skillID := strings.TrimSpace(candidate.SkillID)
+		if skillID == "" {
+			continue
+		}
+		values = appendUniqueText(values, skillID)
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateActivities(candidates []decisionCandidate) string {
+	values := make([]string, 0, 4)
+	for _, candidate := range candidates {
+		if candidate.Activity == "" {
+			continue
+		}
+		values = appendUniqueText(values, fmt.Sprintf("%s=%s", productionActivityDisplayName(candidate.Activity), candidate.Activity))
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateStructureTypes(candidates []decisionCandidate) string {
+	values := make([]string, 0, 4)
+	for _, candidate := range candidates {
+		if candidate.StructureType == "" {
+			continue
+		}
+		values = appendUniqueText(values, fmt.Sprintf("%s=%s", structureDisplayName(candidate.StructureType), candidate.StructureType))
+	}
+	return summarizeCandidateValues(values, "无")
+}
+
+func summarizeCandidateGroundLoot(candidates []decisionCandidate) string {
+	values := make([]string, 0, 4)
+	for _, candidate := range candidates {
+		lootID := strings.TrimSpace(candidate.GroundLootID)
+		if lootID == "" {
+			continue
+		}
+		values = appendUniqueText(values, lootID)
+	}
+	return summarizeCandidateValues(values, "可留空")
+}
+
+func summarizeCandidateValues(values []string, empty string) string {
+	if len(values) == 0 {
+		return empty
+	}
+	limit := 8
+	if len(values) <= limit {
+		return strings.Join(values, "；")
+	}
+	return strings.Join(values[:limit], "；") + fmt.Sprintf("；另有%d项", len(values)-limit)
 }
 
 func appendUniqueText(values []string, value string) []string {
@@ -2939,12 +3236,12 @@ func formatDecisionSelectionHint(
 ) string {
 	lines := make([]string, 0, 4)
 	if movePairs := formatLegalMovePairsForCorrection(candidates); movePairs != "" {
-		lines = append(lines, fmt.Sprintf("若选择 move，target_q/target_r 只能使用这些完整坐标对之一：%s。必须从同一行候选 JSON 整对复制，不能只复制 target_q 后自行猜 target_r；不要填当前位置、敌人坐标、友军坐标或“视野范围内的地形”坐标。", movePairs))
+		lines = append(lines, fmt.Sprintf("若选择 move，target_q/target_r 只能使用这些完整坐标对之一：%s。必须整对填写，不能只复制 target_q 后自行猜 target_r；不要填当前位置、敌人坐标、友军坐标或“视野范围内的地形”坐标。", movePairs))
 	}
 	if recommended, ok := recommendedDecisionCandidate(state, byID, actor, targetIDs, remainingAP, candidates); ok {
 		lines = append(lines, fmt.Sprintf("建议优先考虑：%s。", formatRecommendedCandidate(recommended, byID)))
 		lines = append(lines, fmt.Sprintf("若采纳建议，JSON 参数照这样填：%s。", formatRecommendedJSONFields(recommended)))
-		lines = append(lines, "建议不是强制；如果你的性格、记忆、关系或现场风险支持别的选择，也必须从候选动作列表里选，并填写该候选要求的合法参数。")
+		lines = append(lines, "建议不是强制；如果你的性格、记忆、关系或现场风险支持别的选择，也必须从候选动作类型里选，并按参数填写规则填写合法参数。")
 	}
 	if len(lines) == 0 {
 		return "没有额外提示；按候选动作列表选择。"

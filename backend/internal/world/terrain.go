@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // TerrainID 类型定义用于统一该模块的数据表达。
@@ -203,9 +205,7 @@ func SeedTerrainCatalog(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("marshal special rules for %s: %w", terrain.ID, err)
 		}
 
-		if _, err := tx.ExecContext(
-			ctx,
-			`
+		query := `
 			INSERT INTO terrain_types (
 				id,
 				display_name,
@@ -224,7 +224,32 @@ func SeedTerrainCatalog(ctx context.Context, db *sql.DB) error {
 				activities_json = excluded.activities_json,
 				resources_json = excluded.resources_json,
 				special_rules_json = excluded.special_rules_json
-			`,
+			`
+		if dbdialect.IsMySQL(db) {
+			query = `
+			INSERT INTO terrain_types (
+				id,
+				display_name,
+				move_cost,
+				vision_range,
+				combat_rules_json,
+				activities_json,
+				resources_json,
+				special_rules_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				display_name = VALUES(display_name),
+				move_cost = VALUES(move_cost),
+				vision_range = VALUES(vision_range),
+				combat_rules_json = VALUES(combat_rules_json),
+				activities_json = VALUES(activities_json),
+				resources_json = VALUES(resources_json),
+				special_rules_json = VALUES(special_rules_json)
+			`
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			query,
 			string(terrain.ID),
 			terrain.DisplayName,
 			terrain.MoveCost,
@@ -247,6 +272,10 @@ func SeedTerrainCatalog(ctx context.Context, db *sql.DB) error {
 
 // LoadTerrainCatalog 从数据库读取地形配置列表。
 func LoadTerrainCatalog(ctx context.Context, db *sql.DB) ([]TerrainDefinition, error) {
+	orderBy := "rowid"
+	if dbdialect.IsMySQL(db) {
+		orderBy = "id"
+	}
 	rows, err := db.QueryContext(
 		ctx,
 		`
@@ -260,8 +289,7 @@ func LoadTerrainCatalog(ctx context.Context, db *sql.DB) ([]TerrainDefinition, e
 			resources_json,
 			special_rules_json
 		FROM terrain_types
-		ORDER BY rowid
-		`,
+		ORDER BY `+orderBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query terrain catalog: %w", err)

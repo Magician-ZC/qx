@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="游掠者角色图标">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="16" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#c66b57"/>
+      <stop offset="1" stop-color="#6f2d2c"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 8 114 36v56l-50 28-50-28V36Z" fill="url(#bg)" stroke="#281817" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M39 99c4-20 15-32 25-32s21 12 25 32" fill="#9b6f4d" stroke="#281817" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="64" cy="50" r="20" fill="#d7a378" stroke="#281817" stroke-width="5"/>
+  <path d="M42 46c7-24 34-26 45 0-15-9-31-8-45 0Z" fill="#2d2722" stroke="#281817" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M47 78h34l8 25H39Z" fill="#5e2f2d" stroke="#281817" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M29 34l31 31m-31 0 31-31" stroke="#e6d1b4" stroke-width="6" stroke-linecap="round"/>
+  <path d="M86 34l13 13-38 38-13-13Z" fill="#d9dde1" stroke="#281817" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M49 56h30" stroke="#281817" stroke-width="5" stroke-linecap="round"/>
+  <path d="M51 56h.1M77 56h.1" stroke="#f5d0a2" stroke-width="4" stroke-linecap="round"/>
+</svg>

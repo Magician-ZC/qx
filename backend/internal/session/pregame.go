@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -97,11 +98,19 @@ func (service *Service) ensureOpeningCandidateCacheTable(ctx context.Context) er
 	if service == nil || service.db == nil {
 		return nil
 	}
-	_, err := service.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS opening_candidate_cache (
+	query := `CREATE TABLE IF NOT EXISTS opening_candidate_cache (
 		cache_key TEXT PRIMARY KEY,
 		payload TEXT NOT NULL,
 		updated_at_unix INTEGER NOT NULL
-	)`)
+	)`
+	if dbdialect.IsMySQL(service.db) {
+		query = `CREATE TABLE IF NOT EXISTS opening_candidate_cache (
+			cache_key VARCHAR(191) PRIMARY KEY,
+			payload LONGTEXT NOT NULL,
+			updated_at_unix BIGINT NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	}
+	_, err := service.db.ExecContext(ctx, query)
 	return err
 }
 
@@ -142,9 +151,15 @@ func (service *Service) saveOpeningCandidateCache(ctx context.Context, seed int6
 	if err != nil {
 		return err
 	}
-	_, err = service.db.ExecContext(ctx, `INSERT INTO opening_candidate_cache(cache_key, payload, updated_at_unix)
+	query := `INSERT INTO opening_candidate_cache(cache_key, payload, updated_at_unix)
 		VALUES(?, ?, ?)
-		ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, updated_at_unix = excluded.updated_at_unix`,
+		ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, updated_at_unix = excluded.updated_at_unix`
+	if dbdialect.IsMySQL(service.db) {
+		query = `INSERT INTO opening_candidate_cache(cache_key, payload, updated_at_unix)
+		VALUES(?, ?, ?)
+		ON DUPLICATE KEY UPDATE payload = VALUES(payload), updated_at_unix = VALUES(updated_at_unix)`
+	}
+	_, err = service.db.ExecContext(ctx, query,
 		openingCandidateCacheKey,
 		string(encoded),
 		time.Now().Unix(),

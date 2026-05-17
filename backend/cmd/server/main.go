@@ -19,6 +19,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/httpapi"
 	"qunxiang/backend/internal/session"
+	mysqlstore "qunxiang/backend/internal/storage/mysql"
 	postgresstore "qunxiang/backend/internal/storage/postgres"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/ws"
@@ -29,9 +30,9 @@ func main() {
 	cfg := config.Load()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	db, err := sqlitestore.Open(cfg.SQLitePath)
+	db, err := openPrimaryStore(cfg)
 	if err != nil {
-		logger.Error("open sqlite store", "error", err)
+		logger.Error("open primary store", "error", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -77,7 +78,7 @@ func main() {
 		coldStore = postgresDB
 		logger.Info("postgres account service enabled")
 	} else {
-		logger.Info("sqlite account service enabled (QUNXIANG_POSTGRES_DSN is empty)")
+		logger.Info("primary account service enabled", "db_driver", cfg.DBDriver)
 	}
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:    cfg,
@@ -103,7 +104,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("backend listening", "addr", cfg.HTTPAddr, "sqlite_path", cfg.SQLitePath)
+		logger.Info("backend listening", "addr", cfg.HTTPAddr, "db_driver", cfg.DBDriver, "sqlite_path", cfg.SQLitePath)
 		errCh <- server.ListenAndServe()
 	}()
 
@@ -123,5 +124,16 @@ func main() {
 			logger.Error("http server crashed", "error", err)
 			os.Exit(1)
 		}
+	}
+}
+
+func openPrimaryStore(cfg config.Config) (*sql.DB, error) {
+	switch cfg.DBDriver {
+	case "", "sqlite":
+		return sqlitestore.Open(cfg.SQLitePath)
+	case "mysql":
+		return mysqlstore.Open(cfg.MySQLDSN)
+	default:
+		return nil, errors.New("unsupported QUNXIANG_DB_DRIVER: " + cfg.DBDriver)
 	}
 }

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="男药剂师角色图标">
+  <defs>
+    <linearGradient id="bg41" x1="18" y1="14" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9b82c7"/>
+      <stop offset="1" stop-color="#4c477d"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 8 114 36v56l-50 28-50-28V36Z" fill="url(#bg41)" stroke="#1d2228" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M28 43h22" stroke="#f4d35e" stroke-width="5" stroke-linecap="round"/> 
+  <path d="M38 101c4-20 15-34 26-34s22 14 26 34Z" fill="#8b322d" stroke="#1d2228" stroke-width="5" stroke-linejoin="round"/><path d="M47 79h34l8 24H39Z" fill="#8b322d" opacity=".85"/>
+  <circle cx="64" cy="50" r="20" fill="#f0d0aa" stroke="#1d2228" stroke-width="5"/>
+  
+  <path d="M42 46c9-22 35-24 46 0-14-7-31-7-46 0Z" fill="#7a5438" stroke="#1d2228" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M51 55h.1M77 55h.1" stroke="#1d2228" stroke-width="6" stroke-linecap="round"/>
+  <path d="M57 65h14" fill="none" stroke="#1d2228" stroke-width="4" stroke-linecap="round"/>
+  <path d="M91 43v20l14 28c4 8-2 15-11 15H79c-9 0-15-7-11-15l14-28V43Z" fill="#d99be8" stroke="#222" stroke-width="5"/><path d="M81 43h12" stroke="#222" stroke-width="5"/>
+</svg>

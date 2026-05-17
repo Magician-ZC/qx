@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="商贾角色图标">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="16" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d7b85d"/>
+      <stop offset="1" stop-color="#8b632c"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 8 114 36v56l-50 28-50-28V36Z" fill="url(#bg)" stroke="#2a2116" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M39 98c4-18 14-31 25-31s21 13 25 31" fill="#d6a56d" stroke="#2a2116" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="64" cy="50" r="20" fill="#e6bd8c" stroke="#2a2116" stroke-width="5"/>
+  <path d="M44 44c12-18 31-18 42 0-8-2-17-5-42 0Z" fill="#3f3021" stroke="#2a2116" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M45 77h38l8 26H37Z" fill="#6c4b92" stroke="#2a2116" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M28 84h31l5 26H33Z" fill="#c68d3a" stroke="#2a2116" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M34 84c0-9 5-14 10-14s10 5 10 14" fill="none" stroke="#2a2116" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="94" cy="75" r="13" fill="#f4d35e" stroke="#2a2116" stroke-width="5"/>
+  <path d="M94 68v14m-6-7h12" stroke="#8b632c" stroke-width="4" stroke-linecap="round"/>
+  <path d="M52 54h.1M76 54h.1" stroke="#2a2116" stroke-width="6" stroke-linecap="round"/>
+</svg>

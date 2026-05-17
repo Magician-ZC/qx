@@ -10,6 +10,8 @@ import (
 	"hash/fnv"
 
 	"github.com/google/uuid"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // Repository 提供单位记录的持久化访问能力。
@@ -243,9 +245,7 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 		return fmt.Errorf("marshal unit inventory: %w", err)
 	}
 
-	if _, err := execer.ExecContext(
-		ctx,
-		`
+	query := `
 		INSERT INTO units (
 			id,
 			session_id,
@@ -265,7 +265,33 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			status_json = excluded.status_json,
 			inventory_json = excluded.inventory_json,
 			updated_at = CURRENT_TIMESTAMP
-		`,
+		`
+	if dbdialect.IsMySQL(repository.db) {
+		query = `
+		INSERT INTO units (
+			id,
+			session_id,
+			faction_id,
+			display_name,
+			profile_json,
+			personality_json,
+			status_json,
+			inventory_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			session_id = VALUES(session_id),
+			faction_id = VALUES(faction_id),
+			display_name = VALUES(display_name),
+			profile_json = VALUES(profile_json),
+			personality_json = VALUES(personality_json),
+			status_json = VALUES(status_json),
+			inventory_json = VALUES(inventory_json),
+			updated_at = CURRENT_TIMESTAMP
+		`
+	}
+	if _, err := execer.ExecContext(
+		ctx,
+		query,
 		record.ID,
 		record.SessionID,
 		record.FactionID,
@@ -353,6 +379,10 @@ func (repository *Repository) GetByID(ctx context.Context, unitID string) (Recor
 
 // ListBySession 列出某会话下的全部单位记录。
 func (repository *Repository) ListBySession(ctx context.Context, sessionID string) ([]Record, error) {
+	orderBy := "rowid"
+	if dbdialect.IsMySQL(repository.db) {
+		orderBy = "created_at, id"
+	}
 	rows, err := repository.db.QueryContext(
 		ctx,
 		`
@@ -367,8 +397,7 @@ func (repository *Repository) ListBySession(ctx context.Context, sessionID strin
 			inventory_json
 		FROM units
 		WHERE session_id = ?
-		ORDER BY rowid
-		`,
+		ORDER BY `+orderBy,
 		sessionID,
 	)
 	if err != nil {

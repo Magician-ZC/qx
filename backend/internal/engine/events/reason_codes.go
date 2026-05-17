@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // Category 类型定义用于统一该模块的数据表达。
@@ -96,9 +98,7 @@ func SeedReasonCodeCatalog(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("marshal stat domains for %s: %w", definition.Code, err)
 		}
 
-		if _, err := tx.ExecContext(
-			ctx,
-			`
+		query := `
 			INSERT INTO event_reason_codes (
 				code,
 				category,
@@ -115,7 +115,30 @@ func SeedReasonCodeCatalog(ctx context.Context, db *sql.DB) error {
 				stat_domains_json = excluded.stat_domains_json,
 				importance_min = excluded.importance_min,
 				importance_max = excluded.importance_max
-			`,
+			`
+		if dbdialect.IsMySQL(db) {
+			query = `
+			INSERT INTO event_reason_codes (
+				code,
+				category,
+				display_name,
+				default_reason_text,
+				stat_domains_json,
+				importance_min,
+				importance_max
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				category = VALUES(category),
+				display_name = VALUES(display_name),
+				default_reason_text = VALUES(default_reason_text),
+				stat_domains_json = VALUES(stat_domains_json),
+				importance_min = VALUES(importance_min),
+				importance_max = VALUES(importance_max)
+			`
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			query,
 			string(definition.Code),
 			string(definition.Category),
 			definition.DisplayName,
@@ -137,13 +160,16 @@ func SeedReasonCodeCatalog(ctx context.Context, db *sql.DB) error {
 
 // LoadReasonCodeCatalog 从数据库读取原因码目录并反序列化 stat_domains 字段。
 func LoadReasonCodeCatalog(ctx context.Context, db *sql.DB) ([]ReasonCodeDefinition, error) {
+	orderBy := "rowid"
+	if dbdialect.IsMySQL(db) {
+		orderBy = "code"
+	}
 	rows, err := db.QueryContext(
 		ctx,
 		`
 		SELECT code, category, display_name, default_reason_text, stat_domains_json, importance_min, importance_max
 		FROM event_reason_codes
-		ORDER BY rowid
-		`,
+		ORDER BY `+orderBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query reason codes: %w", err)

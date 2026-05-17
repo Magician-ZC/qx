@@ -14,6 +14,7 @@ import (
 
 	"qunxiang/backend/internal/ai"
 	"qunxiang/backend/internal/engine/turns"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -70,6 +71,13 @@ var battleReportIllustrationAssets = map[world.TerrainID]string{
 	world.TerrainRoad:        "/unciv/terrain/road.png",
 }
 
+type unitNarrativeCacheEntry struct {
+	Signature        string
+	Biography        string
+	RecruitmentPitch string
+	UpdatedAtUnix    int64
+}
+
 // enrichUnitIdentityNarrativeBestEffort 为单个单位补全传记与招募词。
 // 若模型失败则回退到本地模板，不中断主流程。
 func (service *Service) enrichUnitIdentityNarrativeBestEffort(
@@ -97,20 +105,21 @@ func (service *Service) enrichUnitIdentityNarrativeBestEffort(
 
 // enrichUnitIdentityNarrativesBatchBestEffort 批量补全单位身份叙事。
 // 优先走批量接口，降级时逐个请求并应用本地回退。
+type unitIdentityPlan struct {
+	key          string
+	record       *unit.Record
+	systemPrompt string
+	userPrompt   string
+	request      ai.CompletionRequest
+}
+
 func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 	ctx context.Context,
+	state *State,
 	records []*unit.Record,
 ) {
 	if service == nil || len(records) == 0 {
 		return
-	}
-
-	type unitIdentityPlan struct {
-		key          string
-		record       *unit.Record
-		systemPrompt string
-		userPrompt   string
-		request      ai.CompletionRequest
 	}
 
 	plans := make([]unitIdentityPlan, 0, len(records))
@@ -141,7 +150,8 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 	batcher, ok := service.llm.(batchCompletionClient)
 	if !ok || batcher == nil || len(plans) == 1 {
 		for _, plan := range plans {
-			payload, _, _, err := service.generateUnitIdentityNarrative(ctx, plan.record)
+			payload, _, interaction, err := service.generateUnitIdentityNarrative(ctx, plan.record)
+			appendUnitIdentityLLMInteraction(state, interaction)
 			if err != nil {
 				plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 				plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
@@ -179,16 +189,19 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		}
 		handled[batchResult.Key] = struct{}{}
 		if batchResult.Err != nil {
+			appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", batchResult.Err.Error()))
 			plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 			plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 			continue
 		}
 		payload, err := parseUnitIdentityNarrativePayload(batchResult.Result)
 		if err != nil {
+			appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", err.Error()))
 			plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 			plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 			continue
 		}
+		appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, payload.RecruitmentPitch, ""))
 		plan.record.Identity.Biography = payload.Biography
 		plan.record.Identity.RecruitmentPitch = payload.RecruitmentPitch
 	}
@@ -196,9 +209,321 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		if _, ok := handled[key]; ok || plan.record == nil {
 			continue
 		}
+		appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, ai.CompletionResult{}, "", "unit profile batch result missing"))
 		plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 		plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 	}
+}
+
+func buildUnitIdentityBatchInteraction(
+	state *State,
+	plan unitIdentityPlan,
+	result ai.CompletionResult,
+	summary string,
+	errorMessage string,
+) LLMInteraction {
+	current := State{TurnState: turnsFallbackState()}
+	unitID := ""
+	if state != nil {
+		current = *state
+	}
+	if plan.record != nil {
+		unitID = plan.record.ID
+	}
+	return buildLLMInteraction(current, unitID, "unit_profile", summary, plan.systemPrompt, plan.userPrompt, result, errorMessage)
+}
+
+func appendUnitIdentityLLMInteraction(state *State, interaction LLMInteraction) {
+	if state == nil || strings.TrimSpace(interaction.ID) == "" {
+		return
+	}
+	interaction.Turn = state.TurnState.Turn
+	interaction.Phase = state.TurnState.Phase
+	appendLLMInteraction(state, interaction)
+}
+
+func (service *Service) ensureUnitNarrativeCacheTable(ctx context.Context) error {
+	if service == nil || service.db == nil {
+		return nil
+	}
+	query := `CREATE TABLE IF NOT EXISTS unit_narrative_cache (
+		signature TEXT PRIMARY KEY,
+		biography TEXT NOT NULL,
+		recruitment_pitch TEXT NOT NULL,
+		updated_at_unix INTEGER NOT NULL
+	)`
+	if dbdialect.IsMySQL(service.db) {
+		query = `CREATE TABLE IF NOT EXISTS unit_narrative_cache (
+			signature VARCHAR(191) PRIMARY KEY,
+			biography TEXT NOT NULL,
+			recruitment_pitch TEXT NOT NULL,
+			updated_at_unix BIGINT NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	}
+	_, err := service.db.ExecContext(ctx, query)
+	return err
+}
+
+func unitNarrativeSignature(record unit.Record) string {
+	specialties := strings.Join(record.Skills.Specialties, ",")
+	return strings.TrimSpace(strings.Join([]string{
+		record.DisplayName(),
+		record.Identity.Gender,
+		fmt.Sprintf("%d", record.Identity.Age),
+		summarizeActorPersonality(record),
+		specialties,
+	}, "|"))
+}
+
+func (service *Service) loadCachedUnitNarrative(ctx context.Context, signature string) (unitIdentityNarrativePayload, bool) {
+	if service == nil || service.db == nil {
+		return unitIdentityNarrativePayload{}, false
+	}
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return unitIdentityNarrativePayload{}, false
+	}
+	if err := service.ensureUnitNarrativeCacheTable(ctx); err != nil {
+		return unitIdentityNarrativePayload{}, false
+	}
+	var payload unitIdentityNarrativePayload
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT biography, recruitment_pitch FROM unit_narrative_cache WHERE signature = ? LIMIT 1`,
+		signature,
+	).Scan(&payload.Biography, &payload.RecruitmentPitch); err != nil {
+		return unitIdentityNarrativePayload{}, false
+	}
+	payload.Biography = limitTextRunes(strings.TrimSpace(payload.Biography), 200)
+	payload.RecruitmentPitch = limitTextRunes(strings.TrimSpace(payload.RecruitmentPitch), 64)
+	if payload.Biography == "" || payload.RecruitmentPitch == "" {
+		return unitIdentityNarrativePayload{}, false
+	}
+	return payload, true
+}
+
+func (service *Service) saveCachedUnitNarrative(ctx context.Context, signature string, payload unitIdentityNarrativePayload) error {
+	if service == nil || service.db == nil {
+		return nil
+	}
+	signature = strings.TrimSpace(signature)
+	payload.Biography = limitTextRunes(strings.TrimSpace(payload.Biography), 200)
+	payload.RecruitmentPitch = limitTextRunes(strings.TrimSpace(payload.RecruitmentPitch), 64)
+	if signature == "" || payload.Biography == "" || payload.RecruitmentPitch == "" {
+		return nil
+	}
+	if err := service.ensureUnitNarrativeCacheTable(ctx); err != nil {
+		return err
+	}
+	query := `INSERT INTO unit_narrative_cache(signature, biography, recruitment_pitch, updated_at_unix)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(signature) DO UPDATE SET
+			biography = excluded.biography,
+			recruitment_pitch = excluded.recruitment_pitch,
+			updated_at_unix = excluded.updated_at_unix`
+	if dbdialect.IsMySQL(service.db) {
+		query = `INSERT INTO unit_narrative_cache(signature, biography, recruitment_pitch, updated_at_unix)
+		VALUES(?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			biography = VALUES(biography),
+			recruitment_pitch = VALUES(recruitment_pitch),
+			updated_at_unix = VALUES(updated_at_unix)`
+	}
+	_, err := service.db.ExecContext(
+		ctx,
+		query,
+		signature,
+		payload.Biography,
+		payload.RecruitmentPitch,
+		time.Now().UTC().Unix(),
+	)
+	return err
+}
+
+func (service *Service) primeRecordNarrative(record *unit.Record) {
+	if service == nil || record == nil {
+		return
+	}
+	signature := unitNarrativeSignature(*record)
+	if payload, ok := service.loadCachedUnitNarrative(context.Background(), signature); ok {
+		record.Identity.Biography = payload.Biography
+		record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+		return
+	}
+	record.Identity.Biography = fallbackUnitBiography(*record)
+	record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*record)
+}
+
+func appendDraftPoolTargetIDs(targets []string, records []unit.Record) []string {
+	for _, record := range records {
+		if strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		targets = append(targets, record.ID)
+	}
+	return targets
+}
+
+func markAsyncUnitNarrativeRunning(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	asyncUnitNarrativeRegistry.Lock()
+	defer asyncUnitNarrativeRegistry.Unlock()
+	if _, exists := asyncUnitNarrativeRegistry.running[key]; exists {
+		return false
+	}
+	asyncUnitNarrativeRegistry.running[key] = struct{}{}
+	return true
+}
+
+func unmarkAsyncUnitNarrativeRunning(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	asyncUnitNarrativeRegistry.Lock()
+	delete(asyncUnitNarrativeRegistry.running, key)
+	asyncUnitNarrativeRegistry.Unlock()
+}
+
+func unitNarrativeRefreshKey(sessionID string, unitIDs []string) string {
+	filtered := make([]string, 0, len(unitIDs))
+	for _, unitID := range unitIDs {
+		unitID = strings.TrimSpace(unitID)
+		if unitID == "" {
+			continue
+		}
+		filtered = append(filtered, unitID)
+	}
+	sort.Strings(filtered)
+	return strings.TrimSpace(sessionID) + ":" + strings.Join(filtered, ",")
+}
+
+func (service *Service) maybeRefreshDraftNarrativesAsync(state State) {
+	if service == nil || state.SetupPhase != SetupPhaseDrafting {
+		return
+	}
+	if len(state.PlayerDraftPool) == 0 && len(state.EnemyDraftPool) == 0 {
+		return
+	}
+	targets := appendDraftPoolTargetIDs(nil, state.PlayerDraftPool)
+	targets = appendDraftPoolTargetIDs(targets, state.EnemyDraftPool)
+	service.refreshUnitNarrativesAsync(state.ID, targets)
+}
+
+func (service *Service) refreshUnitNarrativesAsync(sessionID string, unitIDs []string) {
+	if service == nil || strings.TrimSpace(sessionID) == "" || len(unitIDs) == 0 {
+		return
+	}
+	key := unitNarrativeRefreshKey(sessionID, unitIDs)
+	if !markAsyncUnitNarrativeRunning(key) {
+		return
+	}
+	go func() {
+		defer unmarkAsyncUnitNarrativeRunning(key)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		state, units, err := service.loadSession(ctx, sessionID)
+		if err != nil {
+			return
+		}
+		byID := mapRecordsByID(units)
+		draftPoolByID := make(map[string]*unit.Record, len(state.PlayerDraftPool)+len(state.EnemyDraftPool))
+		for index := range state.PlayerDraftPool {
+			record := &state.PlayerDraftPool[index]
+			draftPoolByID[record.ID] = record
+		}
+		for index := range state.EnemyDraftPool {
+			record := &state.EnemyDraftPool[index]
+			draftPoolByID[record.ID] = record
+		}
+
+		updated := false
+		for _, unitID := range unitIDs {
+			unitID = strings.TrimSpace(unitID)
+			if unitID == "" {
+				continue
+			}
+			if record, ok := draftPoolByID[unitID]; ok {
+				if service.refreshRecordNarrativeInPlace(ctx, &state, record) {
+					updated = true
+				}
+				continue
+			}
+			record := byID[unitID]
+			if record == nil {
+				continue
+			}
+			if service.refreshRecordNarrativeInPlace(ctx, &state, record) {
+				updated = true
+			}
+		}
+		if !updated {
+			return
+		}
+
+		if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
+			return
+		}
+		for _, unitID := range unitIDs {
+			if record := byID[strings.TrimSpace(unitID)]; record != nil {
+				_ = service.units.Save(ctx, *record)
+			}
+		}
+		if service.progressReporter != nil {
+			service.progressReporter("unit_narrative_refreshed", buildSnapshot(state, snapshotUnitsFromByID(state, byID)), map[string]any{
+				"unit_ids": append([]string{}, unitIDs...),
+			})
+		}
+	}()
+}
+
+func (service *Service) refreshRecordNarrativeInPlace(ctx context.Context, state *State, record *unit.Record) bool {
+	if service == nil || record == nil {
+		return false
+	}
+	currentBiography := strings.TrimSpace(record.Identity.Biography)
+	currentPitch := strings.TrimSpace(record.Identity.RecruitmentPitch)
+	fallbackBiography := fallbackUnitBiography(*record)
+	fallbackPitch := fallbackRecruitmentPitch(*record)
+	signature := unitNarrativeSignature(*record)
+	if payload, ok := service.loadCachedUnitNarrative(ctx, signature); ok {
+		if currentBiography == payload.Biography && currentPitch == payload.RecruitmentPitch {
+			return false
+		}
+		if currentBiography != "" && currentPitch != "" &&
+			currentBiography != fallbackBiography &&
+			currentPitch != fallbackPitch {
+			return false
+		}
+		record.Identity.Biography = payload.Biography
+		record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+		return true
+	}
+
+	payload, _, interaction, err := service.generateUnitIdentityNarrative(ctx, record)
+	appendUnitIdentityLLMInteraction(state, interaction)
+	if err != nil {
+		return false
+	}
+	if currentBiography != "" && currentPitch != "" &&
+		currentBiography != fallbackBiography &&
+		currentPitch != fallbackPitch {
+		return false
+	}
+	record.Identity.Biography = payload.Biography
+	record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+	if cacheErr := service.saveCachedUnitNarrative(ctx, signature, payload); cacheErr != nil && state != nil {
+		appendLog(state, "unit_profile_cache_error", fmt.Sprintf("%s 的人物档案缓存写入失败：%v", record.DisplayName(), cacheErr), record.ID, "")
+	}
+	if state != nil {
+		appendLog(state, "unit_profile_ready", fmt.Sprintf("%s 的人物档案已补全。", record.DisplayName()), record.ID, "")
+	}
+	return true
 }
 
 // generateUnitIdentityNarrative 调用 LLM 生成单位 biography + recruitment_pitch。

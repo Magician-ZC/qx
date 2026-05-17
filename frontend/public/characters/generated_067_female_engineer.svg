@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="女工匠角色图标">
+  <defs>
+    <linearGradient id="bg67" x1="18" y1="14" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b98a4c"/>
+      <stop offset="1" stop-color="#74482d"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 8 114 36v56l-50 28-50-28V36Z" fill="url(#bg67)" stroke="#1d2228" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M28 43h22" stroke="#f4d35e" stroke-width="5" stroke-linecap="round"/> 
+  <path d="M41 101c4-21 14-34 23-34s19 13 23 34Z" fill="#587a4b" stroke="#1d2228" stroke-width="5" stroke-linejoin="round"/><path d="M54 80h20l9 23H45Z" fill="#587a4b" opacity=".85"/>
+  <circle cx="64" cy="50" r="20" fill="#c89166" stroke="#1d2228" stroke-width="5"/>
+  <path d="M38 63c-8 8-10 18-6 28M90 63c8 8 10 18 6 28" fill="none" stroke="#7a5438" stroke-width="5" stroke-linecap="round"/>
+  <path d="M41 48c8-25 39-27 47 0 0 20-9 30-24 30S41 68 41 48Z" fill="#7a5438" stroke="#1d2228" stroke-width="4"/><path d="M44 47c12-16 31-18 42-1-14-2-29-6-42 1Z" fill="#7a5438"/>
+  <path d="M51 55h.1M77 55h.1" stroke="#1d2228" stroke-width="6" stroke-linecap="round"/>
+  <path d="M56 65c5 2 11 2 16 0" fill="none" stroke="#1d2228" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="96" cy="80" r="15" fill="#b9c0c8" stroke="#222" stroke-width="5"/><circle cx="96" cy="80" r="5" fill="#526b82"/><path d="M96 59v8m0 26v8m-21-21h8m26 0h8m-36-15 6 6m18 18 6 6m0-30-6 6m-18 18-6 6" stroke="#222" stroke-width="4" stroke-linecap="round"/>
+</svg>

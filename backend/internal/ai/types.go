@@ -13,8 +13,9 @@ type ProviderName string
 
 // 常量定义区：集中声明该文件使用的共享配置。
 const (
-	ProviderDeepSeek ProviderName = "deepseek"
-	ProviderOpenAI   ProviderName = "openai"
+	ProviderDeepSeek       ProviderName = "deepseek"
+	ProviderOpenAI         ProviderName = "openai"
+	ProviderOpenAIFallback ProviderName = "openai_fallback"
 )
 
 // TaskKind 类型定义用于统一该模块的数据表达。
@@ -38,6 +39,7 @@ const (
 type TaskProfile struct {
 	Primary   ProviderName
 	Secondary ProviderName
+	Tertiary  ProviderName
 	Timeout   time.Duration
 }
 
@@ -53,51 +55,61 @@ func ConfiguredTaskProfiles(baseTimeout time.Duration) map[TaskKind]TaskProfile 
 		TaskIntentParse: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskUnitDecision: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskDialogue: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskReflection: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskDeployment: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskUpkeep: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskBackstory: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskBattleReport: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskDowntime: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 		TaskStrategy: {
 			Primary:   ProviderOpenAI,
 			Secondary: ProviderDeepSeek,
+			Tertiary:  ProviderOpenAIFallback,
 			Timeout:   baseTimeout,
 		},
 	}
@@ -188,6 +200,21 @@ type CompletionDebug struct {
 	Attempts      []CompletionAttempt `json:"attempts,omitempty"`
 	RawOutput     string              `json:"raw_output,omitempty"`
 	FallbackCause string              `json:"fallback_cause,omitempty"`
+}
+
+// ActiveLLMCall 表示仍在执行中的一次 LLM 调用，用于调试面板展示未完成请求。
+type ActiveLLMCall struct {
+	ID           string            `json:"id"`
+	Task         TaskKind          `json:"task"`
+	SchemaName   string            `json:"schema_name,omitempty"`
+	Summary      string            `json:"summary"`
+	SystemPrompt string            `json:"system_prompt"`
+	UserPrompt   string            `json:"user_prompt"`
+	Provider     string            `json:"provider,omitempty"`
+	Model        string            `json:"model,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
+	ElapsedMS    int64             `json:"elapsed_ms"`
 }
 
 // ProviderRequest 结构体用于承载该模块的核心数据。

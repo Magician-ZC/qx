@@ -8,7 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"qunxiang/backend/internal/config"
 )
@@ -21,9 +25,16 @@ type Service struct {
 	profiles  map[TaskKind]TaskProfile
 }
 
+var (
+	activeLLMCallsMu sync.Mutex
+	activeLLMCalls   = map[string]ActiveLLMCall{}
+	activeLLMCallSeq atomic.Uint64
+)
+
 // NewService 创建 AI 编排服务并初始化 provider、路由策略与 JSON 校验器。
 func NewService(cfg config.Config, logger *slog.Logger) *Service {
 	httpClient := &http.Client{}
+	validator := NewJSONSchemaValidator()
 
 	deepSeekEndpoint := EndpointConfig{
 		BaseURL:         cfg.DeepSeekBaseURL,
@@ -49,12 +60,12 @@ func NewService(cfg config.Config, logger *slog.Logger) *Service {
 			ReasoningEffort: endpoint.ReasoningEffort,
 		})
 	}
-	deepSeekEndpoint, openAIEndpoint, openAIFallbacks = preferKnownWorkingEndpoints(
-		deepSeekEndpoint,
-		openAIEndpoint,
-		openAIFallbacks,
-	)
-
+	openAIFallbackPrimary := EndpointConfig{}
+	openAIFallbackRest := []EndpointConfig(nil)
+	if len(openAIFallbacks) > 0 {
+		openAIFallbackPrimary = openAIFallbacks[0]
+		openAIFallbackRest = openAIFallbacks[1:]
+	}
 	providers := map[ProviderName]Provider{
 		ProviderDeepSeek: NewOpenAICompatibleProvider(
 			ProviderDeepSeek,
@@ -62,19 +73,29 @@ func NewService(cfg config.Config, logger *slog.Logger) *Service {
 			nil,
 			StructuredOutputJSONObject,
 			httpClient,
+			validator,
 		),
 		ProviderOpenAI: NewOpenAICompatibleProvider(
 			ProviderOpenAI,
 			openAIEndpoint,
-			openAIFallbacks,
+			nil,
 			StructuredOutputJSONSchema,
 			httpClient,
+			validator,
+		),
+		ProviderOpenAIFallback: NewOpenAICompatibleProvider(
+			ProviderOpenAIFallback,
+			openAIFallbackPrimary,
+			openAIFallbackRest,
+			StructuredOutputJSONSchema,
+			httpClient,
+			validator,
 		),
 	}
 
 	return &Service{
 		logger:    logger.With("component", "ai"),
-		validator: NewJSONSchemaValidator(),
+		validator: validator,
 		providers: providers,
 		profiles:  ConfiguredTaskProfiles(cfg.LLMTimeout),
 	}
@@ -95,7 +116,7 @@ func preferKnownWorkingEndpoints(
 	anyRouterEndpoint := firstMatchingEndpoint(candidates, "https://anyrouter.wuname.eu.org/v1", "gpt-5.3-codex", EndpointConfig{})
 	openRouterEndpoint := firstOpenRouterEndpoint(candidates, EndpointConfig{})
 	if openRouterEndpoint.BaseURL != "" {
-		openRouterEndpoint.Model = "deepseek/deepseek-v4-flash:free"
+		openRouterEndpoint.Model = "openai/gpt-oss-120b:free"
 	}
 	foundKnownEndpoint := anyRouterEndpoint.BaseURL != "" || openRouterEndpoint.BaseURL != "" ||
 		isEndpoint(deepSeekEndpoint, "https://2c2ch1u11-share-api-0.hf.space/v1", "deepseek-v4-pro")
@@ -173,7 +194,11 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 		timeout = profile.Timeout
 	}
 
-	order := providerOrder(profile.Primary, profile.Secondary)
+	order := providerOrder(profile.Primary, profile.Secondary, profile.Tertiary)
+	activeProvider, activeModel := s.activeCallTarget(order)
+	activeCallID := registerActiveLLMCall(request, activeProvider, activeModel)
+	defer unregisterActiveLLMCall(activeCallID)
+
 	failures := make([]error, 0, len(order))
 	attempts := make([]CompletionAttempt, 0, len(order)*4)
 	invalidRawOutput := ""
@@ -295,7 +320,7 @@ func appendInvalidRawOutput(existing string, provider ProviderName, response Pro
 func (s *Service) Status() map[string]any {
 	providers := make([]ProviderStatus, 0, len(s.providers))
 	ready := false
-	for _, name := range []ProviderName{ProviderDeepSeek, ProviderOpenAI} {
+	for _, name := range []ProviderName{ProviderOpenAI, ProviderDeepSeek, ProviderOpenAIFallback} {
 		provider := s.providers[name]
 		if provider == nil {
 			continue
@@ -321,6 +346,7 @@ func (s *Service) Status() map[string]any {
 		routes[string(task)] = map[string]any{
 			"primary":    profile.Primary,
 			"secondary":  profile.Secondary,
+			"tertiary":   profile.Tertiary,
 			"timeout_ms": profile.Timeout.Milliseconds(),
 		}
 	}
@@ -332,16 +358,94 @@ func (s *Service) Status() map[string]any {
 	}
 }
 
-// providerOrder 根据主备 provider 计算去重后的调用顺序。
-func providerOrder(primary ProviderName, secondary ProviderName) []ProviderName {
-	order := make([]ProviderName, 0, 2)
-	if primary != "" {
-		order = append(order, primary)
-	}
+// ActiveCalls 返回当前仍未结束的 LLM 调用快照，供会话调试面板展示。
+func ActiveCalls() []ActiveLLMCall {
+	activeLLMCallsMu.Lock()
+	defer activeLLMCallsMu.Unlock()
 
-	if secondary != "" && secondary != primary {
-		order = append(order, secondary)
+	now := time.Now().UTC()
+	calls := make([]ActiveLLMCall, 0, len(activeLLMCalls))
+	for _, call := range activeLLMCalls {
+		call.ElapsedMS = now.Sub(call.StartedAt).Milliseconds()
+		calls = append(calls, call)
 	}
+	sort.Slice(calls, func(left int, right int) bool {
+		return calls[left].StartedAt.After(calls[right].StartedAt)
+	})
+	return calls
+}
 
+func (s *Service) activeCallTarget(order []ProviderName) (string, string) {
+	for _, name := range order {
+		provider := s.providers[name]
+		if provider == nil || !provider.Available() {
+			continue
+		}
+		status := provider.Status()
+		return string(name), status.DefaultModel
+	}
+	if len(order) == 0 {
+		return "", ""
+	}
+	return string(order[0]), ""
+}
+
+// registerActiveLLMCall 记录一次调用开始，结束时必须 unregister。
+func registerActiveLLMCall(request CompletionRequest, provider string, model string) string {
+	now := time.Now().UTC()
+	id := fmt.Sprintf("active-%d-%d", now.UnixNano(), activeLLMCallSeq.Add(1))
+	activeLLMCallsMu.Lock()
+	activeLLMCalls[id] = ActiveLLMCall{
+		ID:           id,
+		Task:         request.Task,
+		SchemaName:   request.SchemaName,
+		Summary:      "调用中",
+		SystemPrompt: request.SystemPrompt,
+		UserPrompt:   request.UserPrompt,
+		Provider:     provider,
+		Model:        model,
+		Metadata:     cloneMetadata(request.Metadata),
+		StartedAt:    now,
+		ElapsedMS:    0,
+	}
+	activeLLMCallsMu.Unlock()
+	return id
+}
+
+// unregisterActiveLLMCall 标记一次调用结束。
+func unregisterActiveLLMCall(id string) {
+	if id == "" {
+		return
+	}
+	activeLLMCallsMu.Lock()
+	delete(activeLLMCalls, id)
+	activeLLMCallsMu.Unlock()
+}
+
+func cloneMetadata(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
+// providerOrder 根据配置的 provider 优先级计算去重后的调用顺序。
+func providerOrder(names ...ProviderName) []ProviderName {
+	order := make([]ProviderName, 0, len(names))
+	seen := map[ProviderName]struct{}{}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		order = append(order, name)
+	}
 	return order
 }

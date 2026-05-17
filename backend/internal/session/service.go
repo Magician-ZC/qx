@@ -26,8 +26,12 @@ import (
 const (
 	maxDirectiveHistory      = 64
 	maxDialogueHistory       = 128
-	maxDecisionHistory       = 160
-	maxLLMHistory            = 160
+	maxDecisionHistory       = 96
+	maxLLMHistory            = 48
+	maxRawEventHistory       = 192
+	maxFullLLMHistory        = 8
+	maxStoredPromptRunes     = 12000
+	maxStoredOutputRunes     = 8000
 	maxPigeonQueue           = 96
 	maxBattleReports         = 48
 	battleReportsEnabled     = false
@@ -41,7 +45,23 @@ const (
 	asyncCleanupTimeout      = 30 * time.Second
 	defiantMemoryBoost       = 3
 	battlefieldRemnantTurns  = 5
+	openingDraftWaitDuration = 60 * time.Second
 )
+
+var asyncExecutionRegistry = struct {
+	sync.Mutex
+	running map[string]struct{}
+}{running: map[string]struct{}{}}
+
+var asyncUnitNarrativeRegistry = struct {
+	sync.Mutex
+	running map[string]struct{}
+}{running: map[string]struct{}{}}
+
+var asyncHallMemoryRegistry = struct {
+	sync.Mutex
+	running map[string]struct{}
+}{running: map[string]struct{}{}}
 
 type executionActorState struct {
 	remainingAP int
@@ -123,7 +143,7 @@ func (service *Service) CreateSinglePlayerWithMapScript(ctx context.Context, see
 	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, BattlefieldSizeSmall, false, 3, ModeSinglePlayer, false, true)
 }
 
-// CreateSinglePlayerDraftWithMapScript 创建带 30 秒开局选人阶段的单人对局。
+// CreateSinglePlayerDraftWithMapScript 创建带开局选人阶段的单人对局。
 func (service *Service) CreateSinglePlayerDraftWithMapScript(ctx context.Context, seed int64, mapScriptID string) (Snapshot, error) {
 	return service.CreateSinglePlayerDraftWithMapScriptAndUnitCount(ctx, seed, mapScriptID, openingRosterSize)
 }
@@ -227,6 +247,7 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	if draftMode {
 		state.SetupPhase = SetupPhaseDrafting
 	}
+	narrativeRefreshTargets := make([]string, 0, openingRosterSize*2)
 
 	if draftMode {
 		playerCandidates, enemyCandidates := service.openingCandidatesForDraft(ctx, seed)
@@ -234,16 +255,7 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 		state.EnemyDraftPool = draftRecordsFromCandidates(seed+101, sessionID, state.EnemyFactionID, selectedOpeningRosterWithLimit(enemyCandidates, seed+2026, unitCount))
 		repositionRecordsForMap(state.PlayerDraftPool, state.PlayerFactionID, state.Map)
 		repositionRecordsForMap(state.EnemyDraftPool, state.EnemyFactionID, state.Map)
-		state.SetupDeadlineAt = time.Now().Add(30 * time.Second)
-
-		narrativeTargets := make([]*unit.Record, 0, len(state.PlayerDraftPool)+len(state.EnemyDraftPool))
-		for index := range state.PlayerDraftPool {
-			narrativeTargets = append(narrativeTargets, &state.PlayerDraftPool[index])
-		}
-		for index := range state.EnemyDraftPool {
-			narrativeTargets = append(narrativeTargets, &state.EnemyDraftPool[index])
-		}
-		service.enrichUnitIdentityNarrativesBatchBestEffort(ctx, narrativeTargets)
+		state.SetupDeadlineAt = time.Now().Add(openingDraftWaitDuration)
 	} else if unitCount != 3 {
 		playerCandidates, enemyCandidates := service.openingCandidatesForDraft(ctx, seed)
 		playerRecords := draftRecordsFromCandidates(seed+1, sessionID, state.PlayerFactionID, selectedOpeningRosterWithLimit(playerCandidates, seed, unitCount))
@@ -251,25 +263,14 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 		repositionRecordsForMap(playerRecords, state.PlayerFactionID, state.Map)
 		repositionRecordsForMap(enemyRecords, state.EnemyFactionID, state.Map)
 
-		narrativeTargets := make([]*unit.Record, 0, len(playerRecords)+len(enemyRecords))
-		for index := range playerRecords {
-			narrativeTargets = append(narrativeTargets, &playerRecords[index])
-		}
-		for index := range enemyRecords {
-			narrativeTargets = append(narrativeTargets, &enemyRecords[index])
-		}
-		service.enrichUnitIdentityNarrativesBatchBestEffort(ctx, narrativeTargets)
-
 		for index := range playerRecords {
 			record := playerRecords[index]
 			if err := addOpeningSupply(&record, index); err != nil {
 				return Snapshot{}, err
 			}
 			appendOpeningSupplyLog(&state, record)
+			service.primeRecordNarrative(&record)
 			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
 				return Snapshot{}, err
 			}
 			state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
@@ -280,14 +281,14 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 				return Snapshot{}, err
 			}
 			appendOpeningSupplyLog(&state, record)
+			service.primeRecordNarrative(&record)
 			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
 				return Snapshot{}, err
 			}
 			state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
 		}
+		narrativeRefreshTargets = append(narrativeRefreshTargets, state.PlayerUnitIDs...)
+		narrativeRefreshTargets = append(narrativeRefreshTargets, state.EnemyUnitIDs...)
 	} else {
 		playerSpawns := []world.Coord{{Q: 1, R: 2}, {Q: 1, R: 4}, {Q: 2, R: 3}}
 		playerNames := []string{"惊蛰", "行舟", "折棠"}
@@ -325,35 +326,24 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 			enemyRecords = append(enemyRecords, record)
 		}
 
-		narrativeTargets := make([]*unit.Record, 0, len(playerRecords)+len(enemyRecords))
-		for index := range playerRecords {
-			narrativeTargets = append(narrativeTargets, &playerRecords[index])
-		}
-		for index := range enemyRecords {
-			narrativeTargets = append(narrativeTargets, &enemyRecords[index])
-		}
-		service.enrichUnitIdentityNarrativesBatchBestEffort(ctx, narrativeTargets)
-
 		for index := range playerRecords {
 			record := playerRecords[index]
+			service.primeRecordNarrative(&record)
 			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
 				return Snapshot{}, err
 			}
 			state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
 		}
 		for index := range enemyRecords {
 			record := enemyRecords[index]
+			service.primeRecordNarrative(&record)
 			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
 				return Snapshot{}, err
 			}
 			state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
 		}
+		narrativeRefreshTargets = append(narrativeRefreshTargets, state.PlayerUnitIDs...)
+		narrativeRefreshTargets = append(narrativeRefreshTargets, state.EnemyUnitIDs...)
 	}
 
 	appendDirective(&state, Directive{
@@ -397,13 +387,15 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	if err := service.recordPhaseBoundarySnapshot(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}
+	service.refreshHallMemoriesAsync(sessionID, narrativeRefreshTargets)
+	service.refreshUnitNarrativesAsync(sessionID, narrativeRefreshTargets)
 
 	return service.GetSnapshot(ctx, sessionID)
 }
 
 func setupLogMessage(draftMode bool, selectedMapScriptName string, unitCount int) string {
 	if draftMode {
-		return fmt.Sprintf("开局组队阶段开始。LLM 已生成候选单位；你有 30 秒选择并改写 %d 人的名字、生平和性格。当前地图剧本：%s。", unitCount, selectedMapScriptName)
+		return fmt.Sprintf("开局组队阶段开始。LLM 已生成候选单位；你有 60 秒选择并改写 %d 人的名字、生平和性格。当前地图剧本：%s。", unitCount, selectedMapScriptName)
 	}
 	return fmt.Sprintf("第 1 回合部署阶段开始。当前地图剧本：%s。玩家可以发布自然语言方针、点名对话或下达部署任务；吃饭、交易、采集、建造与战斗都由 AI 单位自己判断并执行。", selectedMapScriptName)
 }
@@ -414,6 +406,10 @@ func (service *Service) GetSnapshot(ctx context.Context, sessionID string) (Snap
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if service.resumeStaleAsyncExecutionIfNeeded(ctx, &state) {
+		return buildSnapshot(state, units), nil
+	}
+	service.maybeRefreshDraftNarrativesAsync(state)
 	return buildSnapshot(state, units), nil
 }
 
@@ -482,9 +478,6 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 		if err := service.units.Save(ctx, record); err != nil {
 			return Snapshot{}, err
 		}
-		if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
-			return Snapshot{}, err
-		}
 		state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
 	}
 	for index := 0; index < len(state.EnemyDraftPool) && index < requiredPick; index++ {
@@ -494,9 +487,6 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 		}
 		appendOpeningSupplyLog(&state, record)
 		if err := service.units.Save(ctx, record); err != nil {
-			return Snapshot{}, err
-		}
-		if err := service.injectHallMemoriesForUnit(ctx, &state, &record); err != nil {
 			return Snapshot{}, err
 		}
 		state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
@@ -525,6 +515,10 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 	if err := service.recordPhaseBoundarySnapshot(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}
+	targets := append([]string{}, state.PlayerUnitIDs...)
+	targets = append(targets, state.EnemyUnitIDs...)
+	service.refreshHallMemoriesAsync(sessionID, targets)
+	service.refreshUnitNarrativesAsync(sessionID, targets)
 	return service.GetSnapshot(ctx, sessionID)
 }
 
@@ -707,7 +701,7 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		return Snapshot{}, err
 	}
 	if startAsyncExecution {
-		go service.resolveExecutionAsync(state.ID)
+		service.launchAsyncExecution(state.ID)
 	}
 
 	return service.GetSnapshot(ctx, sessionID)
@@ -719,8 +713,12 @@ func (service *Service) RequestAdvancePhase(ctx context.Context, sessionID strin
 	if err != nil {
 		return Snapshot{}, false, err
 	}
-	if state.SetupPhase == SetupPhaseDrafting || phaseDeadlineReached(state) || state.TurnState.Phase == turns.PhaseExecution || state.Outcome != OutcomeOngoing {
+	if state.SetupPhase == SetupPhaseDrafting || state.TurnState.Phase == turns.PhaseExecution || state.Outcome != OutcomeOngoing {
 		snapshot, advanceErr := service.AdvancePhase(ctx, sessionID)
+		return snapshot, true, advanceErr
+	}
+	if state.TurnState.Phase == turns.PhaseDeployment && service.asyncExecution && phaseDeadlineReached(state) {
+		snapshot, advanceErr := service.advanceDeploymentToExecutionFastPath(ctx, &state, units)
 		return snapshot, true, advanceErr
 	}
 
@@ -742,8 +740,9 @@ func (service *Service) RequestAdvancePhase(ctx context.Context, sessionID strin
 	}
 
 	if state.Mode != ModeDuel {
-		if err := service.sessions.Save(ctx, &state); err != nil {
-			return Snapshot{}, false, err
+		if state.TurnState.Phase == turns.PhaseDeployment && service.asyncExecution {
+			snapshot, advanceErr := service.advanceDeploymentToExecutionFastPath(ctx, &state, units)
+			return snapshot, true, advanceErr
 		}
 		snapshot, advanceErr := service.AdvancePhase(ctx, sessionID)
 		return snapshot, true, advanceErr
@@ -764,6 +763,46 @@ func (service *Service) RequestAdvancePhase(ctx context.Context, sessionID strin
 		return Snapshot{}, false, err
 	}
 	return buildSnapshot(state, units), false, nil
+}
+
+// advanceDeploymentToExecutionFastPath 只完成 deployment -> execution 的最小状态切换。
+// 部署收尾、敌方方针刷新、信鸽派发和单位行动仍在异步执行流开头按原顺序处理，
+// 这样 HTTP 请求不会因为 LLM 或阶段收尾超过反向代理超时。
+func (service *Service) advanceDeploymentToExecutionFastPath(ctx context.Context, state *State, units []unit.Record) (Snapshot, error) {
+	if service == nil || state == nil {
+		return Snapshot{}, fmt.Errorf("session service is not available")
+	}
+	if state.TurnState.Phase != turns.PhaseDeployment || state.Outcome != OutcomeOngoing {
+		return buildSnapshot(*state, units), nil
+	}
+
+	now := time.Now().UTC()
+	state.TurnState.Advance(now)
+	resetPhaseReady(state)
+	state.ExecutionInProgress = true
+	appendLog(state, "phase", fmt.Sprintf("第 %d 回合执行阶段开始。所有单位会先消化你的自然语言方针与对话，再由 AI 自主处理进食、调拨、交换、生产、建造与战斗行动。", state.TurnState.Turn), "", "")
+
+	if err := service.saveSession(ctx, state); err != nil {
+		return Snapshot{}, err
+	}
+	snapshot := buildSnapshot(*state, units)
+	service.launchAsyncExecution(state.ID)
+	go service.recordExecutionBoundaryBestEffort(state.ID)
+	return snapshot, nil
+}
+
+func (service *Service) recordExecutionBoundaryBestEffort(sessionID string) {
+	if service == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), asyncCleanupTimeout)
+	defer cancel()
+	state, units, err := service.loadSession(ctx, sessionID)
+	if err != nil || state.TurnState.Phase != turns.PhaseExecution {
+		return
+	}
+	_ = service.syncCombatFlags(ctx, &state, units)
+	_ = service.recordPhaseBoundarySnapshot(ctx, &state, units)
 }
 
 // phaseDeadlineReached 判断当前阶段是否已到倒计时截止，超时后自动推进不受准备状态限制。
@@ -813,10 +852,21 @@ func hasFactionDirectiveForCurrentPhase(state State, factionID string) bool {
 
 // resolveExecutionAsync 在后台推进执行阶段，避免 HTTP 请求阻塞整轮 LLM 决策。
 func (service *Service) resolveExecutionAsync(sessionID string) {
+	if !markAsyncExecutionRunning(sessionID) {
+		return
+	}
+	defer unmarkAsyncExecutionRunning(sessionID)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			service.markAsyncExecutionInterrupted(sessionID, fmt.Sprintf("执行阶段后台任务异常退出：%v", recovered))
+		}
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), asyncExecutionTimeout)
 	defer cancel()
 	state, units, err := service.loadSession(ctx, sessionID)
 	if err != nil {
+		service.markAsyncExecutionInterrupted(sessionID, fmt.Sprintf("执行阶段后台任务启动失败：%v", err))
 		return
 	}
 	if state.TurnState.Phase != turns.PhaseExecution || !state.ExecutionInProgress {
@@ -844,6 +894,13 @@ func (service *Service) resolveExecutionAsync(sessionID string) {
 		appendLog(&state, "execution_error", fmt.Sprintf("执行阶段收尾被中断：%v", err), "", "")
 		state.ExecutionInProgress = false
 		service.saveAsyncExecutionStateBestEffort(&state)
+		if service.progressReporter != nil {
+			service.progressReporter("execution_interrupted", buildSnapshot(state, units), map[string]any{
+				"turn":  state.TurnState.Turn,
+				"phase": state.TurnState.Phase,
+				"error": err.Error(),
+			})
+		}
 		return
 	}
 	if service.progressReporter != nil {
@@ -852,6 +909,108 @@ func (service *Service) resolveExecutionAsync(sessionID string) {
 			"phase": state.TurnState.Phase,
 		})
 	}
+}
+
+func (service *Service) launchAsyncExecution(sessionID string) {
+	if service == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	go service.resolveExecutionAsync(sessionID)
+}
+
+func markAsyncExecutionRunning(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	asyncExecutionRegistry.Lock()
+	defer asyncExecutionRegistry.Unlock()
+	if _, exists := asyncExecutionRegistry.running[sessionID]; exists {
+		return false
+	}
+	asyncExecutionRegistry.running[sessionID] = struct{}{}
+	return true
+}
+
+func unmarkAsyncExecutionRunning(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	asyncExecutionRegistry.Lock()
+	delete(asyncExecutionRegistry.running, sessionID)
+	asyncExecutionRegistry.Unlock()
+}
+
+func isAsyncExecutionRunning(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	asyncExecutionRegistry.Lock()
+	defer asyncExecutionRegistry.Unlock()
+	_, exists := asyncExecutionRegistry.running[sessionID]
+	return exists
+}
+
+func (service *Service) resumeStaleAsyncExecutionIfNeeded(ctx context.Context, state *State) bool {
+	if service == nil || state == nil || !service.asyncExecution {
+		return false
+	}
+	if state.TurnState.Phase != turns.PhaseExecution || !state.ExecutionInProgress || state.Outcome != OutcomeOngoing {
+		return false
+	}
+	if isAsyncExecutionRunning(state.ID) || activeLLMCallForSession(state.ID) {
+		return false
+	}
+	now := time.Now().UTC()
+	staleAfter := state.UpdatedAt.Add(2 * time.Minute)
+	if !state.TurnState.PhaseEndsAt.IsZero() && state.TurnState.PhaseEndsAt.After(staleAfter) {
+		staleAfter = state.TurnState.PhaseEndsAt
+	}
+	if now.Before(staleAfter) {
+		return false
+	}
+	appendLog(state, "execution_resume", "执行阶段后台任务疑似中断，系统已重新接续执行。", "", "")
+	if err := service.sessions.Save(ctx, state); err != nil {
+		return false
+	}
+	service.launchAsyncExecution(state.ID)
+	return true
+}
+
+func activeLLMCallForSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	for _, call := range ai.ActiveCalls() {
+		if strings.TrimSpace(call.Metadata["session_id"]) == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (service *Service) markAsyncExecutionInterrupted(sessionID string, message string) {
+	if service == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), asyncCleanupTimeout)
+	defer cancel()
+	state, _, err := service.loadSession(ctx, sessionID)
+	if err != nil {
+		return
+	}
+	if state.TurnState.Phase != turns.PhaseExecution || !state.ExecutionInProgress {
+		return
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "执行阶段后台任务异常中断。"
+	}
+	appendLog(&state, "execution_error", message, "", "")
+	state.ExecutionInProgress = false
+	_ = service.saveSessionMergingExternalEvents(ctx, &state)
 }
 
 // saveAsyncExecutionStateBestEffort 用独立短超时上下文保存异步执行的最终状态。
@@ -890,6 +1049,52 @@ func (service *Service) saveSession(ctx context.Context, state *State) error {
 	service.sessionSaveMu.Lock()
 	defer service.sessionSaveMu.Unlock()
 	return service.sessions.Save(ctx, state)
+}
+
+// compactStateForStorage keeps the hot session row small enough for frequent
+// polling and websocket broadcasts. Full prompt bodies are only useful for the
+// most recent developer inspection; old entries keep summary, provider/model
+// and token/cost metadata.
+func compactStateForStorage(state *State) {
+	if state == nil {
+		return
+	}
+	if len(state.DecisionTraces) > maxDecisionHistory {
+		state.DecisionTraces = state.DecisionTraces[len(state.DecisionTraces)-maxDecisionHistory:]
+	}
+	if len(state.LLMInteractions) > maxLLMHistory {
+		state.LLMInteractions = state.LLMInteractions[len(state.LLMInteractions)-maxLLMHistory:]
+	}
+	fullFrom := len(state.LLMInteractions) - maxFullLLMHistory
+	if fullFrom < 0 {
+		fullFrom = 0
+	}
+	for index := range state.LLMInteractions {
+		interaction := &state.LLMInteractions[index]
+		if index < fullFrom {
+			interaction.SystemPrompt = ""
+			interaction.UserPrompt = ""
+			interaction.ParsedOutput = limitTextRunes(interaction.ParsedOutput, 600)
+			interaction.RawOutput = ""
+			interaction.Attempts = nil
+			continue
+		}
+		interaction.SystemPrompt = limitTextRunes(interaction.SystemPrompt, maxStoredPromptRunes)
+		interaction.UserPrompt = limitTextRunes(interaction.UserPrompt, maxStoredPromptRunes)
+		interaction.ParsedOutput = limitTextRunes(interaction.ParsedOutput, maxStoredOutputRunes)
+		interaction.RawOutput = limitTextRunes(interaction.RawOutput, maxStoredOutputRunes)
+	}
+	if len(state.RawEventLog) > maxRawEventHistory {
+		state.RawEventLog = state.RawEventLog[len(state.RawEventLog)-maxRawEventHistory:]
+	}
+	for index := range state.RawEventLog {
+		entry := &state.RawEventLog[index]
+		if entry.Source == "llm" || entry.Source == "decision" {
+			entry.PayloadJSON = ""
+		} else {
+			entry.PayloadJSON = limitTextRunes(entry.PayloadJSON, 1200)
+		}
+	}
 }
 
 func mergeMissingDirectives(state *State, external []Directive) {
@@ -2947,11 +3152,11 @@ func (service *Service) ensureAIDecisionText(
 	if strings.TrimSpace(decision.Memory) == "" {
 		switch {
 		case strings.TrimSpace(decision.Speak) != "":
-			decision.Memory = limitTextRunes(strings.TrimSpace(decision.Speak), llmMemoryRuneLimit)
+			decision.Memory = strings.TrimSpace(decision.Speak)
 		case strings.TrimSpace(decision.NextAction) != "":
-			decision.Memory = limitTextRunes(strings.TrimSpace(decision.NextAction), llmMemoryRuneLimit)
+			decision.Memory = strings.TrimSpace(decision.NextAction)
 		case strings.TrimSpace(decision.Reasoning) != "":
-			decision.Memory = limitTextRunes(strings.TrimSpace(decision.Reasoning), llmMemoryRuneLimit)
+			decision.Memory = strings.TrimSpace(decision.Reasoning)
 		}
 	}
 	return decision
@@ -3091,6 +3296,7 @@ func buildSnapshot(state State, units []unit.Record) Snapshot {
 		DialogueHistory:     state.DialogueHistory,
 		DecisionTraces:      state.DecisionTraces,
 		LLMInteractions:     state.LLMInteractions,
+		ActiveLLMCalls:      activeLLMInteractionsForState(state),
 		PigeonQueue:         append([]PigeonDispatch{}, state.PigeonQueue...),
 		Pregnancies:         append([]PregnancyState{}, state.Pregnancies...),
 		BattleReports:       append([]BattleReport{}, state.BattleReports...),
@@ -3105,6 +3311,95 @@ func buildSnapshot(state State, units []unit.Record) Snapshot {
 		EnemyUnits:          enemyUnits,
 		WildUnits:           orderedUnits(state.WildUnitIDs, byID),
 	}
+}
+
+// PublicSnapshot returns the default lightweight payload used by normal game
+// clients. Developer-only prompt/trace history is returned only when qxdev()
+// asks for it explicitly.
+func PublicSnapshot(snapshot Snapshot, includeDebug bool) Snapshot {
+	if includeDebug {
+		return snapshot
+	}
+	snapshot.LLMInteractions = publicLLMInteractions(snapshot.LLMInteractions)
+	snapshot.ActiveLLMCalls = publicActiveLLMInteractions(snapshot.ActiveLLMCalls)
+	snapshot.RawEventLog = redactRawEventLog(snapshot.RawEventLog)
+	return snapshot
+}
+
+func publicActiveLLMInteractions(interactions []LLMInteraction) []LLMInteraction {
+	if len(interactions) == 0 {
+		return nil
+	}
+	return publicLLMInteractions(interactions)
+}
+
+func publicLLMInteractions(interactions []LLMInteraction) []LLMInteraction {
+	if len(interactions) == 0 {
+		return []LLMInteraction{}
+	}
+	result := make([]LLMInteraction, 0, len(interactions))
+	for _, interaction := range interactions {
+		interaction.SystemPrompt = ""
+		interaction.UserPrompt = ""
+		interaction.RawOutput = ""
+		interaction.Attempts = nil
+		result = append(result, interaction)
+	}
+	return result
+}
+
+func redactRawEventLog(entries []RawEventEntry) []RawEventEntry {
+	if len(entries) == 0 {
+		return []RawEventEntry{}
+	}
+	result := make([]RawEventEntry, len(entries))
+	copy(result, entries)
+	for index := range result {
+		if result[index].Source == "llm" || result[index].Source == "decision" {
+			result[index].PayloadJSON = ""
+		}
+	}
+	return result
+}
+
+func activeLLMInteractionsForState(state State) []LLMInteraction {
+	calls := ai.ActiveCalls()
+	if len(calls) == 0 {
+		return nil
+	}
+	interactions := make([]LLMInteraction, 0, len(calls))
+	for _, call := range calls {
+		if strings.TrimSpace(call.Metadata["session_id"]) != state.ID {
+			continue
+		}
+		unitID := strings.TrimSpace(call.Metadata["unit_id"])
+		kind := strings.TrimSpace(string(call.Task))
+		if kind == "" {
+			kind = strings.TrimSpace(call.SchemaName)
+		}
+		if kind == "" {
+			kind = "llm"
+		}
+		interactions = append(interactions, LLMInteraction{
+			ID:           call.ID,
+			UnitID:       unitID,
+			Kind:         kind,
+			Summary:      call.Summary,
+			SystemPrompt: call.SystemPrompt,
+			UserPrompt:   call.UserPrompt,
+			Turn:         state.TurnState.Turn,
+			Phase:        state.TurnState.Phase,
+			OccurredAt:   call.StartedAt,
+			Provider:     call.Provider,
+			Model:        call.Model,
+			InProgress:   true,
+			ElapsedMS:    call.ElapsedMS,
+		})
+	}
+	if len(interactions) == 0 {
+		return nil
+	}
+	return interactions
 }
 
 func cloneBoolMap(source map[string]bool) map[string]bool {
@@ -3512,6 +3807,11 @@ func appendRawEvent(state *State, spec rawEventSpec) {
 			payloadJSON = string(encoded)
 		}
 	}
+	if spec.source == "llm" || spec.source == "decision" {
+		payloadJSON = ""
+	} else {
+		payloadJSON = limitTextRunes(payloadJSON, 1200)
+	}
 	state.RawEventLog = append(state.RawEventLog, RawEventEntry{
 		ID:           uuid.NewString(),
 		Turn:         state.TurnState.Turn,
@@ -3524,4 +3824,7 @@ func appendRawEvent(state *State, spec rawEventSpec) {
 		PayloadJSON:  payloadJSON,
 		OccurredAt:   time.Now().UTC(),
 	})
+	if len(state.RawEventLog) > maxRawEventHistory {
+		state.RawEventLog = state.RawEventLog[len(state.RawEventLog)-maxRawEventHistory:]
+	}
 }

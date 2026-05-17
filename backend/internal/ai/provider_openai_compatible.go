@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,10 +75,12 @@ type requestSpec struct {
 
 // OpenAICompatibleProvider 结构体用于承载该模块的核心数据。
 type OpenAICompatibleProvider struct {
-	name       ProviderName
-	mode       StructuredOutputMode
-	httpClient *http.Client
-	endpoints  []providerEndpoint
+	name        ProviderName
+	mode        StructuredOutputMode
+	httpClient  *http.Client
+	validator   Validator
+	endpoints   []providerEndpoint
+	rotationSeq atomic.Uint64
 }
 
 // NewOpenAICompatibleProvider 创建兼容 OpenAI 协议的 provider，并装配主备端点链路。
@@ -87,11 +90,13 @@ func NewOpenAICompatibleProvider(
 	fallbacks []EndpointConfig,
 	mode StructuredOutputMode,
 	httpClient *http.Client,
+	validator Validator,
 ) *OpenAICompatibleProvider {
 	provider := &OpenAICompatibleProvider{
 		name:       name,
 		mode:       mode,
 		httpClient: httpClient,
+		validator:  validator,
 	}
 	if provider.httpClient == nil {
 		provider.httpClient = http.DefaultClient
@@ -149,7 +154,9 @@ func (p *OpenAICompatibleProvider) GenerateJSON(
 	failures := make([]error, 0, len(p.endpoints)*totalChainAttempts)
 
 	for chainAttempt := 0; chainAttempt < totalChainAttempts; chainAttempt++ {
-		for _, endpoint := range p.endpoints {
+		endpoints := p.orderedEndpointsForRequest()
+		for index := 0; index < len(endpoints); index++ {
+			endpoint := endpoints[index]
 			if chainAttempt > 0 && !retryableEndpoint(endpoint) {
 				continue
 			}
@@ -160,6 +167,32 @@ func (p *OpenAICompatibleProvider) GenerateJSON(
 			result, endpointAttempts, err := p.generateWithEndpoint(ctx, endpoint, request)
 			attempts = append(attempts, endpointAttempts...)
 			if err == nil {
+				if validationErr := p.validateProviderResponse(endpoint, request, result); validationErr != nil {
+					attempts = append(attempts, CompletionAttempt{
+						Provider:  string(p.name),
+						Endpoint:  endpoint.role + "_validation",
+						BaseURL:   endpoint.baseURL,
+						WireAPI:   endpoint.wireAPI,
+						Model:     result.Model,
+						Succeeded: false,
+						Error:     validationErr.Error(),
+					})
+					failures = append(failures, fmt.Errorf(
+						"chain attempt %d/%d on %s[%s]: returned invalid payload: %w",
+						chainAttempt+1,
+						totalChainAttempts,
+						p.name,
+						endpoint.role,
+						validationErr,
+					))
+					if !shouldTryNextKeyForSameModel(endpointAttempts) {
+						signature := endpointRotationSignature(endpoint)
+						for index+1 < len(endpoints) && endpointRotationSignature(endpoints[index+1]) == signature {
+							index++
+						}
+					}
+					continue
+				}
 				result.Attempts = append([]CompletionAttempt{}, attempts...)
 				return result, nil
 			}
@@ -172,6 +205,12 @@ func (p *OpenAICompatibleProvider) GenerateJSON(
 				endpoint.role,
 				err,
 			))
+			if !shouldTryNextKeyForSameModel(endpointAttempts) {
+				signature := endpointRotationSignature(endpoint)
+				for index+1 < len(endpoints) && endpointRotationSignature(endpoints[index+1]) == signature {
+					index++
+				}
+			}
 		}
 
 		if chainAttempt+1 < totalChainAttempts {
@@ -186,6 +225,30 @@ func (p *OpenAICompatibleProvider) GenerateJSON(
 	}
 
 	return ProviderResponse{Attempts: attempts}, errors.Join(failures...)
+}
+
+func (p *OpenAICompatibleProvider) validateProviderResponse(
+	endpoint providerEndpoint,
+	request ProviderRequest,
+	response ProviderResponse,
+) error {
+	if p.validator == nil {
+		return nil
+	}
+	if err := p.validator.Validate(request.SchemaName, request.ResponseSchema, response.Output); err != nil {
+		return fmt.Errorf("schema validation failed for %s[%s]: %w", p.name, endpoint.role, err)
+	}
+	return nil
+}
+
+func shouldTryNextKeyForSameModel(attempts []CompletionAttempt) bool {
+	for index := len(attempts) - 1; index >= 0; index-- {
+		if attempts[index].StatusCode == 0 {
+			continue
+		}
+		return attempts[index].StatusCode == http.StatusTooManyRequests
+	}
+	return false
 }
 
 // generateWithEndpoint 在单个端点上执行请求，处理请求构造与 429 重试策略。
@@ -285,7 +348,7 @@ func (p *OpenAICompatibleProvider) sendOnce(
 	if response.StatusCode == http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
 		attempt.Error = strings.TrimSpace(string(body))
-		return ProviderResponse{}, attempt, retryableEndpoint(endpoint), fmt.Errorf(
+		return ProviderResponse{}, attempt, false, fmt.Errorf(
 			"%s[%s] request failed with 429: %s",
 			p.name,
 			endpoint.role,
@@ -363,23 +426,87 @@ func (p *OpenAICompatibleProvider) httpRetryCount(endpoint providerEndpoint) int
 	return http429RetryCount
 }
 
-// appendEndpoint 构建并去重后追加端点到 provider 链路。
+// appendEndpoint 构建并去重后追加端点到 provider 链路。APIKey 支持逗号/换行分隔的多 key。
 func (p *OpenAICompatibleProvider) appendEndpoint(role string, config EndpointConfig) {
-	endpoint, ok := buildProviderEndpoint(role, config)
-	if !ok {
+	keys := splitAPIKeys(config.APIKey)
+	if len(keys) == 0 {
 		return
 	}
-
-	for _, existing := range p.endpoints {
-		if existing.baseURL == endpoint.baseURL &&
-			existing.wireAPI == endpoint.wireAPI &&
-			existing.apiKey == endpoint.apiKey &&
-			existing.model == endpoint.model {
-			return
+	for _, key := range keys {
+		config.APIKey = key
+		endpoint, ok := buildProviderEndpoint(role, config)
+		if !ok {
+			continue
 		}
-	}
 
-	p.endpoints = append(p.endpoints, endpoint)
+		exists := false
+		for _, existing := range p.endpoints {
+			if existing.baseURL == endpoint.baseURL &&
+				existing.wireAPI == endpoint.wireAPI &&
+				existing.apiKey == endpoint.apiKey &&
+				existing.model == endpoint.model {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+
+		p.endpoints = append(p.endpoints, endpoint)
+	}
+}
+
+func (p *OpenAICompatibleProvider) orderedEndpointsForRequest() []providerEndpoint {
+	if len(p.endpoints) <= 1 {
+		return append([]providerEndpoint{}, p.endpoints...)
+	}
+	seq := int(p.rotationSeq.Add(1) - 1)
+	ordered := make([]providerEndpoint, 0, len(p.endpoints))
+	for index := 0; index < len(p.endpoints); {
+		end := index + 1
+		signature := endpointRotationSignature(p.endpoints[index])
+		for end < len(p.endpoints) && endpointRotationSignature(p.endpoints[end]) == signature {
+			end++
+		}
+		group := p.endpoints[index:end]
+		offset := 0
+		if len(group) > 1 {
+			offset = seq % len(group)
+		}
+		ordered = append(ordered, group[offset:]...)
+		ordered = append(ordered, group[:offset]...)
+		index = end
+	}
+	return ordered
+}
+
+func endpointRotationSignature(endpoint providerEndpoint) string {
+	return strings.Join([]string{
+		endpoint.role,
+		endpoint.baseURL,
+		endpoint.wireAPI,
+		endpoint.model,
+	}, "\x00")
+}
+
+func splitAPIKeys(raw string) []string {
+	normalized := strings.NewReplacer("\n", ",", "\r", ",", ";", ",").Replace(raw)
+	parts := strings.Split(normalized, ",")
+	keys := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		key := strings.TrimSpace(part)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // buildProviderEndpoint 把外部端点配置规范化为运行时端点结构。
@@ -494,6 +621,9 @@ func (p *OpenAICompatibleProvider) buildRequestSpec(endpoint providerEndpoint, r
 	if effectiveMaxTokens > 0 {
 		payload["max_tokens"] = effectiveMaxTokens
 	}
+	if isDashScopeEndpoint(endpoint) {
+		payload["enable_thinking"] = dashScopeThinkingEnabled(endpoint)
+	}
 
 	spec := requestSpec{
 		path:   "/chat/completions",
@@ -593,10 +723,26 @@ func supportsNativeChatResponseFormat(endpoint providerEndpoint) bool {
 	switch endpoint.baseURL {
 	case "https://2c2ch1u11-share-api-0.hf.space/v1",
 		"https://openrouter.ai/api/v1",
-		"https://anyrouter.wuname.eu.org/v1":
+		"https://anyrouter.wuname.eu.org/v1",
+		"https://dashscope.aliyuncs.com/compatible-mode/v1":
 		return false
 	default:
 		return true
+	}
+}
+
+func isDashScopeEndpoint(endpoint providerEndpoint) bool {
+	return endpoint.baseURL == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+}
+
+func dashScopeThinkingEnabled(endpoint providerEndpoint) bool {
+	switch strings.ToLower(strings.TrimSpace(endpoint.reasoningEffort)) {
+	case "0", "false", "off", "none", "disabled", "disable":
+		return false
+	case "1", "true", "on", "enabled", "enable", "low", "medium", "high":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -642,7 +788,12 @@ func parseChatCompletionResponse(
 	}
 
 	if len(decoded.Choices) == 0 {
-		return ProviderResponse{}, fmt.Errorf("%s[%s] response had no choices", providerName, endpoint.role)
+		return ProviderResponse{}, fmt.Errorf(
+			"%s[%s] response had no choices: %s",
+			providerName,
+			endpoint.role,
+			describeUnexpectedChatResponse(responseBody),
+		)
 	}
 
 	content, err := extractMessageContent(decoded.Choices[0].Message.Content)
@@ -666,6 +817,48 @@ func parseChatCompletionResponse(
 			TotalTokens:      decoded.Usage.TotalTokens,
 		},
 	}, nil
+}
+
+func describeUnexpectedChatResponse(responseBody []byte) string {
+	var decoded map[string]any
+	if err := json.Unmarshal(responseBody, &decoded); err == nil {
+		if errorValue, ok := decoded["error"]; ok {
+			return "provider returned error payload: " + compactJSONValue(errorValue, 800)
+		}
+		if choices, ok := decoded["choices"].([]any); ok && len(choices) == 0 {
+			return "provider returned empty choices; body=" + compactJSONBytes(responseBody, 800)
+		}
+		return "body=" + compactJSONBytes(responseBody, 800)
+	}
+	return "body=" + truncateString(strings.TrimSpace(string(responseBody)), 800)
+}
+
+func compactJSONValue(value any, limit int) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return truncateString(fmt.Sprint(value), limit)
+	}
+	return truncateString(string(encoded), limit)
+}
+
+func compactJSONBytes(raw []byte, limit int) string {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return truncateString(strings.TrimSpace(string(raw)), limit)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return truncateString(strings.TrimSpace(string(raw)), limit)
+	}
+	return truncateString(string(encoded), limit)
+}
+
+func truncateString(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...[truncated]"
 }
 
 // parseStreamingChatCompletionResponse 解析流式 chat-completions 的 SSE 增量文本。

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 //go:embed schema.sql
@@ -28,6 +30,7 @@ func Open(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	dbdialect.Register(db, dbdialect.DialectSQLite)
 
 	db.SetConnMaxLifetime(0)
 	db.SetMaxIdleConns(1)

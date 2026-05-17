@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{3,32}$`)
@@ -78,8 +80,36 @@ func (service *Service) EnsureSchema(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_accounts_sessions_user_id ON accounts_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_accounts_sessions_expires_at ON accounts_sessions(expires_at);
 	`
-	if _, err := service.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("ensure account schema: %w", err)
+	if dbdialect.IsMySQL(service.db) {
+		schema = `
+		CREATE TABLE IF NOT EXISTS accounts_users (
+			id VARCHAR(191) PRIMARY KEY,
+			username VARCHAR(191) NOT NULL UNIQUE,
+			display_name VARCHAR(191) NOT NULL,
+			password_hash VARCHAR(191) NOT NULL,
+			created_at VARCHAR(64) NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+			updated_at VARCHAR(64) NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+		CREATE TABLE IF NOT EXISTS accounts_sessions (
+			token VARCHAR(191) PRIMARY KEY,
+			user_id VARCHAR(191) NOT NULL,
+			expires_at VARCHAR(64) NOT NULL,
+			created_at VARCHAR(64) NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+			INDEX idx_accounts_sessions_user_id (user_id),
+			INDEX idx_accounts_sessions_expires_at (expires_at),
+			CONSTRAINT fk_accounts_sessions_user FOREIGN KEY (user_id) REFERENCES accounts_users(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`
+	}
+	for _, statement := range strings.Split(schema, ";") {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		if _, err := service.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("ensure account schema: %w", err)
+		}
 	}
 	return nil
 }
@@ -105,35 +135,26 @@ func (service *Service) Register(ctx context.Context, username string, displayNa
 		Username:    username,
 		DisplayName: displayName,
 	}
-	var createdAtRaw any
-	var updatedAtRaw any
-
-	row := service.db.QueryRowContext(
+	now := time.Now().UTC()
+	_, err = service.db.ExecContext(
 		ctx,
 		`
 		INSERT INTO accounts_users (id, username, display_name, password_hash)
-		VALUES ($1, $2, $3, $4)
-		RETURNING created_at, updated_at
+		VALUES (?, ?, ?, ?)
 		`,
 		user.ID,
 		user.Username,
 		user.DisplayName,
 		string(hash),
 	)
-	if err := row.Scan(&createdAtRaw, &updatedAtRaw); err != nil {
+	if err != nil {
 		if isUniqueViolation(err) {
 			return User{}, fmt.Errorf("username already exists")
 		}
 		return User{}, fmt.Errorf("create account user: %w", err)
 	}
-	user.CreatedAt, err = parseAccountTime(createdAtRaw)
-	if err != nil {
-		return User{}, err
-	}
-	user.UpdatedAt, err = parseAccountTime(updatedAtRaw)
-	if err != nil {
-		return User{}, err
-	}
+	user.CreatedAt = now
+	user.UpdatedAt = now
 	return user, nil
 }
 
@@ -159,7 +180,7 @@ func (service *Service) Login(ctx context.Context, username string, password str
 		`
 		SELECT id, username, display_name, password_hash, created_at, updated_at
 		FROM accounts_users
-		WHERE username = $1
+		WHERE username = ?
 		`,
 		username,
 	).Scan(
@@ -197,7 +218,7 @@ func (service *Service) Login(ctx context.Context, username string, password str
 		ctx,
 		`
 		INSERT INTO accounts_sessions (token, user_id, expires_at)
-		VALUES ($1, $2, $3)
+		VALUES (?, ?, ?)
 		`,
 		token,
 		user.ID,
@@ -211,7 +232,7 @@ func (service *Service) Login(ctx context.Context, username string, password str
 		Token:     token,
 		ExpiresAt: expiresAt,
 		TokenType: "Bearer",
-		Provider:  "postgres",
+		Provider:  string(dbdialect.For(service.db)),
 	}, nil
 }
 
@@ -238,7 +259,7 @@ func (service *Service) CurrentUser(ctx context.Context, token string) (User, er
 		SELECT u.id, u.username, u.display_name, u.created_at, u.updated_at
 		FROM accounts_sessions s
 		JOIN accounts_users u ON u.id = s.user_id
-		WHERE s.token = $1 AND s.expires_at > CURRENT_TIMESTAMP
+		WHERE s.token = ? AND s.expires_at > CURRENT_TIMESTAMP
 		`,
 		token,
 	).Scan(
@@ -274,7 +295,7 @@ func (service *Service) Logout(ctx context.Context, token string) error {
 	if token == "" {
 		return fmt.Errorf("token is required")
 	}
-	if _, err := service.db.ExecContext(ctx, `DELETE FROM accounts_sessions WHERE token = $1`, token); err != nil {
+	if _, err := service.db.ExecContext(ctx, `DELETE FROM accounts_sessions WHERE token = ?`, token); err != nil {
 		return fmt.Errorf("delete account session: %w", err)
 	}
 	return nil
@@ -332,7 +353,7 @@ func isUniqueViolation(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "duplicate key") || strings.Contains(text, "unique constraint")
+	return strings.Contains(text, "duplicate key") || strings.Contains(text, "unique constraint") || strings.Contains(text, "duplicate entry")
 }
 
 // parseAccountTime 解析数据库返回的时间字段（兼容 time/string/[]byte）。

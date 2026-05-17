@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -761,7 +762,6 @@ func (service *Service) refreshUnitMemorySalience(ctx context.Context, unitID st
 	if err != nil {
 		return fmt.Errorf("query memories for salience refresh: %w", err)
 	}
-	defer rows.Close()
 
 	type update struct {
 		id       string
@@ -773,6 +773,7 @@ func (service *Service) refreshUnitMemorySalience(ctx context.Context, unitID st
 		var emotionWeight float64
 		var metadataJSON string
 		if err := rows.Scan(&id, &emotionWeight, &metadataJSON); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan memory row: %w", err)
 		}
 		meta := decodeMemoryMetadata(metadataJSON)
@@ -782,7 +783,11 @@ func (service *Service) refreshUnitMemorySalience(ctx context.Context, unitID st
 		})
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return fmt.Errorf("iterate memory rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close memory rows: %w", err)
 	}
 
 	for _, updateItem := range updates {
@@ -830,7 +835,6 @@ func (service *Service) applyGroupResonance(
 	if err != nil {
 		return fmt.Errorf("query group resonance memories: %w", err)
 	}
-	defer rows.Close()
 
 	type candidate struct {
 		ID       string
@@ -844,6 +848,7 @@ func (service *Service) applyGroupResonance(
 		var unitID string
 		var metadataJSON string
 		if err := rows.Scan(&id, &unitID, &metadataJSON); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan group resonance row: %w", err)
 		}
 		meta := decodeMemoryMetadata(metadataJSON)
@@ -858,7 +863,11 @@ func (service *Service) applyGroupResonance(
 		unitSet[unitID] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return fmt.Errorf("iterate group resonance rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close group resonance rows: %w", err)
 	}
 	if len(unitSet) < 3 {
 		return nil
@@ -904,13 +913,22 @@ func (service *Service) ensureMemoryFTS(ctx context.Context) error {
 		return fmt.Errorf("memory fts unavailable: missing db")
 	}
 	service.memoryFTSOnce.Do(func() {
-		_, service.memoryFTSErr = service.db.ExecContext(
-			ctx,
-			`
+		query := `
 			CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
 			USING fts5(memory_id UNINDEXED, unit_id UNINDEXED, summary)
-			`,
-		)
+			`
+		if dbdialect.IsMySQL(service.db) {
+			query = `
+			CREATE TABLE IF NOT EXISTS memories_fts (
+				memory_id VARCHAR(191) PRIMARY KEY,
+				unit_id VARCHAR(191) NOT NULL,
+				summary TEXT NOT NULL,
+				INDEX idx_memories_fts_unit_id (unit_id),
+				FULLTEXT INDEX idx_memories_fts_summary (summary)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+			`
+		}
+		_, service.memoryFTSErr = service.db.ExecContext(ctx, query)
 	})
 	return service.memoryFTSErr
 }
@@ -986,6 +1004,9 @@ func (service *Service) searchMemoryFTS(ctx context.Context, unitID string, quer
 	if strings.TrimSpace(query) == "" || limit <= 0 {
 		return nil, nil
 	}
+	if dbdialect.IsMySQL(service.db) {
+		return service.searchMemoryFTSLike(ctx, unitID, query, limit)
+	}
 	rows, err := service.db.QueryContext(
 		ctx,
 		`
@@ -1002,24 +1023,32 @@ func (service *Service) searchMemoryFTS(ctx context.Context, unitID string, quer
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	ids := make([]string, 0, limit)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if len(ids) > 0 {
 		return ids, nil
 	}
 
-	// FTS tokenization for CJK can be inconsistent across sqlite builds; keep a LIKE fallback.
+	return service.searchMemoryFTSLike(ctx, unitID, query, limit)
+}
+
+func (service *Service) searchMemoryFTSLike(ctx context.Context, unitID string, query string, limit int) ([]string, error) {
+	ids := make([]string, 0, limit)
 	likeNeedle := normalizeFTSLikeNeedle(query)
 	if likeNeedle == "" {
 		return ids, nil

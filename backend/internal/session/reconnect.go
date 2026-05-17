@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/engine/turns"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -87,15 +88,25 @@ func (service *Service) recordPhaseBoundarySnapshot(
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := service.db.ExecContext(
-		ctx,
-		`
+	query := `
 		INSERT INTO session_phase_snapshots (id, session_id, turn, phase, snapshot_json, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, turn, phase) DO UPDATE SET
 			snapshot_json = excluded.snapshot_json,
 			created_at = excluded.created_at
-		`,
+		`
+	if dbdialect.IsMySQL(service.db) {
+		query = `
+		INSERT INTO session_phase_snapshots (id, session_id, turn, phase, snapshot_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			snapshot_json = VALUES(snapshot_json),
+			created_at = VALUES(created_at)
+		`
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		query,
 		uuid.NewString(),
 		state.ID,
 		state.TurnState.Turn,
@@ -106,9 +117,7 @@ func (service *Service) recordPhaseBoundarySnapshot(
 		return fmt.Errorf("upsert phase boundary snapshot: %w", err)
 	}
 
-	if _, err := service.db.ExecContext(
-		ctx,
-		`
+	trimQuery := `
 		DELETE FROM session_phase_snapshots
 		WHERE
 			session_id = ? AND
@@ -119,7 +128,26 @@ func (service *Service) recordPhaseBoundarySnapshot(
 				ORDER BY created_at DESC
 				LIMIT ?
 			)
-		`,
+		`
+	if dbdialect.IsMySQL(service.db) {
+		trimQuery = `
+		DELETE FROM session_phase_snapshots
+		WHERE
+			session_id = ? AND
+			id NOT IN (
+				SELECT id FROM (
+					SELECT id
+					FROM session_phase_snapshots
+					WHERE session_id = ?
+					ORDER BY created_at DESC
+					LIMIT ?
+				) retained_phase_snapshots
+			)
+		`
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		trimQuery,
 		state.ID,
 		state.ID,
 		maxPhaseBoundarySnapshots,

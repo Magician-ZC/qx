@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // 常量定义区：集中声明该文件使用的共享配置。
@@ -132,15 +134,25 @@ func (service *Service) PurgeExpiredSessionData(
 		CutoffUnix:    cutoff.Unix(),
 	}
 
-	rows, err := service.db.QueryContext(
-		ctx,
-		`
+	query := `
 		SELECT id
 		FROM single_player_sessions
 		WHERE julianday(updated_at) < julianday(?)
 		ORDER BY updated_at ASC
 		LIMIT ?
-		`,
+		`
+	if dbdialect.IsMySQL(service.db) {
+		query = `
+		SELECT id
+		FROM single_player_sessions
+		WHERE updated_at < ?
+		ORDER BY updated_at ASC
+		LIMIT ?
+		`
+	}
+	rows, err := service.db.QueryContext(
+		ctx,
+		query,
 		cutoff.Format(time.RFC3339Nano),
 		limit,
 	)

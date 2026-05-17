@@ -177,7 +177,7 @@ func summarizeImmediateEnvironment(state State, byID map[string]*unit.Record, ac
 	}
 
 	return fmt.Sprintf(
-		"天气=%s 脚下=%s 设施=%s 饥饿=%d HP=%d 贴身友军=%s %s 近期伤亡=%s",
+		"天气=%s 脚下=%s 设施=%s 饥饿=%d HP=%d 贴身友军=%s %s 附近受伤=%s 近期伤亡=%s",
 		state.Weather.DisplayName,
 		terrain,
 		structure,
@@ -185,8 +185,214 @@ func summarizeImmediateEnvironment(state State, byID map[string]*unit.Record, ac
 		actor.Status.HP,
 		strings.Join(allies, "、"),
 		threatSummary,
+		summarizeVisibleInjuredUnitsForPrompt(state, byID, actor, 4),
 		summarizeCasualtiesForPrompt(state, byID, actor, 3),
 	)
+}
+
+// summarizeVisibleInjuredUnitsForPrompt 汇总单位能看见的受伤单位，便于 LLM 主动救援、交易药品或规避风险。
+func summarizeVisibleInjuredUnitsForPrompt(state State, byID map[string]*unit.Record, actor *unit.Record, limit int) string {
+	if actor == nil || len(byID) == 0 || limit <= 0 {
+		return "无"
+	}
+	orderedIDs := append([]string{}, state.PlayerUnitIDs...)
+	orderedIDs = append(orderedIDs, state.EnemyUnitIDs...)
+	orderedIDs = append(orderedIDs, state.WildUnitIDs...)
+	seen := make(map[string]bool, len(orderedIDs))
+	lines := make([]string, 0, limit)
+	add := func(unitID string) {
+		if len(lines) >= limit || seen[unitID] {
+			return
+		}
+		seen[unitID] = true
+		record := byID[unitID]
+		if record == nil || record.ID == actor.ID || !isBattleReady(*record) || !unitLooksInjured(*record) {
+			return
+		}
+		if !unitInVisionOfActor(state, actor, record) {
+			return
+		}
+		distance := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, record.Status.PositionQ, record.Status.PositionR)
+		factionLabel := "其他"
+		if record.FactionID == actor.FactionID {
+			factionLabel = "友军"
+		} else if isPlayerEnemyFactionPair(state, actor.FactionID, record.FactionID) {
+			factionLabel = "敌方"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s%s在%d,%d，距你%d格，HP=%d，伤势=%s",
+			factionLabel,
+			record.DisplayName(),
+			record.Status.PositionQ,
+			record.Status.PositionR,
+			distance,
+			record.Status.HP,
+			injurySummaryForPrompt(*record),
+		))
+	}
+	for _, unitID := range orderedIDs {
+		add(unitID)
+	}
+	for unitID := range byID {
+		add(unitID)
+	}
+	if len(lines) == 0 {
+		return "无"
+	}
+	return strings.Join(lines, "；")
+}
+
+// summarizeVisibleUnitActivityForPrompt 汇总视野内单位的当前状态与最近动向。
+func summarizeVisibleUnitActivityForPrompt(state State, byID map[string]*unit.Record, actor *unit.Record, unitLimit int, logLimit int) string {
+	if actor == nil || len(byID) == 0 {
+		return "无"
+	}
+	visibleIDs := visibleUnitIDsForPrompt(state, byID, actor, unitLimit)
+	if len(visibleIDs) == 0 {
+		return "无"
+	}
+	visibleSet := make(map[string]struct{}, len(visibleIDs))
+	unitLines := make([]string, 0, len(visibleIDs))
+	for _, unitID := range visibleIDs {
+		record := byID[unitID]
+		if record == nil {
+			continue
+		}
+		visibleSet[unitID] = struct{}{}
+		factionLabel := "其他"
+		if record.FactionID == actor.FactionID {
+			factionLabel = "友军"
+		} else if isPlayerEnemyFactionPair(state, actor.FactionID, record.FactionID) {
+			factionLabel = "敌方"
+		}
+		distance := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, record.Status.PositionQ, record.Status.PositionR)
+		unitLines = append(unitLines, fmt.Sprintf(
+			"%s%s@%d,%d 距%d HP=%d 饥饿=%d 状态=%s",
+			factionLabel,
+			record.DisplayName(),
+			record.Status.PositionQ,
+			record.Status.PositionR,
+			distance,
+			record.Status.HP,
+			record.Status.Hunger,
+			record.Status.LifeState,
+		))
+	}
+	logLines := visibleUnitRecentLogLines(state, byID, visibleSet, logLimit)
+	if len(logLines) == 0 {
+		return fmt.Sprintf("当前可见: %s；最近动向: 无", strings.Join(unitLines, "；"))
+	}
+	return fmt.Sprintf("当前可见: %s；最近动向: %s", strings.Join(unitLines, "；"), strings.Join(logLines, "；"))
+}
+
+func visibleUnitIDsForPrompt(state State, byID map[string]*unit.Record, actor *unit.Record, limit int) []string {
+	orderedIDs := append([]string{}, state.PlayerUnitIDs...)
+	orderedIDs = append(orderedIDs, state.EnemyUnitIDs...)
+	orderedIDs = append(orderedIDs, state.WildUnitIDs...)
+	seen := make(map[string]bool, len(orderedIDs))
+	ids := make([]string, 0, limit)
+	add := func(unitID string) {
+		if unitID == "" || seen[unitID] || unitID == actor.ID || (limit > 0 && len(ids) >= limit) {
+			return
+		}
+		seen[unitID] = true
+		record := byID[unitID]
+		if record == nil || !isBattleReady(*record) || !unitInVisionOfActor(state, actor, record) {
+			return
+		}
+		ids = append(ids, unitID)
+	}
+	for _, unitID := range orderedIDs {
+		add(unitID)
+	}
+	for unitID := range byID {
+		add(unitID)
+	}
+	return ids
+}
+
+func visibleUnitRecentLogLines(state State, byID map[string]*unit.Record, visibleSet map[string]struct{}, limit int) []string {
+	if limit <= 0 || len(visibleSet) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, limit)
+	for index := len(state.RawEventLog) - 1; index >= 0 && len(lines) < limit; index-- {
+		entry := state.RawEventLog[index]
+		if _, ok := visibleSet[entry.ActorUnitID]; !ok {
+			if _, ok := visibleSet[entry.TargetUnitID]; !ok {
+				continue
+			}
+		}
+		actorName := displayNameByID(byID, entry.ActorUnitID)
+		targetName := displayNameByID(byID, entry.TargetUnitID)
+		summary := limitTextRunes(strings.TrimSpace(entry.Summary), 72)
+		if summary == "" {
+			continue
+		}
+		if actorName != "" && targetName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s/%s %s->%s：%s", entry.Turn, entry.Source, entry.Kind, actorName, targetName, summary))
+		} else if actorName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s/%s %s：%s", entry.Turn, entry.Source, entry.Kind, actorName, summary))
+		} else if targetName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s/%s %s相关：%s", entry.Turn, entry.Source, entry.Kind, targetName, summary))
+		}
+	}
+	if len(lines) >= limit {
+		return lines
+	}
+	for index := len(state.Logs) - 1; index >= 0 && len(lines) < limit; index-- {
+		entry := state.Logs[index]
+		if _, ok := visibleSet[entry.ActorUnitID]; !ok {
+			if _, ok := visibleSet[entry.TargetUnitID]; !ok {
+				continue
+			}
+		}
+		actorName := displayNameByID(byID, entry.ActorUnitID)
+		targetName := displayNameByID(byID, entry.TargetUnitID)
+		message := limitTextRunes(strings.TrimSpace(entry.Message), 72)
+		if actorName != "" && targetName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s->%s：%s", entry.Turn, actorName, targetName, message))
+		} else if actorName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s：%s", entry.Turn, actorName, message))
+		} else if targetName != "" {
+			lines = append(lines, fmt.Sprintf("T%d %s相关：%s", entry.Turn, targetName, message))
+		} else {
+			lines = append(lines, fmt.Sprintf("T%d：%s", entry.Turn, message))
+		}
+	}
+	return lines
+}
+
+func displayNameByID(byID map[string]*unit.Record, unitID string) string {
+	if record := byID[unitID]; record != nil {
+		return record.DisplayName()
+	}
+	return ""
+}
+
+func unitLooksInjured(record unit.Record) bool {
+	return record.Status.HP > 0 && (record.Status.HP < 100 || len(record.Status.Injuries) > 0 || len(record.Status.Debuffs) > 0)
+}
+
+func injurySummaryForPrompt(record unit.Record) string {
+	parts := make([]string, 0, 2)
+	if len(record.Status.Injuries) > 0 {
+		parts = append(parts, strings.Join(record.Status.Injuries, "/"))
+	}
+	if len(record.Status.Debuffs) > 0 {
+		parts = append(parts, strings.Join(record.Status.Debuffs, "/"))
+	}
+	if len(parts) == 0 {
+		switch {
+		case record.Status.HP <= 25:
+			return "重伤"
+		case record.Status.HP <= 60:
+			return "受伤"
+		default:
+			return "轻伤"
+		}
+	}
+	return strings.Join(parts, "，")
 }
 
 // summarizeCasualtiesForPrompt 汇总单位能感知到的阵亡/倒下单位，显式放入 LLM 上下文。
@@ -208,7 +414,7 @@ func summarizeCasualtiesForPrompt(state State, byID map[string]*unit.Record, act
 		if record == nil || record.ID == actor.ID || record.Status.HP > 0 && record.Status.LifeState == unit.LifeStateActive {
 			return
 		}
-		if !casualtyVisibleToActor(state, actor, record) {
+		if !unitVisibleToActor(state, actor, record) {
 			return
 		}
 		factionLabel := "其他阵营"
@@ -339,12 +545,19 @@ func casualtyCauseFromRawEvent(entry RawEventEntry, byID map[string]*unit.Record
 	return strings.TrimSpace(payload.ReasonText)
 }
 
-func casualtyVisibleToActor(state State, actor *unit.Record, record *unit.Record) bool {
+func unitVisibleToActor(state State, actor *unit.Record, record *unit.Record) bool {
 	if actor == nil || record == nil {
 		return false
 	}
 	if actor.FactionID == record.FactionID {
 		return true
+	}
+	return unitInVisionOfActor(state, actor, record)
+}
+
+func unitInVisionOfActor(state State, actor *unit.Record, record *unit.Record) bool {
+	if actor == nil || record == nil {
+		return false
 	}
 	if !state.FogOfWarEnabled {
 		return true

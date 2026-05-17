@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -96,9 +97,7 @@ func (service *Service) applyRelationShift(
 		return false, fmt.Errorf("marshal relation note: %w", err)
 	}
 
-	if _, err := service.db.ExecContext(
-		ctx,
-		`
+	query := `
 		INSERT INTO relations (
 			source_unit_id,
 			target_unit_id,
@@ -116,7 +115,31 @@ func (service *Service) applyRelationShift(
 			rivalry = MIN(10.0, MAX(-10.0, relations.rivalry + excluded.rivalry)),
 			notes_json = excluded.notes_json,
 			updated_at = excluded.updated_at
-		`,
+		`
+	if dbdialect.IsMySQL(service.db) {
+		query = `
+		INSERT INTO relations (
+			source_unit_id,
+			target_unit_id,
+			trust,
+			fear,
+			affection,
+			rivalry,
+			notes_json,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			trust = LEAST(10.0, GREATEST(-10.0, relations.trust + VALUES(trust))),
+			fear = LEAST(10.0, GREATEST(-10.0, relations.fear + VALUES(fear))),
+			affection = LEAST(10.0, GREATEST(-10.0, relations.affection + VALUES(affection))),
+			rivalry = LEAST(10.0, GREATEST(-10.0, relations.rivalry + VALUES(rivalry))),
+			notes_json = VALUES(notes_json),
+			updated_at = VALUES(updated_at)
+		`
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		query,
 		source.ID,
 		target.ID,
 		delta.Trust,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -25,6 +26,8 @@ func NewRepository(db *sql.DB) *Repository {
 
 // Save 持久化会话状态（插入或覆盖更新）。
 func (repository *Repository) Save(ctx context.Context, state *State) error {
+	compactStateForStorage(state)
+
 	now := time.Now().UTC()
 	if state.CreatedAt.IsZero() {
 		state.CreatedAt = now
@@ -36,15 +39,25 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("marshal session state: %w", err)
 	}
 
-	if _, err := repository.db.ExecContext(
-		ctx,
-		`
+	query := `
 		INSERT INTO single_player_sessions (id, state_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			state_json = excluded.state_json,
 			updated_at = excluded.updated_at
-		`,
+		`
+	if dbdialect.IsMySQL(repository.db) {
+		query = `
+		INSERT INTO single_player_sessions (id, state_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			state_json = VALUES(state_json),
+			updated_at = VALUES(updated_at)
+		`
+	}
+	if _, err := repository.db.ExecContext(
+		ctx,
+		query,
 		state.ID,
 		string(encodedState),
 		state.CreatedAt.Format(time.RFC3339Nano),

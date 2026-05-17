@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -39,6 +40,14 @@ type romanceProposalPayload struct {
 	Reasoning        string `json:"reasoning"`
 }
 
+type childProfilePayload struct {
+	Name        string           `json:"name"`
+	Gender      string           `json:"gender"`
+	Biography   string           `json:"biography"`
+	Personality unit.Personality `json:"personality"`
+	NameReason  string           `json:"name_reason"`
+}
+
 var romanceConsentSchema = []byte(`{
   "type":"object",
   "properties":{
@@ -64,6 +73,33 @@ var romanceProposalSchema = []byte(`{
     "reasoning":{"type":"string","minLength":1}
   },
   "required":["proposer","proposal_accepted","left_line","right_line","summary","reasoning"],
+  "additionalProperties":false
+}`)
+
+var childProfileSchema = []byte(`{
+  "type":"object",
+  "properties":{
+    "name":{"type":"string","minLength":1,"maxLength":16},
+    "gender":{"type":"string","enum":["male","female","nonbinary"]},
+    "biography":{"type":"string","minLength":1,"maxLength":180},
+    "personality":{
+      "type":"object",
+      "properties":{
+        "courage":{"type":"number","minimum":0.05,"maximum":0.95},
+        "loyalty":{"type":"number","minimum":0.05,"maximum":0.95},
+        "aggression":{"type":"number","minimum":0.05,"maximum":0.95},
+        "prudence":{"type":"number","minimum":0.05,"maximum":0.95},
+        "sociability":{"type":"number","minimum":0.05,"maximum":0.95},
+        "integrity":{"type":"number","minimum":0.05,"maximum":0.95},
+        "stability":{"type":"number","minimum":0.05,"maximum":0.95},
+        "ambition":{"type":"number","minimum":0.05,"maximum":0.95}
+      },
+      "required":["courage","loyalty","aggression","prudence","sociability","integrity","stability","ambition"],
+      "additionalProperties":false
+    },
+    "name_reason":{"type":"string","minLength":1,"maxLength":80}
+  },
+  "required":["name","gender","biography","personality","name_reason"],
   "additionalProperties":false
 }`)
 
@@ -107,7 +143,8 @@ func (service *Service) maybeResolveRomanceAndFamily(ctx context.Context, state 
 		pregnancy := registerPregnancy(state, left, right)
 		_ = service.units.Save(ctx, *left)
 		_ = service.units.Save(ctx, *right)
-		appendLog(state, "pregnancy", pregnancyStartedMessage(*state, byID, pregnancy, left, right), pregnancy.PregnantUnitID, "")
+		appendLog(state, "family", romanceConsentSuccessMessage(consent, left, right), left.ID, right.ID)
+		appendLog(state, "pregnancy", pregnancyStartedMessage(*state, byID, pregnancy, left, right), left.ID, right.ID)
 	}
 	service.maybeConvertWildling(ctx, state, byID, left, right)
 }
@@ -186,7 +223,8 @@ func (service *Service) executeFamily(ctx context.Context, state *State, byID ma
 	if err := service.units.Save(ctx, *target); err != nil {
 		return err
 	}
-	appendLog(state, "pregnancy", pregnancyStartedMessage(*state, byID, pregnancy, actor, target), pregnancy.PregnantUnitID, "")
+	appendLog(state, "family", romanceConsentSuccessMessage(consent, actor, target), actor.ID, target.ID)
+	appendLog(state, "pregnancy", pregnancyStartedMessage(*state, byID, pregnancy, actor, target), actor.ID, target.ID)
 	return service.applyActionHungerCost(ctx, state, actor, "商量家庭")
 }
 
@@ -354,7 +392,10 @@ func (service *Service) resolveDuePregnancies(ctx context.Context, state *State)
 			appendLog(state, "pregnancy_lost", "新生命没能等到出生。", pregnancy.PregnantUnitID, "")
 			continue
 		}
-		child := createChildUnit(*state, *left, *right)
+		birthCoord := findChildBirthCoord(state.Map, byID, *pregnant)
+		profile, _, interaction := service.generateChildProfile(ctx, *state, byID, *left, *right, *pregnant)
+		appendLLMInteraction(state, interaction)
+		child := createChildUnit(*state, *left, *right, birthCoord, profile)
 		if err := service.units.Save(ctx, child); err != nil {
 			appendLog(state, "romance_error", "新生命没能加入战场。", left.ID, right.ID)
 			remaining = append(remaining, pregnancy)
@@ -378,7 +419,25 @@ func (service *Service) resolveDuePregnancies(ctx context.Context, state *State)
 		if err := service.units.Save(ctx, *right); err != nil {
 			return err
 		}
-		appendLog(state, "birth", fmt.Sprintf("%s 和 %s 的孩子 %s 出生了；归属：%s。", left.DisplayName(), right.DisplayName(), child.DisplayName(), child.FactionID), child.ID, "")
+		appendDialogue(state, DialogueMessage{
+			ID:         uuid.NewString(),
+			UnitID:     left.ID,
+			Speaker:    "family_birth",
+			Message:    fmt.Sprintf("我和%s给孩子取名%s。", right.DisplayName(), child.DisplayName()),
+			Turn:       state.TurnState.Turn,
+			Phase:      state.TurnState.Phase,
+			OccurredAt: time.Now().UTC(),
+		})
+		appendDialogue(state, DialogueMessage{
+			ID:         uuid.NewString(),
+			UnitID:     right.ID,
+			Speaker:    "family_birth",
+			Message:    fmt.Sprintf("我和%s迎来了%s。", left.DisplayName(), child.DisplayName()),
+			Turn:       state.TurnState.Turn,
+			Phase:      state.TurnState.Phase,
+			OccurredAt: time.Now().UTC(),
+		})
+		appendLog(state, "birth", fmt.Sprintf("%s 和 %s 的孩子 %s 出生在 %d,%d；归属：%s。", left.DisplayName(), right.DisplayName(), child.DisplayName(), child.Status.PositionQ, child.Status.PositionR, child.FactionID), left.ID, right.ID)
 	}
 	state.Pregnancies = remaining
 	return nil
@@ -766,22 +825,173 @@ func hasEnoughPairDialogueTurns(state State, leftID string, rightID string, requ
 	return false
 }
 
-func createChildUnit(state State, left unit.Record, right unit.Record) unit.Record {
+func (service *Service) generateChildProfile(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	left unit.Record,
+	right unit.Record,
+	pregnant unit.Record,
+) (childProfilePayload, ai.CompletionResult, LLMInteraction) {
+	fallback := fallbackChildProfile(state, left, right)
+	systemPrompt := fmt.Sprintf(
+		"你是《群像》的家族档案生成器。%s 与 %s 的孩子即将出生，请同时扮演两位父母共同为孩子取名，并生成孩子的性别、生平和人格向量。名字要像父母在战局中会认真取的名字，不要叫“崽”，不要使用系统旁白。只能返回 JSON。",
+		left.DisplayName(),
+		right.DisplayName(),
+	)
+	userPrompt := buildChildProfilePrompt(state, byID, left, right, pregnant)
+	if service == nil || service.llm == nil {
+		result := ai.CompletionResult{Debug: ai.CompletionDebug{FallbackCause: "llm client is disabled"}}
+		return fallback, result, buildLLMInteraction(state, pregnant.ID, "child_profile", fallback.Name, systemPrompt, userPrompt, result, result.Debug.FallbackCause)
+	}
+	if llmBudgetGuardrailActive(state) {
+		result := budgetGuardrailResult(state)
+		return fallback, result, buildLLMInteraction(state, pregnant.ID, "child_profile", fallback.Name, systemPrompt, userPrompt, result, result.Debug.FallbackCause)
+	}
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskBackstory,
+		SchemaName:     "session_child_profile",
+		ResponseSchema: childProfileSchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.7,
+		MaxTokens:      420,
+		Timeout:        llmRequestTimeout,
+	})
+	if err != nil {
+		return fallback, result, buildLLMInteraction(state, pregnant.ID, "child_profile", fallback.Name, systemPrompt, userPrompt, result, err.Error())
+	}
+	var payload childProfilePayload
+	if err := json.Unmarshal(result.Output, &payload); err != nil {
+		cause := fmt.Sprintf("decode child profile payload: %v", err)
+		return fallback, result, buildLLMInteraction(state, pregnant.ID, "child_profile", fallback.Name, systemPrompt, userPrompt, result, cause)
+	}
+	payload = normalizeChildProfile(payload, fallback)
+	return payload, result, buildLLMInteraction(state, pregnant.ID, "child_profile", payload.Name, systemPrompt, userPrompt, result, "")
+}
+
+func buildChildProfilePrompt(state State, byID map[string]*unit.Record, left unit.Record, right unit.Record, pregnant unit.Record) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
+	fmt.Fprintf(&builder, "出生背景: 怀孕单位=%s，孕期已满 %d 回合。\n", pregnant.DisplayName(), pregnancyDurationTurns)
+	fmt.Fprintf(&builder, "父母A资料: %s\n", describeUnit(left, nil))
+	fmt.Fprintf(&builder, "父母A家庭关系: %s\n", summarizeSocialTiesForPrompt(left, byID))
+	fmt.Fprintf(&builder, "父母A性格: %s\n", summarizeActorPersonality(left))
+	if bio := strings.TrimSpace(left.Identity.Biography); bio != "" {
+		fmt.Fprintf(&builder, "父母A生平: %s\n", bio)
+	}
+	fmt.Fprintf(&builder, "父母B资料: %s\n", describeUnit(right, nil))
+	fmt.Fprintf(&builder, "父母B家庭关系: %s\n", summarizeSocialTiesForPrompt(right, byID))
+	fmt.Fprintf(&builder, "父母B性格: %s\n", summarizeActorPersonality(right))
+	if bio := strings.TrimSpace(right.Identity.Biography); bio != "" {
+		fmt.Fprintf(&builder, "父母B生平: %s\n", bio)
+	}
+	fmt.Fprintf(&builder, "最近相关对话:\n%s\n%s\n", summarizeDialogueHistory(state.DialogueHistory, left.ID, state.TurnState.Turn, 6), summarizeDialogueHistory(state.DialogueHistory, right.ID, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 8))
+	fmt.Fprintln(&builder, "生成规则:")
+	fmt.Fprintln(&builder, "1. name 是父母共同认真取的中文名，1-8 个汉字，不要带“崽”“孩子”“宝宝”等占位词。")
+	fmt.Fprintln(&builder, "2. biography 用第三人称写 60-140 字，要说明父母是谁、出生在战局中，以及孩子可能继承或反差于父母的性格。")
+	fmt.Fprintln(&builder, "3. personality 八项数值必须在 0.05 到 0.95 之间，既参考父母性格，也允许有一点独立差异。")
+	fmt.Fprintln(&builder, "4. name_reason 写父母为什么这样取名，最多 80 字。")
+	return builder.String()
+}
+
+func normalizeChildProfile(payload childProfilePayload, fallback childProfilePayload) childProfilePayload {
+	payload.Name = limitTextRunes(strings.TrimSpace(payload.Name), 16)
+	if payload.Name == "" || strings.Contains(payload.Name, "崽") || strings.Contains(payload.Name, "宝宝") || strings.Contains(payload.Name, "孩子") {
+		payload.Name = fallback.Name
+	}
+	if strings.TrimSpace(payload.Gender) == "" {
+		payload.Gender = fallback.Gender
+	} else {
+		payload.Gender = normalizeGender(payload.Gender, 0)
+	}
+	payload.Biography = limitTextRunes(strings.TrimSpace(payload.Biography), 180)
+	if payload.Biography == "" {
+		payload.Biography = fallback.Biography
+	}
+	payload.NameReason = limitTextRunes(strings.TrimSpace(payload.NameReason), 80)
+	if payload.NameReason == "" {
+		payload.NameReason = fallback.NameReason
+	}
+	payload.Personality = normalizeCandidatePersonality(payload.Personality, int64(len(payload.Name)+len(payload.Biography)))
+	return payload
+}
+
+func fallbackChildProfile(state State, left unit.Record, right unit.Record) childProfilePayload {
+	seed := int64(romanceScore(state, left, right, "seed"))
+	name := fmt.Sprintf("%s%s新", firstRuneText(left.DisplayName()), firstRuneText(right.DisplayName()))
+	return childProfilePayload{
+		Name:        name,
+		Gender:      normalizeGender("", int(seed)),
+		Biography:   fmt.Sprintf("%s 与 %s 在战局中诞下的孩子，出生便被双方家族记在心上。", left.DisplayName(), right.DisplayName()),
+		Personality: blendChildPersonality(seed, left.Personality, right.Personality),
+		NameReason:  fmt.Sprintf("取父母名中的字，记住%s与%s共同迎来的新生命。", left.DisplayName(), right.DisplayName()),
+	}
+}
+
+func blendChildPersonality(seed int64, left unit.Personality, right unit.Personality) unit.Personality {
+	fallback := unit.GeneratePersonality(seed)
+	blend := func(a float64, b float64, f float64) float64 {
+		return clampFloat((a+b)/2*0.78+f*0.22, 0.05, 0.95)
+	}
+	return unit.Personality{
+		Courage:     blend(left.Courage, right.Courage, fallback.Courage),
+		Loyalty:     blend(left.Loyalty, right.Loyalty, fallback.Loyalty),
+		Aggression:  blend(left.Aggression, right.Aggression, fallback.Aggression),
+		Prudence:    blend(left.Prudence, right.Prudence, fallback.Prudence),
+		Sociability: blend(left.Sociability, right.Sociability, fallback.Sociability),
+		Integrity:   blend(left.Integrity, right.Integrity, fallback.Integrity),
+		Stability:   blend(left.Stability, right.Stability, fallback.Stability),
+		Ambition:    blend(left.Ambition, right.Ambition, fallback.Ambition),
+	}
+}
+
+func findChildBirthCoord(snapshot world.MapSnapshot, byID map[string]*unit.Record, pregnant unit.Record) world.Coord {
+	origin := world.Coord{Q: pregnant.Status.PositionQ, R: pregnant.Status.PositionR}
+	candidates := append([]world.Coord{}, axialNeighbors(origin)...)
+	for _, coord := range candidates {
+		if inBounds(snapshot, coord) && !occupiedByAnother(byID, "", coord) {
+			return coord
+		}
+	}
+	best := world.Coord{}
+	found := false
+	bestDistance := 1 << 30
+	for _, tile := range snapshot.Tiles {
+		if occupiedByAnother(byID, "", tile.Coord) {
+			continue
+		}
+		distance := unit.HexDistance(origin.Q, origin.R, tile.Coord.Q, tile.Coord.R)
+		if !found || distance < bestDistance {
+			best = tile.Coord
+			bestDistance = distance
+			found = true
+		}
+	}
+	if found {
+		return best
+	}
+	return origin
+}
+
+func createChildUnit(state State, left unit.Record, right unit.Record, coord world.Coord, profile childProfilePayload) unit.Record {
 	factionID := FactionWildling
 	if left.FactionID == right.FactionID {
 		factionID = left.FactionID
 	}
 	seed := int64(romanceScore(state, left, right, "seed"))
-	coord := world.Coord{Q: (left.Status.PositionQ + right.Status.PositionQ) / 2, R: (left.Status.PositionR + right.Status.PositionR) / 2}
-	name := fmt.Sprintf("%s%s崽", firstRuneText(left.DisplayName()), firstRuneText(right.DisplayName()))
-	child, err := bootstrapBattleUnit(seed, state.ID, factionID, name, coord)
+	child, err := bootstrapBattleUnit(seed, state.ID, factionID, profile.Name, coord)
 	if err != nil {
-		child = unit.BootstrapRecord(seed, state.ID, factionID, name)
+		child = unit.BootstrapRecord(seed, state.ID, factionID, profile.Name)
+		child.Status.PositionQ = coord.Q
+		child.Status.PositionR = coord.R
 	}
-	child.Identity.Gender = normalizeGender("", int(seed))
+	child.Identity.Gender = normalizeGender(profile.Gender, int(seed))
 	child.Identity.Lineage = "child"
 	child.Identity.Age = 0
-	child.Identity.Biography = fmt.Sprintf("%s 与 %s 在战局中诞下的孩子。", left.DisplayName(), right.DisplayName())
+	child.Identity.Biography = profile.Biography
+	child.Personality = normalizeCandidatePersonality(profile.Personality, seed)
 	child.Social.ParentUnitIDs = []string{left.ID, right.ID}
 	child.Social.ChildUnitIDs = []string{}
 	child.Social.BornTurn = state.TurnState.Turn
