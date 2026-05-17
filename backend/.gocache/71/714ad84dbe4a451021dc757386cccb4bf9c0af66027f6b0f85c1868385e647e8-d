@@ -1,0 +1,6 @@
+./fov.go
+./generator.go
+./terrain.go
+./fov_test.go
+./generator_test.go
+./terrain_test.go

@@ -1,0 +1,5 @@
+# test log
+getenv GOTMPDIR
+getenv TMPDIR
+stat /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T/TestSeedReasonCodeCatalog364814303/001
+open /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T

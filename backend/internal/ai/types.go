@@ -1,0 +1,249 @@
+package ai
+
+// 文件说明：定义 AI 子系统通用类型与任务配置，包括 provider、task profile、请求结果与批处理结构。
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
+
+// ProviderName 类型定义用于统一该模块的数据表达。
+type ProviderName string
+
+// 常量定义区：集中声明该文件使用的共享配置。
+const (
+	ProviderDeepSeek ProviderName = "deepseek"
+	ProviderOpenAI   ProviderName = "openai"
+)
+
+// TaskKind 类型定义用于统一该模块的数据表达。
+type TaskKind string
+
+// 常量定义区：集中声明该文件使用的共享配置。
+const (
+	TaskIntentParse  TaskKind = "intent_parse"
+	TaskUnitDecision TaskKind = "unit_decision"
+	TaskDialogue     TaskKind = "dialogue"
+	TaskReflection   TaskKind = "reflection"
+	TaskDeployment   TaskKind = "deployment"
+	TaskUpkeep       TaskKind = "upkeep"
+	TaskBackstory    TaskKind = "backstory"
+	TaskBattleReport TaskKind = "battle_report"
+	TaskDowntime     TaskKind = "downtime"
+	TaskStrategy     TaskKind = "strategy"
+)
+
+// TaskProfile 结构体用于承载该模块的核心数据。
+type TaskProfile struct {
+	Primary   ProviderName
+	Secondary ProviderName
+	Timeout   time.Duration
+}
+
+// DefaultTaskProfiles 返回默认任务路由配置（统一 60 秒 LLM 超时）。
+func DefaultTaskProfiles() map[TaskKind]TaskProfile {
+	return ConfiguredTaskProfiles(60 * time.Second)
+}
+
+// ConfiguredTaskProfiles 基于基础超时生成各任务的主备 provider 与超时策略。
+func ConfiguredTaskProfiles(baseTimeout time.Duration) map[TaskKind]TaskProfile {
+	baseTimeout = normalizeBaseTimeout(baseTimeout)
+	return map[TaskKind]TaskProfile{
+		TaskIntentParse: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskUnitDecision: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskDialogue: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskReflection: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskDeployment: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskUpkeep: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskBackstory: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskBattleReport: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskDowntime: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+		TaskStrategy: {
+			Primary:   ProviderOpenAI,
+			Secondary: ProviderDeepSeek,
+			Timeout:   baseTimeout,
+		},
+	}
+}
+
+// normalizeBaseTimeout 规范化基础超时，保证不低于系统最小值。
+func normalizeBaseTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 180 * time.Second
+	}
+	if timeout < 60*time.Second {
+		return 60 * time.Second
+	}
+	if timeout > 180*time.Second {
+		return 180 * time.Second
+	}
+	return timeout
+}
+
+// CompletionRequest 结构体用于承载该模块的核心数据。
+type CompletionRequest struct {
+	Task           TaskKind
+	SystemPrompt   string
+	UserPrompt     string
+	SchemaName     string
+	ResponseSchema []byte
+	Temperature    float64
+	MaxTokens      int
+	Timeout        time.Duration
+	Metadata       map[string]string
+	Fallback       RuleFallback
+}
+
+// CompletionResult 结构体用于承载该模块的核心数据。
+type CompletionResult struct {
+	Provider     string          `json:"provider"`
+	Model        string          `json:"model"`
+	Output       json.RawMessage `json:"output"`
+	UsedFallback bool            `json:"used_fallback"`
+	Usage        Usage           `json:"usage"`
+	Debug        CompletionDebug `json:"debug"`
+}
+
+// BatchRequest 结构体用于承载该模块的核心数据。
+type BatchRequest struct {
+	Key     string
+	Request CompletionRequest
+}
+
+// BatchResult 结构体用于承载该模块的核心数据。
+type BatchResult struct {
+	Key     string
+	Request CompletionRequest
+	Result  CompletionResult
+	Err     error
+	Cached  bool
+}
+
+// BatchOptions 结构体用于承载该模块的核心数据。
+type BatchOptions struct {
+	MaxConcurrency int
+	OnComplete     func(BatchResult)
+}
+
+// Usage 结构体用于承载该模块的核心数据。
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// CompletionAttempt 结构体用于承载该模块的核心数据。
+type CompletionAttempt struct {
+	Provider   string `json:"provider"`
+	Endpoint   string `json:"endpoint"`
+	BaseURL    string `json:"base_url,omitempty"`
+	WireAPI    string `json:"wire_api,omitempty"`
+	Model      string `json:"model,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Succeeded  bool   `json:"succeeded"`
+	Error      string `json:"error,omitempty"`
+}
+
+// CompletionDebug 结构体用于承载该模块的核心数据。
+type CompletionDebug struct {
+	Attempts      []CompletionAttempt `json:"attempts,omitempty"`
+	RawOutput     string              `json:"raw_output,omitempty"`
+	FallbackCause string              `json:"fallback_cause,omitempty"`
+}
+
+// ProviderRequest 结构体用于承载该模块的核心数据。
+type ProviderRequest struct {
+	Task           TaskKind
+	Model          string
+	SystemPrompt   string
+	UserPrompt     string
+	SchemaName     string
+	ResponseSchema []byte
+	Temperature    float64
+	MaxTokens      int
+	Timeout        time.Duration
+	Metadata       map[string]string
+}
+
+// ProviderResponse 结构体用于承载该模块的核心数据。
+type ProviderResponse struct {
+	Provider  string
+	Model     string
+	Output    json.RawMessage
+	Usage     Usage
+	RawOutput string
+	Attempts  []CompletionAttempt
+}
+
+// RuleFallback 接口定义该模块需要实现的能力约束。
+type RuleFallback interface {
+	Fallback(context.Context, CompletionRequest, error) (json.RawMessage, error)
+}
+
+// RuleFallbackFunc 类型定义用于统一该模块的数据表达。
+type RuleFallbackFunc func(context.Context, CompletionRequest, error) (json.RawMessage, error)
+
+// Fallback 让函数类型 RuleFallbackFunc 满足 RuleFallback 接口。
+func (f RuleFallbackFunc) Fallback(
+	ctx context.Context,
+	request CompletionRequest,
+	cause error,
+) (json.RawMessage, error) {
+	return f(ctx, request, cause)
+}
+
+// ProviderStatus 结构体用于承载该模块的核心数据。
+type ProviderStatus struct {
+	Name                 ProviderName `json:"name"`
+	Available            bool         `json:"available"`
+	DefaultModel         string       `json:"default_model"`
+	BaseURL              string       `json:"base_url"`
+	StructuredOutputMode string       `json:"structured_output_mode"`
+}
+
+// Provider 接口定义该模块需要实现的能力约束。
+type Provider interface {
+	Name() ProviderName
+	Available() bool
+	Status() ProviderStatus
+	GenerateJSON(context.Context, ProviderRequest) (ProviderResponse, error)
+}

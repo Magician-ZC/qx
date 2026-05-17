@@ -1,0 +1,347 @@
+package ai
+
+// 文件说明：AI 编排服务，负责任务路由、主备 provider 调度、schema 校验与失败回退聚合。
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"qunxiang/backend/internal/config"
+)
+
+// Service 结构体用于承载该模块的核心数据。
+type Service struct {
+	logger    *slog.Logger
+	validator Validator
+	providers map[ProviderName]Provider
+	profiles  map[TaskKind]TaskProfile
+}
+
+// NewService 创建 AI 编排服务并初始化 provider、路由策略与 JSON 校验器。
+func NewService(cfg config.Config, logger *slog.Logger) *Service {
+	httpClient := &http.Client{}
+
+	deepSeekEndpoint := EndpointConfig{
+		BaseURL:         cfg.DeepSeekBaseURL,
+		WireAPI:         cfg.DeepSeekWireAPI,
+		APIKey:          cfg.DeepSeekAPIKey,
+		Model:           cfg.DeepSeekModel,
+		ReasoningEffort: cfg.DeepSeekReasoningEffort,
+	}
+	openAIEndpoint := EndpointConfig{
+		BaseURL:         cfg.OpenAIBaseURL,
+		WireAPI:         cfg.OpenAIWireAPI,
+		APIKey:          cfg.OpenAIAPIKey,
+		Model:           cfg.OpenAIModel,
+		ReasoningEffort: cfg.OpenAIReasoningEffort,
+	}
+	openAIFallbacks := make([]EndpointConfig, 0, len(cfg.OpenAIFallbacks))
+	for _, endpoint := range cfg.OpenAIFallbacks {
+		openAIFallbacks = append(openAIFallbacks, EndpointConfig{
+			BaseURL:         endpoint.BaseURL,
+			WireAPI:         endpoint.WireAPI,
+			APIKey:          endpoint.APIKey,
+			Model:           endpoint.Model,
+			ReasoningEffort: endpoint.ReasoningEffort,
+		})
+	}
+	deepSeekEndpoint, openAIEndpoint, openAIFallbacks = preferKnownWorkingEndpoints(
+		deepSeekEndpoint,
+		openAIEndpoint,
+		openAIFallbacks,
+	)
+
+	providers := map[ProviderName]Provider{
+		ProviderDeepSeek: NewOpenAICompatibleProvider(
+			ProviderDeepSeek,
+			deepSeekEndpoint,
+			nil,
+			StructuredOutputJSONObject,
+			httpClient,
+		),
+		ProviderOpenAI: NewOpenAICompatibleProvider(
+			ProviderOpenAI,
+			openAIEndpoint,
+			openAIFallbacks,
+			StructuredOutputJSONSchema,
+			httpClient,
+		),
+	}
+
+	return &Service{
+		logger:    logger.With("component", "ai"),
+		validator: NewJSONSchemaValidator(),
+		providers: providers,
+		profiles:  ConfiguredTaskProfiles(cfg.LLMTimeout),
+	}
+}
+
+// preferKnownWorkingEndpoints 在候选端点中优先挑选“已验证可用”的组合。
+// 该函数会重排 deepseek/openai 主备链路，并在必要时裁剪 fallback 列表。
+func preferKnownWorkingEndpoints(
+	deepSeekEndpoint EndpointConfig,
+	openAIEndpoint EndpointConfig,
+	openAIFallbacks []EndpointConfig,
+) (EndpointConfig, EndpointConfig, []EndpointConfig) {
+	candidates := make([]EndpointConfig, 0, len(openAIFallbacks)+2)
+	candidates = append(candidates, deepSeekEndpoint, openAIEndpoint)
+	candidates = append(candidates, openAIFallbacks...)
+
+	deepSeekEndpoint = firstMatchingEndpoint(candidates, "https://2c2ch1u11-share-api-0.hf.space/v1", "deepseek-v4-pro", deepSeekEndpoint)
+	anyRouterEndpoint := firstMatchingEndpoint(candidates, "https://anyrouter.wuname.eu.org/v1", "gpt-5.3-codex", EndpointConfig{})
+	openRouterEndpoint := firstOpenRouterEndpoint(candidates, EndpointConfig{})
+	if openRouterEndpoint.BaseURL != "" {
+		openRouterEndpoint.Model = "deepseek/deepseek-v4-flash:free"
+	}
+	foundKnownEndpoint := anyRouterEndpoint.BaseURL != "" || openRouterEndpoint.BaseURL != "" ||
+		isEndpoint(deepSeekEndpoint, "https://2c2ch1u11-share-api-0.hf.space/v1", "deepseek-v4-pro")
+	if !foundKnownEndpoint {
+		return deepSeekEndpoint, openAIEndpoint, openAIFallbacks
+	}
+	if !isEndpoint(deepSeekEndpoint, "https://2c2ch1u11-share-api-0.hf.space/v1", "deepseek-v4-pro") {
+		deepSeekEndpoint = EndpointConfig{}
+	} else {
+		deepSeekEndpoint.WireAPI = "chat_completions"
+	}
+
+	nextOpenAI := make([]EndpointConfig, 0, 2)
+	if openRouterEndpoint.BaseURL != "" {
+		openRouterEndpoint.WireAPI = "chat_completions"
+		openAIEndpoint = openRouterEndpoint
+		minimaxEndpoint := openRouterEndpoint
+		minimaxEndpoint.Model = "minimax/minimax-m2.5:free"
+		nextOpenAI = append(nextOpenAI, minimaxEndpoint)
+		if anyRouterEndpoint.BaseURL != "" {
+			anyRouterEndpoint.WireAPI = "responses"
+			nextOpenAI = append(nextOpenAI, anyRouterEndpoint)
+		}
+	} else if anyRouterEndpoint.BaseURL != "" {
+		anyRouterEndpoint.WireAPI = "responses"
+		openAIEndpoint = anyRouterEndpoint
+	}
+	return deepSeekEndpoint, openAIEndpoint, nextOpenAI
+}
+
+// firstMatchingEndpoint 在候选端点中按 baseURL+model+apikey 匹配首个可用项。
+func firstMatchingEndpoint(candidates []EndpointConfig, baseURL string, model string, fallback EndpointConfig) EndpointConfig {
+	for _, candidate := range candidates {
+		if strings.TrimRight(strings.TrimSpace(candidate.BaseURL), "/") == baseURL &&
+			strings.TrimSpace(candidate.Model) == model &&
+			strings.TrimSpace(candidate.APIKey) != "" {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+// firstOpenRouterEndpoint 返回首个可用 OpenRouter 端点，并允许运行时替换模型。
+func firstOpenRouterEndpoint(candidates []EndpointConfig, fallback EndpointConfig) EndpointConfig {
+	for _, candidate := range candidates {
+		if strings.TrimRight(strings.TrimSpace(candidate.BaseURL), "/") == "https://openrouter.ai/api/v1" &&
+			strings.TrimSpace(candidate.APIKey) != "" {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+// isEndpoint 判断端点是否与给定 baseURL/model 完全匹配且携带 APIKey。
+func isEndpoint(endpoint EndpointConfig, baseURL string, model string) bool {
+	return strings.TrimRight(strings.TrimSpace(endpoint.BaseURL), "/") == baseURL &&
+		strings.TrimSpace(endpoint.Model) == model &&
+		strings.TrimSpace(endpoint.APIKey) != ""
+}
+
+// GenerateJSON 按任务路由调用 provider 并返回结构化 JSON 结果。
+// 流程包含：provider 主备切换、schema 校验、失败聚合和规则回退。
+func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (CompletionResult, error) {
+	if len(request.ResponseSchema) == 0 {
+		return CompletionResult{}, errors.New("response schema is required")
+	}
+
+	profile, ok := s.profiles[request.Task]
+	if !ok {
+		return CompletionResult{}, fmt.Errorf("unsupported task kind %q", request.Task)
+	}
+
+	timeout := request.Timeout
+	if timeout == 0 {
+		timeout = profile.Timeout
+	}
+
+	order := providerOrder(profile.Primary, profile.Secondary)
+	failures := make([]error, 0, len(order))
+	attempts := make([]CompletionAttempt, 0, len(order)*4)
+	invalidRawOutput := ""
+
+	for _, name := range order {
+		provider := s.providers[name]
+		if provider == nil {
+			failures = append(failures, fmt.Errorf("provider %s is not registered", name))
+			continue
+		}
+
+		if !provider.Available() {
+			failures = append(failures, fmt.Errorf("provider %s is not configured", name))
+			continue
+		}
+
+		response, err := provider.GenerateJSON(ctx, ProviderRequest{
+			Task:           request.Task,
+			SystemPrompt:   request.SystemPrompt,
+			UserPrompt:     request.UserPrompt,
+			Model:          provider.Status().DefaultModel,
+			SchemaName:     request.SchemaName,
+			ResponseSchema: request.ResponseSchema,
+			Temperature:    request.Temperature,
+			MaxTokens:      request.MaxTokens,
+			Timeout:        timeout,
+			Metadata:       request.Metadata,
+		})
+		attempts = append(attempts, response.Attempts...)
+
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s call failed: %w", name, err))
+			continue
+		}
+
+		if err := s.validator.Validate(request.SchemaName, request.ResponseSchema, response.Output); err != nil {
+			invalidRawOutput = appendInvalidRawOutput(invalidRawOutput, name, response)
+			attempts = append(attempts, CompletionAttempt{
+				Provider:  string(name),
+				Endpoint:  "validation",
+				Model:     response.Model,
+				Succeeded: false,
+				Error:     fmt.Sprintf("schema validation failed: %v", err),
+			})
+			failures = append(failures, fmt.Errorf("%s returned invalid payload: %w", name, err))
+			continue
+		}
+
+		return CompletionResult{
+			Provider:     response.Provider,
+			Model:        response.Model,
+			Output:       response.Output,
+			UsedFallback: false,
+			Usage:        response.Usage,
+			Debug: CompletionDebug{
+				Attempts:  attempts,
+				RawOutput: response.RawOutput,
+			},
+		}, nil
+	}
+
+	joined := errors.Join(failures...)
+	if request.Fallback == nil {
+		return CompletionResult{
+			Debug: CompletionDebug{
+				Attempts:      attempts,
+				RawOutput:     invalidRawOutput,
+				FallbackCause: joined.Error(),
+			},
+		}, joined
+	}
+
+	payload, err := request.Fallback.Fallback(ctx, request, joined)
+	if err != nil {
+		return CompletionResult{}, fmt.Errorf("rule fallback failed: %w", err)
+	}
+
+	if err := s.validator.Validate(request.SchemaName, request.ResponseSchema, payload); err != nil {
+		return CompletionResult{}, fmt.Errorf("rule fallback returned invalid payload: %w", err)
+	}
+
+	s.logger.Warn("llm providers failed, used rule fallback", "task", request.Task, "cause", joined)
+
+	return CompletionResult{
+		Provider:     "rules",
+		Model:        "fallback",
+		Output:       payload,
+		UsedFallback: true,
+		Debug: CompletionDebug{
+			Attempts:      attempts,
+			RawOutput:     invalidRawOutput,
+			FallbackCause: joined.Error(),
+		},
+	}, nil
+}
+
+// appendInvalidRawOutput 保留 schema 校验失败时的模型原文，便于前端排查非法参数。
+func appendInvalidRawOutput(existing string, provider ProviderName, response ProviderResponse) string {
+	raw := strings.TrimSpace(response.RawOutput)
+	if raw == "" && len(response.Output) > 0 {
+		raw = strings.TrimSpace(string(response.Output))
+	}
+	if raw == "" {
+		return existing
+	}
+
+	headerParts := []string{string(provider)}
+	if strings.TrimSpace(response.Model) != "" {
+		headerParts = append(headerParts, response.Model)
+	}
+	entry := fmt.Sprintf("[%s invalid schema raw_output]\n%s", strings.Join(headerParts, " · "), raw)
+	if strings.TrimSpace(existing) == "" {
+		return entry
+	}
+	return strings.TrimSpace(existing) + "\n\n" + entry
+}
+
+// Status 返回 AI 服务可观测状态（provider 就绪、任务路由与超时策略）。
+func (s *Service) Status() map[string]any {
+	providers := make([]ProviderStatus, 0, len(s.providers))
+	ready := false
+	for _, name := range []ProviderName{ProviderDeepSeek, ProviderOpenAI} {
+		provider := s.providers[name]
+		if provider == nil {
+			continue
+		}
+
+		status := provider.Status()
+		if status.Available {
+			ready = true
+		}
+		providers = append(providers, status)
+	}
+
+	routes := make(map[string]map[string]any, len(s.profiles))
+	for _, task := range []TaskKind{
+		TaskIntentParse,
+		TaskUnitDecision,
+		TaskDialogue,
+		TaskBackstory,
+		TaskBattleReport,
+		TaskDowntime,
+	} {
+		profile := s.profiles[task]
+		routes[string(task)] = map[string]any{
+			"primary":    profile.Primary,
+			"secondary":  profile.Secondary,
+			"timeout_ms": profile.Timeout.Milliseconds(),
+		}
+	}
+
+	return map[string]any{
+		"ready":     ready,
+		"providers": providers,
+		"routes":    routes,
+	}
+}
+
+// providerOrder 根据主备 provider 计算去重后的调用顺序。
+func providerOrder(primary ProviderName, secondary ProviderName) []ProviderName {
+	order := make([]ProviderName, 0, 2)
+	if primary != "" {
+		order = append(order, primary)
+	}
+
+	if secondary != "" && secondary != primary {
+		order = append(order, secondary)
+	}
+
+	return order
+}

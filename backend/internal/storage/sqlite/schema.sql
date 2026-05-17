@@ -1,0 +1,162 @@
+-- 文件说明：SQLite 主 schema，定义单位、记忆、事件、关系、地图、会话快照与审计相关表结构。
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS units (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  faction_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  profile_json TEXT NOT NULL DEFAULT '{}',
+  personality_json TEXT NOT NULL DEFAULT '{}',
+  status_json TEXT NOT NULL DEFAULT '{}',
+  inventory_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_units_session_id ON units(session_id);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  unit_id TEXT NOT NULL,
+  category TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  emotion_weight REAL NOT NULL DEFAULT 1.0,
+  salience REAL NOT NULL DEFAULT 0.0,
+  recall_count INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_recalled_at TEXT,
+  FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_unit_id ON memories(unit_id);
+CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_unit_sort ON memories(unit_id, salience DESC, recall_count DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_unit_category_sort ON memories(unit_id, category, salience DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  actor_unit_id TEXT,
+  target_unit_id TEXT,
+  event_type TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(actor_unit_id) REFERENCES units(id) ON DELETE SET NULL,
+  FOREIGN KEY(target_unit_id) REFERENCES units(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_actor_unit_id ON events(actor_unit_id);
+CREATE INDEX IF NOT EXISTS idx_events_target_unit_id ON events(target_unit_id);
+CREATE INDEX IF NOT EXISTS idx_events_reason_code ON events(reason_code);
+
+CREATE TABLE IF NOT EXISTS relations (
+  source_unit_id TEXT NOT NULL,
+  target_unit_id TEXT NOT NULL,
+  trust REAL NOT NULL DEFAULT 0,
+  fear REAL NOT NULL DEFAULT 0,
+  affection REAL NOT NULL DEFAULT 0,
+  rivalry REAL NOT NULL DEFAULT 0,
+  notes_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (source_unit_id, target_unit_id),
+  FOREIGN KEY(source_unit_id) REFERENCES units(id) ON DELETE CASCADE,
+  FOREIGN KEY(target_unit_id) REFERENCES units(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_relations_target_unit_id ON relations(target_unit_id);
+
+CREATE TABLE IF NOT EXISTS event_reason_codes (
+  code TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  default_reason_text TEXT NOT NULL,
+  stat_domains_json TEXT NOT NULL DEFAULT '[]',
+  importance_min INTEGER NOT NULL,
+  importance_max INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS terrain_types (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  move_cost REAL NOT NULL,
+  vision_range INTEGER NOT NULL,
+  combat_rules_json TEXT NOT NULL DEFAULT '[]',
+  activities_json TEXT NOT NULL DEFAULT '[]',
+  resources_json TEXT NOT NULL DEFAULT '[]',
+  special_rules_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS world_maps (
+  id TEXT PRIMARY KEY,
+  seed INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_maps_generated_at ON world_maps(generated_at DESC);
+
+CREATE TABLE IF NOT EXISTS world_tiles (
+  map_id TEXT NOT NULL,
+  q INTEGER NOT NULL,
+  r INTEGER NOT NULL,
+  terrain_id TEXT NOT NULL,
+  region_id TEXT NOT NULL DEFAULT '',
+  landmark TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (map_id, q, r),
+  FOREIGN KEY(map_id) REFERENCES world_maps(id) ON DELETE CASCADE,
+  FOREIGN KEY(terrain_id) REFERENCES terrain_types(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_tiles_terrain_id ON world_tiles(terrain_id);
+
+CREATE TABLE IF NOT EXISTS ground_loot_drops (
+  id TEXT PRIMARY KEY,
+  location TEXT NOT NULL,
+  source_unit_id TEXT NOT NULL,
+  inheritor_unit_id TEXT NOT NULL,
+  items_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS single_player_sessions (
+  id TEXT PRIMARY KEY,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_single_player_sessions_updated_at ON single_player_sessions(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_phase_snapshots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  turn INTEGER NOT NULL,
+  phase TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(session_id, turn, phase),
+  FOREIGN KEY(session_id) REFERENCES single_player_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_phase_snapshots_session_created_at ON session_phase_snapshots(session_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS hall_of_fame_entries (
+  id TEXT PRIMARY KEY,
+  source_session_id TEXT NOT NULL,
+  source_unit_id TEXT NOT NULL,
+  unit_name TEXT NOT NULL,
+  unit_faction_id TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  biography_summary TEXT NOT NULL,
+  top_events_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(source_session_id, source_unit_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hall_of_fame_entries_unit_name ON hall_of_fame_entries(unit_name, created_at DESC);

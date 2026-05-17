@@ -1,0 +1,9 @@
+# test log
+getenv GOTMPDIR
+getenv GOTMPDIR
+getenv TMPDIR
+getenv TMPDIR
+stat /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T/TestTradeServiceTransferGiftSwapAndPurchase2723952192/001
+stat /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T/TestRepositorySaveAndLoad2612663887/001
+open /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T
+open /var/folders/2r/wpm3b6796p3g_hx5s0yl0hn40000gn/T

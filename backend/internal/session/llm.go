@@ -1,0 +1,3581 @@
+package session
+
+// 文件说明：集中定义会话内各类 LLM 载荷结构、schema 与主决策调用入口（行动、对话、反思等）。
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/world"
+)
+
+const (
+	llmRequestTimeout      = 180 * time.Second
+	llmBubbleRuneLimit     = 16
+	llmSpeakPromptLimit    = 12
+	llmMemoryRuneLimit     = 60
+	llmNextActionRuneLimit = 12
+)
+
+// completionClient 接口定义该模块需要实现的能力约束。
+type completionClient interface {
+	GenerateJSON(context.Context, ai.CompletionRequest) (ai.CompletionResult, error)
+}
+
+// batchCompletionClient 接口定义该模块需要实现的能力约束。
+type batchCompletionClient interface {
+	GenerateJSONBatch(context.Context, []ai.BatchRequest, ai.BatchOptions) []ai.BatchResult
+}
+
+// unitDecisionChoicePayload 结构体用于承载该模块的核心数据。
+type unitDecisionChoicePayload struct {
+	Action        DecisionAction     `json:"action,omitempty"`
+	Activity      ProductionActivity `json:"activity,omitempty"`
+	SkillID       string             `json:"skill_id,omitempty"`
+	TradeKind     TradeActionKind    `json:"trade_kind,omitempty"`
+	ItemID        string             `json:"item_id,omitempty"`
+	ItemName      string             `json:"item_name,omitempty"`
+	OtherItemID   string             `json:"other_item_id,omitempty"`
+	Price         int                `json:"price,omitempty"`
+	GoldAmount    int                `json:"gold_amount,omitempty"`
+	GroundLootID  string             `json:"ground_loot_id,omitempty"`
+	StructureID   string             `json:"structure_id,omitempty"`
+	StructureType StructureType      `json:"structure_type,omitempty"`
+	TargetUnitID  string             `json:"target_unit_id,omitempty"`
+	TargetQ       int                `json:"target_q,omitempty"`
+	TargetR       int                `json:"target_r,omitempty"`
+	NextAction    string             `json:"next_action,omitempty"`
+	Speak         string             `json:"speak,omitempty"`
+	Memory        string             `json:"memory,omitempty"`
+	Knowledge     string             `json:"knowledge,omitempty"`
+	Reasoning     string             `json:"reasoning"`
+}
+
+// unitDecisionPayload 结构体用于承载该模块的核心数据。
+type unitDecisionPayload struct {
+	Action        DecisionAction     `json:"action"`
+	Activity      ProductionActivity `json:"activity,omitempty"`
+	SkillID       string             `json:"skill_id,omitempty"`
+	TradeKind     TradeActionKind    `json:"trade_kind,omitempty"`
+	ItemID        string             `json:"item_id,omitempty"`
+	ItemName      string             `json:"item_name,omitempty"`
+	OtherItemID   string             `json:"other_item_id,omitempty"`
+	Price         int                `json:"price,omitempty"`
+	GoldAmount    int                `json:"gold_amount,omitempty"`
+	GroundLootID  string             `json:"ground_loot_id,omitempty"`
+	Memory        string             `json:"memory,omitempty"`
+	Knowledge     string             `json:"knowledge,omitempty"`
+	StructureID   string             `json:"structure_id,omitempty"`
+	StructureType StructureType      `json:"structure_type,omitempty"`
+	TargetUnitID  string             `json:"target_unit_id,omitempty"`
+	TargetQ       int                `json:"target_q,omitempty"`
+	TargetR       int                `json:"target_r,omitempty"`
+	NextAction    string             `json:"next_action,omitempty"`
+	Speak         string             `json:"speak,omitempty"`
+	Reasoning     string             `json:"reasoning"`
+}
+
+// dialogueReplyPayload 结构体用于承载该模块的核心数据。
+type dialogueReplyPayload struct {
+	Reply  string `json:"reply"`
+	Mood   string `json:"mood"`
+	Intent string `json:"intent"`
+	Memory string `json:"memory,omitempty"`
+}
+
+// unitReflectionPayload 结构体用于承载该模块的核心数据。
+type unitReflectionPayload struct {
+	Bubble string `json:"bubble"`
+	Memory string `json:"memory,omitempty"`
+}
+
+// deploymentChoicePayload 结构体用于承载该模块的核心数据。
+type deploymentChoicePayload struct {
+	CandidateID string `json:"candidate_id"`
+	LeftLine    string `json:"left_line,omitempty"`
+	RightLine   string `json:"right_line,omitempty"`
+	LeftMemory  string `json:"left_memory,omitempty"`
+	RightMemory string `json:"right_memory,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+	Reasoning   string `json:"reasoning"`
+}
+
+// upkeepChoicePayload 结构体用于承载该模块的核心数据。
+type upkeepChoicePayload struct {
+	ShouldAct bool   `json:"should_act"`
+	Bubble    string `json:"bubble,omitempty"`
+	Memory    string `json:"memory,omitempty"`
+	Reasoning string `json:"reasoning"`
+}
+
+// combatShakeChoicePayload 结构体用于承载该模块的核心数据。
+type combatShakeChoicePayload struct {
+	Action    string `json:"action"`
+	Bubble    string `json:"bubble,omitempty"`
+	Memory    string `json:"memory,omitempty"`
+	Reasoning string `json:"reasoning"`
+}
+
+// decisionCandidate 结构体用于承载该模块的核心数据。
+type decisionCandidate struct {
+	ID            string
+	Action        DecisionAction
+	Activity      ProductionActivity
+	SkillID       string
+	TradeKind     TradeActionKind
+	ItemID        string
+	ItemName      string
+	OtherItemID   string
+	Price         int
+	GoldAmount    int
+	GroundLootID  string
+	APCost        int
+	StructureID   string
+	StructureType StructureType
+	TargetUnitID  string
+	TargetQ       int
+	TargetR       int
+	Summary       string
+}
+
+var dialogueReplySchema = []byte(`{
+  "type":"object",
+  "properties":{
+    "reply":{"type":"string","minLength":1},
+    "mood":{"type":"string"},
+    "intent":{"type":"string"},
+    "memory":{"type":"string"}
+  },
+  "required":["reply"],
+  "additionalProperties":false
+}`)
+
+var unitReflectionSchema = []byte(`{
+  "type":"object",
+  "properties":{
+    "bubble":{"type":"string","minLength":1},
+    "memory":{"type":"string"}
+  },
+  "required":["bubble"],
+  "additionalProperties":false
+}`)
+
+var upkeepChoiceSchema = []byte(`{
+  "type":"object",
+  "properties":{
+    "should_act":{"type":"boolean"},
+    "bubble":{"type":"string"},
+    "memory":{"type":"string"},
+    "reasoning":{"type":"string","minLength":1}
+  },
+  "required":["should_act","reasoning"],
+  "additionalProperties":false
+}`)
+
+var combatShakeChoiceSchema = []byte(`{
+  "type":"object",
+  "properties":{
+    "action":{"type":"string","enum":["continue","retreat","surrender","rage"]},
+    "bubble":{"type":"string","minLength":1},
+    "memory":{"type":"string","minLength":1},
+    "reasoning":{"type":"string","minLength":1}
+  },
+  "required":["action","bubble","memory","reasoning"],
+  "additionalProperties":false
+}`)
+
+// generateUnitDecision 生成单位在执行阶段的动作决策，并返回完整交互轨迹。
+func (service *Service) generateUnitDecision(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	remainingAP int,
+	defiant bool,
+) (unitDecisionPayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := unitDecisionSystemPrompt(actor)
+	candidates := buildDecisionCandidates(state, byID, actor, targetIDs, remainingAP)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, *actor, 10)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, *actor, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, actor.ID, 6)
+	userPrompt := buildDecisionPrompt(
+		state,
+		byID,
+		actor,
+		targetIDs,
+		candidates,
+		remainingAP,
+		memorySummary,
+		relationSummary,
+		knowledgeSummary,
+		defiant,
+	)
+	if err := validateNoLegacyDecisionPrompt(userPrompt); err != nil {
+		result := ai.CompletionResult{Debug: ai.CompletionDebug{FallbackCause: err.Error()}}
+		return unitDecisionPayload{}, result, buildLLMInteraction(state, actor.ID, "decision", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+	if llmBudgetGuardrailActive(state) {
+		decision := budgetGuardrailDecision(actor)
+		result := budgetGuardrailResult(state)
+		return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{
+				FallbackCause: err.Error(),
+			},
+		}
+		return unitDecisionPayload{}, result, buildLLMInteraction(state, actor.ID, "decision", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	responseSchema := buildUnitDecisionSchema(candidates)
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskUnitDecision,
+		SchemaName:     "session_unit_decision",
+		ResponseSchema: responseSchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.35,
+		MaxTokens:      220,
+		Timeout:        llmRequestTimeout,
+	})
+	if err != nil {
+		cause := fmt.Errorf("unit decision generation failed: %w", err)
+		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+	}
+
+	var choice unitDecisionChoicePayload
+	if err := json.Unmarshal(result.Output, &choice); err != nil {
+		cause := fmt.Errorf("decode unit decision payload: %w", err)
+		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+	}
+
+	choice = normalizeDecisionChoice(choice)
+	decision, err := resolveDecisionChoiceWithState(state, byID, actor, targetIDs, remainingAP, candidates, choice)
+	if err != nil {
+		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, err)
+	}
+	if err := validateDecision(state, byID, actor, targetIDs, decision, remainingAP); err != nil {
+		cause := fmt.Errorf("invalid unit decision: %w", err)
+		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+	}
+
+	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
+}
+
+func confusedUnitDecision(
+	state State,
+	actor *unit.Record,
+	byID map[string]*unit.Record,
+	systemPrompt string,
+	userPrompt string,
+	result ai.CompletionResult,
+	cause error,
+) (unitDecisionPayload, ai.CompletionResult, LLMInteraction, error) {
+	debugID := "D" + strings.ReplaceAll(uuid.NewString(), "-", "")[:6]
+	bubble := "叽哩咕噜#" + debugID
+	causeText := "unit decision confused"
+	if cause != nil {
+		causeText = cause.Error()
+	}
+	errorMessage := fmt.Sprintf("confused_decision_id=%s: %s", debugID, causeText)
+	if strings.TrimSpace(result.Debug.FallbackCause) == "" {
+		result.Debug.FallbackCause = errorMessage
+	}
+	decision := unitDecisionPayload{
+		Action:     DecisionActionHold,
+		NextAction: bubble,
+		Speak:      bubble,
+		Memory:     "我刚才一阵迷糊，没能判断下一步。",
+		Reasoning:  bubble,
+	}
+	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, errorMessage), nil
+}
+
+// generateDialogueReply 生成单位对玩家输入的对话回复。
+func (service *Service) generateDialogueReply(
+	ctx context.Context,
+	state State,
+	record unit.Record,
+	playerMessage string,
+	byID map[string]*unit.Record,
+) (dialogueReplyPayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := dialogueSystemPrompt(record)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, record, 8)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, record, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, record.ID, 4)
+	userPrompt := buildDialoguePrompt(
+		state,
+		byID,
+		record,
+		playerMessage,
+		memorySummary,
+		relationSummary,
+		knowledgeSummary,
+	)
+	if llmBudgetGuardrailActive(state) {
+		reply := budgetGuardrailDialogueReply()
+		result := budgetGuardrailResult(state)
+		return reply, result, buildLLMInteraction(state, record.ID, "dialogue", reply.Reply, systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{
+				FallbackCause: err.Error(),
+			},
+		}
+		return dialogueReplyPayload{}, result, buildLLMInteraction(state, record.ID, "dialogue", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskDialogue,
+		SchemaName:     "session_dialogue_reply",
+		ResponseSchema: dialogueReplySchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.75,
+		MaxTokens:      220,
+	})
+	if err != nil {
+		return dialogueReplyPayload{}, result, buildLLMInteraction(state, record.ID, "dialogue", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("dialogue generation failed: %w", err)
+	}
+
+	var reply dialogueReplyPayload
+	if err := json.Unmarshal(result.Output, &reply); err != nil || strings.TrimSpace(reply.Reply) == "" {
+		cause := "dialogue reply is empty"
+		if err != nil {
+			cause = fmt.Sprintf("decode dialogue payload: %v", err)
+		}
+		return dialogueReplyPayload{}, result, buildLLMInteraction(state, record.ID, "dialogue", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	reply.Reply = strings.TrimSpace(reply.Reply)
+	reply.Memory = limitTextRunes(strings.TrimSpace(reply.Memory), 18)
+	if reply.Memory == "" {
+		reply.Memory = limitTextRunes(reply.Reply, 18)
+	}
+	return reply, result, buildLLMInteraction(state, record.ID, "dialogue", reply.Reply, systemPrompt, userPrompt, result, ""), nil
+}
+
+// requestUnitDialogueReply 为单位间主动交流生成目标单位的即时回应。
+func (service *Service) requestUnitDialogueReply(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	target *unit.Record,
+	actorLine string,
+) (dialogueReplyPayload, ai.CompletionResult, LLMInteraction, bool) {
+	if target == nil {
+		result := ai.CompletionResult{Provider: "rules", Model: "missing_target", UsedFallback: true}
+		payload := dialogueReplyPayload{Reply: "我先不回应。", Mood: "guarded", Intent: "ignore", Memory: "我错过了一次交谈。"}
+		return payload, result, buildLLMInteraction(state, "", "unit_dialogue_reply", payload.Reply, "", "", result, "target is nil"), false
+	}
+	systemPrompt := unitDialogueReplySystemPrompt(*target)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, *target, 8)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, *target, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, target.ID, 4)
+	userPrompt := buildUnitDialogueReplyPrompt(state, byID, actor, target, actorLine, memorySummary, relationSummary, knowledgeSummary)
+	if llmBudgetGuardrailActive(state) {
+		payload := dialogueReplyPayload{Reply: "我听到了，按局势来。", Mood: "steady", Intent: "acknowledge", Memory: "我回应了队友交谈。"}
+		result := budgetGuardrailResult(state)
+		return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, ""), true
+	}
+	if service == nil || service.llm == nil {
+		payload := fallbackUnitDialogueReplyPayload(target, actorLine)
+		result := ai.CompletionResult{Provider: "rules", Model: "fallback", UsedFallback: true}
+		return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, ""), true
+	}
+
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskDialogue,
+		SchemaName:     "session_unit_dialogue_reply",
+		ResponseSchema: dialogueReplySchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.65,
+		MaxTokens:      180,
+		Timeout:        llmRequestTimeout,
+	})
+	if err != nil {
+		payload := fallbackUnitDialogueReplyPayload(target, actorLine)
+		payload.Reply = "我这会儿先记下。"
+		result.UsedFallback = true
+		return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, err.Error()), false
+	}
+
+	var payload dialogueReplyPayload
+	if err := json.Unmarshal(result.Output, &payload); err != nil || strings.TrimSpace(payload.Reply) == "" {
+		payload = fallbackUnitDialogueReplyPayload(target, actorLine)
+		result.UsedFallback = true
+		cause := "unit dialogue reply is empty"
+		if err != nil {
+			cause = fmt.Sprintf("decode unit dialogue reply payload: %v", err)
+		}
+		return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, cause), false
+	}
+	payload = normalizeDialogueReplyPayload(payload)
+	return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, ""), true
+}
+
+func normalizeDialogueReplyPayload(payload dialogueReplyPayload) dialogueReplyPayload {
+	payload.Reply = limitTextRunes(strings.TrimSpace(payload.Reply), 36)
+	payload.Mood = limitTextRunes(strings.TrimSpace(payload.Mood), 16)
+	payload.Intent = limitTextRunes(strings.TrimSpace(payload.Intent), 18)
+	payload.Memory = limitTextRunes(strings.TrimSpace(payload.Memory), 24)
+	if payload.Memory == "" {
+		payload.Memory = limitTextRunes(payload.Reply, 24)
+	}
+	return payload
+}
+
+func fallbackUnitDialogueReplyPayload(target *unit.Record, actorLine string) dialogueReplyPayload {
+	reply := "我听到了，按局势来。"
+	if target != nil {
+		reply = fmt.Sprintf("%s：我听到了，按局势来。", target.DisplayName())
+	}
+	memory := strings.TrimSpace(actorLine)
+	if memory != "" {
+		memory = "我听到：" + memory
+	}
+	return normalizeDialogueReplyPayload(dialogueReplyPayload{
+		Reply:  reply,
+		Mood:   "steady",
+		Intent: "acknowledge",
+		Memory: firstNonEmptyText(memory, "我回应了一次交谈。"),
+	})
+}
+
+// generateUnitReflection 为单位生成头顶气泡与短记忆文本。
+func (service *Service) generateUnitReflection(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	record unit.Record,
+	eventSummary string,
+	interactionKind string,
+) (unitReflectionPayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := reflectionSystemPrompt(record)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, record, 8)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, record, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, record.ID, 4)
+	userPrompt := buildReflectionPrompt(
+		state,
+		byID,
+		record,
+		eventSummary,
+		memorySummary,
+		relationSummary,
+		knowledgeSummary,
+	)
+	if llmBudgetGuardrailActive(state) {
+		payload := budgetGuardrailReflection(eventSummary)
+		result := budgetGuardrailResult(state)
+		return payload, result, buildLLMInteraction(state, record.ID, interactionKind, payload.Bubble, systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{
+				FallbackCause: err.Error(),
+			},
+		}
+		return unitReflectionPayload{}, result, buildLLMInteraction(state, record.ID, interactionKind, "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskReflection,
+		SchemaName:     "session_unit_reflection",
+		ResponseSchema: unitReflectionSchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.7,
+		MaxTokens:      160,
+		Timeout:        llmRequestTimeout,
+	})
+	if err != nil {
+		return unitReflectionPayload{}, result, buildLLMInteraction(state, record.ID, interactionKind, "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("unit reflection generation failed: %w", err)
+	}
+
+	var payload unitReflectionPayload
+	if err := json.Unmarshal(result.Output, &payload); err != nil {
+		cause := fmt.Sprintf("decode unit reflection payload: %v", err)
+		return unitReflectionPayload{}, result, buildLLMInteraction(state, record.ID, interactionKind, "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	payload = normalizeReflectionPayload(payload)
+	if payload.Bubble == "" {
+		cause := "unit reflection bubble is empty"
+		return unitReflectionPayload{}, result, buildLLMInteraction(state, record.ID, interactionKind, "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	return payload, result, buildLLMInteraction(state, record.ID, interactionKind, payload.Bubble, systemPrompt, userPrompt, result, ""), nil
+}
+
+// generateDeploymentChoice 生成部署阶段双单位交易/协商决策。
+func (service *Service) generateDeploymentChoice(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	left *unit.Record,
+	right *unit.Record,
+	candidates []deploymentCandidate,
+) (deploymentChoicePayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := deploymentSystemPrompt(*left, *right)
+	leftMemorySummary := service.memorySummaryForPrompt(ctx, state, byID, *left, 8)
+	rightMemorySummary := service.memorySummaryForPrompt(ctx, state, byID, *right, 8)
+	leftRelationSummary := service.relationSummaryForPrompt(ctx, byID, *left, 4)
+	rightRelationSummary := service.relationSummaryForPrompt(ctx, byID, *right, 4)
+	userPrompt := buildDeploymentPrompt(state, byID, left, right, candidates, leftMemorySummary, rightMemorySummary, leftRelationSummary, rightRelationSummary)
+	if llmBudgetGuardrailActive(state) {
+		choice := budgetGuardrailDeploymentChoice()
+		result := budgetGuardrailResult(state)
+		return choice, result, buildLLMInteraction(state, left.ID, "unit_dialogue", deploymentChoiceInteractionSummary(choice), systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{FallbackCause: err.Error()},
+		}
+		return deploymentChoicePayload{}, result, buildLLMInteraction(state, left.ID, "unit_dialogue", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskDeployment,
+		SchemaName:     "session_deployment_choice",
+		ResponseSchema: buildDeploymentChoiceSchema(candidates),
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.6,
+		MaxTokens:      260,
+		Timeout:        llmRequestTimeout,
+	})
+	if err != nil {
+		return deploymentChoicePayload{}, result, buildLLMInteraction(state, left.ID, "unit_dialogue", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("deployment choice generation failed: %w", err)
+	}
+
+	var choice deploymentChoicePayload
+	if err := json.Unmarshal(result.Output, &choice); err != nil {
+		cause := fmt.Sprintf("decode deployment choice payload: %v", err)
+		return deploymentChoicePayload{}, result, buildLLMInteraction(state, left.ID, "unit_dialogue", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+	choice = normalizeDeploymentChoice(choice)
+	if choice.CandidateID == "" ||
+		choice.Reasoning == "" ||
+		choice.Summary == "" ||
+		choice.LeftLine == "" ||
+		choice.RightLine == "" ||
+		choice.LeftMemory == "" ||
+		choice.RightMemory == "" {
+		cause := "deployment choice is incomplete"
+		return deploymentChoicePayload{}, result, buildLLMInteraction(state, left.ID, "unit_dialogue", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	return choice, result, buildLLMInteraction(state, left.ID, "unit_dialogue", deploymentChoiceInteractionSummary(choice), systemPrompt, userPrompt, result, ""), nil
+}
+
+// deploymentChoiceInteractionSummary 汇总部署协商的关键输出，写入交互摘要。
+func deploymentChoiceInteractionSummary(choice deploymentChoicePayload) string {
+	summary := strings.TrimSpace(choice.Summary)
+	if summary != "" {
+		return summary
+	}
+	return strings.TrimSpace(choice.Reasoning)
+}
+
+// generateUpkeepChoice 生成单位日常生存动作（如进食）是否执行的判断。
+func (service *Service) generateUpkeepChoice(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	record unit.Record,
+	eventLabel string,
+) (upkeepChoicePayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := upkeepSystemPrompt(record)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, record, 8)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, record, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, record.ID, 4)
+	userPrompt := buildUpkeepPrompt(
+		state,
+		byID,
+		record,
+		eventLabel,
+		memorySummary,
+		relationSummary,
+		knowledgeSummary,
+	)
+	if llmBudgetGuardrailActive(state) {
+		choice := budgetGuardrailUpkeepChoice()
+		result := budgetGuardrailResult(state)
+		return choice, result, buildLLMInteraction(state, record.ID, "reflection", choice.Bubble, systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{FallbackCause: err.Error()},
+		}
+		return upkeepChoicePayload{}, result, buildLLMInteraction(state, record.ID, "reflection", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
+		Task:           ai.TaskUpkeep,
+		SchemaName:     "session_upkeep_choice",
+		ResponseSchema: upkeepChoiceSchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.55,
+		MaxTokens:      180,
+	})
+	if err != nil {
+		return upkeepChoicePayload{}, result, buildLLMInteraction(state, record.ID, "reflection", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("upkeep choice generation failed: %w", err)
+	}
+
+	var choice upkeepChoicePayload
+	if err := json.Unmarshal(result.Output, &choice); err != nil {
+		cause := fmt.Sprintf("decode upkeep choice payload: %v", err)
+		return upkeepChoicePayload{}, result, buildLLMInteraction(state, record.ID, "reflection", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+	choice = normalizeUpkeepChoice(choice)
+	if choice.Reasoning == "" {
+		cause := "upkeep reasoning must not be empty"
+		return upkeepChoicePayload{}, result, buildLLMInteraction(state, record.ID, "reflection", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	summary := choice.Reasoning
+	if choice.Bubble != "" {
+		summary = choice.Bubble
+	}
+	return choice, result, buildLLMInteraction(state, record.ID, "reflection", summary, systemPrompt, userPrompt, result, ""), nil
+}
+
+// generateCombatShakeChoice 生成战斗应激快决策（continue/retreat/surrender/rage）。
+func (service *Service) generateCombatShakeChoice(
+	ctx context.Context,
+	state State,
+	byID map[string]*unit.Record,
+	record unit.Record,
+	triggers []string,
+) (combatShakeChoicePayload, ai.CompletionResult, LLMInteraction, error) {
+	systemPrompt := combatShakeSystemPrompt(record)
+	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, record, 8)
+	relationSummary := service.relationSummaryForPrompt(ctx, byID, record, 4)
+	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, record.ID, 4)
+	userPrompt := buildCombatShakePrompt(
+		state,
+		byID,
+		record,
+		triggers,
+		memorySummary,
+		relationSummary,
+		knowledgeSummary,
+	)
+	if llmBudgetGuardrailActive(state) {
+		choice := budgetGuardrailCombatShakeChoice()
+		result := budgetGuardrailResult(state)
+		return choice, result, buildLLMInteraction(state, record.ID, "shake", choice.Bubble, systemPrompt, userPrompt, result, ""), nil
+	}
+	if service.llm == nil {
+		err := fmt.Errorf("llm client is disabled")
+		result := ai.CompletionResult{
+			Debug: ai.CompletionDebug{FallbackCause: err.Error()},
+		}
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, err.Error()), err
+	}
+
+	const shakeTimeout = llmRequestTimeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, shakeTimeout)
+	defer cancel()
+
+	result, err := service.llm.GenerateJSON(timeoutCtx, ai.CompletionRequest{
+		Task:           ai.TaskReflection,
+		SchemaName:     "session_combat_shake_choice",
+		ResponseSchema: combatShakeChoiceSchema,
+		SystemPrompt:   systemPrompt,
+		UserPrompt:     userPrompt,
+		Temperature:    0.2,
+		MaxTokens:      96,
+		Timeout:        shakeTimeout,
+	})
+	if err != nil {
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, err.Error()), fmt.Errorf("combat shake generation failed: %w", err)
+	}
+
+	var choice combatShakeChoicePayload
+	if err := json.Unmarshal(result.Output, &choice); err != nil {
+		cause := fmt.Sprintf("decode combat shake payload: %v", err)
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+	choice = normalizeCombatShakeChoice(choice)
+	if choice.Reasoning == "" {
+		cause := "combat shake reasoning must not be empty"
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+	if choice.Bubble == "" {
+		cause := "combat shake bubble must not be empty"
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+	if choice.Memory == "" {
+		cause := "combat shake memory must not be empty"
+		return combatShakeChoicePayload{}, result, buildLLMInteraction(state, record.ID, "shake", "", systemPrompt, userPrompt, result, cause), fmt.Errorf("%s", cause)
+	}
+
+	summary := choice.Reasoning
+	if choice.Bubble != "" {
+		summary = choice.Bubble
+	}
+	return choice, result, buildLLMInteraction(state, record.ID, "shake", summary, systemPrompt, userPrompt, result, ""), nil
+}
+
+// buildLLMInteraction 构建可审计的 LLM 交互记录（含提示词、输出与 token 成本）。
+func buildLLMInteraction(
+	state State,
+	unitID string,
+	kind string,
+	summary string,
+	systemPrompt string,
+	userPrompt string,
+	result ai.CompletionResult,
+	errorMessage string,
+) LLMInteraction {
+	rawOutput := strings.TrimSpace(result.Debug.RawOutput)
+	parsedOutput := prettyJSON(result.Output)
+	if rawOutput == "" {
+		rawOutput = parsedOutput
+	}
+	promptTokens, outputTokens, totalTokens := normalizeTokenUsage(
+		result.Usage.PromptTokens,
+		result.Usage.CompletionTokens,
+		result.Usage.TotalTokens,
+	)
+	estimatedCost := estimateLLMCostUSD(result.Provider, result.Model, promptTokens, outputTokens)
+
+	return LLMInteraction{
+		ID:            uuid.NewString(),
+		UnitID:        unitID,
+		Kind:          kind,
+		Summary:       summary,
+		SystemPrompt:  systemPrompt,
+		UserPrompt:    userPrompt,
+		ParsedOutput:  parsedOutput,
+		RawOutput:     rawOutput,
+		ErrorMessage:  strings.TrimSpace(errorMessage),
+		FallbackCause: strings.TrimSpace(result.Debug.FallbackCause),
+		Turn:          state.TurnState.Turn,
+		Phase:         state.TurnState.Phase,
+		OccurredAt:    time.Now().UTC(),
+		Provider:      result.Provider,
+		Model:         result.Model,
+		UsedFallback:  result.UsedFallback,
+		PromptTokens:  promptTokens,
+		OutputTokens:  outputTokens,
+		TotalTokens:   totalTokens,
+		EstimatedCost: estimatedCost,
+		Attempts:      append([]ai.CompletionAttempt{}, result.Debug.Attempts...),
+	}
+}
+
+// prettyJSON 把 JSON 输出格式化为可读字符串，失败时返回原文。
+func prettyJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+
+	formatted, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+
+	return string(formatted)
+}
+
+// normalizeDecisionChoice 统一裁剪字段长度，避免长文本撑坏前端展示。
+func normalizeDecisionChoice(choice unitDecisionChoicePayload) unitDecisionChoicePayload {
+	choice.Action = DecisionAction(strings.ToLower(strings.TrimSpace(string(choice.Action))))
+	choice.Activity = ProductionActivity(strings.ToLower(strings.TrimSpace(string(choice.Activity))))
+	choice.SkillID = strings.ToLower(strings.TrimSpace(choice.SkillID))
+	choice.TradeKind = TradeActionKind(strings.ToLower(strings.TrimSpace(string(choice.TradeKind))))
+	choice.ItemID = strings.ToLower(strings.TrimSpace(choice.ItemID))
+	choice.ItemName = limitTextRunes(strings.TrimSpace(choice.ItemName), llmBubbleRuneLimit)
+	choice.OtherItemID = strings.ToLower(strings.TrimSpace(choice.OtherItemID))
+	choice.GroundLootID = strings.TrimSpace(choice.GroundLootID)
+	choice.StructureID = strings.TrimSpace(choice.StructureID)
+	choice.StructureType = StructureType(strings.ToLower(strings.TrimSpace(string(choice.StructureType))))
+	choice.TargetUnitID = strings.TrimSpace(choice.TargetUnitID)
+	choice.NextAction = limitTextRunes(strings.TrimSpace(choice.NextAction), llmNextActionRuneLimit)
+	choice.Speak = strings.TrimSpace(choice.Speak)
+	choice.Memory = limitTextRunes(strings.TrimSpace(choice.Memory), llmMemoryRuneLimit)
+	choice.Knowledge = strings.TrimSpace(choice.Knowledge)
+	choice.Reasoning = strings.TrimSpace(choice.Reasoning)
+	if choice.NextAction == "" {
+		switch {
+		case choice.Speak != "":
+			choice.NextAction = limitTextRunes(choice.Speak, llmNextActionRuneLimit)
+		case choice.Reasoning != "":
+			choice.NextAction = limitTextRunes(choice.Reasoning, llmNextActionRuneLimit)
+		}
+	}
+	if choice.Speak == "" {
+		switch {
+		case choice.NextAction != "":
+			choice.Speak = choice.NextAction
+		case choice.Reasoning != "":
+			choice.Speak = strings.TrimSpace(choice.Reasoning)
+		}
+	}
+	if choice.Memory == "" {
+		switch {
+		case choice.Speak != "":
+			choice.Memory = limitTextRunes(choice.Speak, llmMemoryRuneLimit)
+		case choice.Reasoning != "":
+			choice.Memory = limitTextRunes(choice.Reasoning, llmMemoryRuneLimit)
+		}
+	}
+	return choice
+}
+
+// normalizeReflectionPayload 规范化反思输出长度并补齐缺省字段。
+func normalizeReflectionPayload(payload unitReflectionPayload) unitReflectionPayload {
+	payload.Bubble = limitTextRunes(strings.TrimSpace(payload.Bubble), llmBubbleRuneLimit)
+	payload.Memory = limitTextRunes(strings.TrimSpace(payload.Memory), llmMemoryRuneLimit)
+	if payload.Memory == "" {
+		payload.Memory = limitTextRunes(payload.Bubble, llmMemoryRuneLimit)
+	}
+	return payload
+}
+
+// normalizeDecision 规范化决策输出字段并填充展示兜底文本。
+func normalizeDecision(decision unitDecisionPayload) unitDecisionPayload {
+	decision.Action = DecisionAction(strings.ToLower(strings.TrimSpace(string(decision.Action))))
+	decision.SkillID = strings.ToLower(strings.TrimSpace(decision.SkillID))
+	decision.TradeKind = TradeActionKind(strings.ToLower(strings.TrimSpace(string(decision.TradeKind))))
+	decision.ItemID = strings.ToLower(strings.TrimSpace(decision.ItemID))
+	decision.ItemName = limitTextRunes(strings.TrimSpace(decision.ItemName), 16)
+	decision.OtherItemID = strings.ToLower(strings.TrimSpace(decision.OtherItemID))
+	decision.StructureID = strings.TrimSpace(decision.StructureID)
+	decision.StructureType = StructureType(strings.ToLower(strings.TrimSpace(string(decision.StructureType))))
+	decision.TargetUnitID = strings.TrimSpace(decision.TargetUnitID)
+	decision.NextAction = limitTextRunes(strings.TrimSpace(decision.NextAction), llmNextActionRuneLimit)
+	decision.Speak = strings.TrimSpace(decision.Speak)
+	decision.Memory = limitTextRunes(strings.TrimSpace(decision.Memory), llmMemoryRuneLimit)
+	decision.Knowledge = strings.TrimSpace(decision.Knowledge)
+	decision.Reasoning = strings.TrimSpace(decision.Reasoning)
+	if decision.NextAction == "" {
+		switch {
+		case decision.Speak != "":
+			decision.NextAction = limitTextRunes(decision.Speak, llmNextActionRuneLimit)
+		case decision.Reasoning != "":
+			decision.NextAction = limitTextRunes(decision.Reasoning, llmNextActionRuneLimit)
+		}
+	}
+	if decision.Speak == "" {
+		switch {
+		case decision.NextAction != "":
+			decision.Speak = decision.NextAction
+		case decision.Reasoning != "":
+			decision.Speak = strings.TrimSpace(decision.Reasoning)
+		}
+	}
+	if decision.Memory == "" {
+		switch {
+		case decision.Speak != "":
+			decision.Memory = limitTextRunes(decision.Speak, llmMemoryRuneLimit)
+		case decision.Reasoning != "":
+			decision.Memory = limitTextRunes(decision.Reasoning, llmMemoryRuneLimit)
+		}
+	}
+	return decision
+}
+
+// limitTextRunes 按 rune 数裁剪文本，避免多字节字符截断异常。
+func limitTextRunes(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || value == "" {
+		return value
+	}
+
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+// buildUnitDecisionSchema 基于候选动作动态生成单位决策 JSON schema。
+func buildUnitDecisionSchema(candidates []decisionCandidate) []byte {
+	actions := make([]string, 0, len(candidates))
+	seenActions := map[string]struct{}{}
+	movePairs := make([]map[string]any, 0)
+	seenMovePairs := map[string]struct{}{}
+	for _, candidate := range candidates {
+		action := strings.TrimSpace(string(candidate.Action))
+		if action == "" {
+			continue
+		}
+		if candidate.Action == DecisionActionMove {
+			key := fmt.Sprintf("%d:%d", candidate.TargetQ, candidate.TargetR)
+			if _, exists := seenMovePairs[key]; !exists {
+				seenMovePairs[key] = struct{}{}
+				movePairs = append(movePairs, map[string]any{
+					"properties": map[string]any{
+						"target_q": map[string]any{"const": candidate.TargetQ},
+						"target_r": map[string]any{"const": candidate.TargetR},
+					},
+				})
+			}
+		}
+		if _, exists := seenActions[action]; exists {
+			continue
+		}
+		seenActions[action] = struct{}{}
+		actions = append(actions, action)
+	}
+	sort.Strings(actions)
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action": map[string]any{
+				"type": "string",
+				"enum": actions,
+			},
+			"activity":       map[string]any{"type": "string"},
+			"skill_id":       map[string]any{"type": "string"},
+			"trade_kind":     map[string]any{"type": "string"},
+			"item_id":        map[string]any{"type": "string"},
+			"item_name":      map[string]any{"type": "string"},
+			"other_item_id":  map[string]any{"type": "string"},
+			"price":          map[string]any{"type": "integer"},
+			"gold_amount":    map[string]any{"type": "integer"},
+			"ground_loot_id": map[string]any{"type": "string"},
+			"structure_id":   map[string]any{"type": "string"},
+			"structure_type": map[string]any{"type": "string"},
+			"target_unit_id": map[string]any{"type": "string"},
+			"target_q":       map[string]any{"type": "integer"},
+			"target_r":       map[string]any{"type": "integer"},
+			"next_action": map[string]any{
+				"type":      "string",
+				"minLength": 1,
+				"maxLength": llmNextActionRuneLimit,
+			},
+			"speak": map[string]any{
+				"type": "string",
+			},
+			"memory": map[string]any{
+				"type":      "string",
+				"minLength": 1,
+				"maxLength": llmMemoryRuneLimit,
+			},
+			"knowledge": map[string]any{
+				"type": "string",
+			},
+			"reasoning": map[string]any{
+				"type":      "string",
+				"minLength": 1,
+			},
+		},
+		"required":             []string{"action", "next_action", "memory", "reasoning"},
+		"additionalProperties": false,
+	}
+	if len(movePairs) > 0 {
+		schema["allOf"] = []any{
+			map[string]any{
+				"if": map[string]any{
+					"properties": map[string]any{
+						"action": map[string]any{"const": string(DecisionActionMove)},
+					},
+					"required": []string{"action"},
+				},
+				"then": map[string]any{
+					"required": []string{"target_q", "target_r"},
+					"anyOf":    movePairs,
+				},
+			},
+		}
+	}
+
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["hold"]},"next_action":{"type":"string","minLength":1,"maxLength":12},"speak":{"type":"string"},"memory":{"type":"string","minLength":1,"maxLength":60},"knowledge":{"type":"string"},"reasoning":{"type":"string","minLength":1}},"required":["action","next_action","memory","reasoning"],"additionalProperties":false}`)
+	}
+	return encoded
+}
+
+func formatLegalMovePairsForCorrection(candidates []decisionCandidate) string {
+	pairs := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if candidate.Action != DecisionActionMove {
+			continue
+		}
+		key := fmt.Sprintf("%d,%d", candidate.TargetQ, candidate.TargetR)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		pairs = append(pairs, key)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, "；")
+}
+
+// resolveDecisionChoice 按 action+参数把模型选择映射回可执行候选。
+func resolveDecisionChoice(candidates []decisionCandidate, choice unitDecisionChoicePayload) (unitDecisionPayload, error) {
+	return resolveDecisionChoiceWithState(State{}, nil, nil, nil, 0, candidates, choice)
+}
+
+func resolveDecisionChoiceWithState(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	remainingAP int,
+	candidates []decisionCandidate,
+	choice unitDecisionChoicePayload,
+) (unitDecisionPayload, error) {
+	if choice.Reasoning == "" {
+		return unitDecisionPayload{}, fmt.Errorf("reasoning must not be empty")
+	}
+	choiceDecision := normalizeDecision(unitDecisionPayload{
+		Action:        choice.Action,
+		Activity:      choice.Activity,
+		SkillID:       choice.SkillID,
+		TradeKind:     choice.TradeKind,
+		ItemID:        choice.ItemID,
+		ItemName:      choice.ItemName,
+		OtherItemID:   choice.OtherItemID,
+		Price:         choice.Price,
+		GoldAmount:    choice.GoldAmount,
+		GroundLootID:  choice.GroundLootID,
+		StructureID:   choice.StructureID,
+		StructureType: choice.StructureType,
+		TargetUnitID:  choice.TargetUnitID,
+		TargetQ:       choice.TargetQ,
+		TargetR:       choice.TargetR,
+		NextAction:    choice.NextAction,
+		Speak:         choice.Speak,
+		Memory:        choice.Memory,
+		Knowledge:     choice.Knowledge,
+		Reasoning:     choice.Reasoning,
+	})
+	choiceDecision = normalizeDecisionNamesToIDs(choiceDecision, candidates, byID)
+	var validationErr error
+	if actor != nil && len(byID) > 0 && remainingAP > 0 {
+		if err := validateDecision(state, byID, actor, targetIDs, choiceDecision, remainingAP); err == nil {
+			return choiceDecision, nil
+		} else {
+			validationErr = err
+		}
+	}
+	for _, candidate := range candidates {
+		if decisionCandidateMatchesChoice(candidate, choiceDecision) {
+			return decisionFromCandidate(candidate, choice), nil
+		}
+	}
+	if validationErr != nil {
+		return unitDecisionPayload{}, fmt.Errorf("invalid params for action %q: %w", choice.Action, validationErr)
+	}
+	return unitDecisionPayload{}, fmt.Errorf("no legal candidate matches action %q with provided params", choice.Action)
+}
+
+func normalizeDecisionNamesToIDs(decision unitDecisionPayload, candidates []decisionCandidate, byID map[string]*unit.Record) unitDecisionPayload {
+	if decision.TargetUnitID != "" {
+		if _, ok := byID[decision.TargetUnitID]; !ok {
+			for _, candidate := range candidates {
+				if candidate.TargetUnitID == "" || candidate.Action != decision.Action {
+					continue
+				}
+				if target := byID[candidate.TargetUnitID]; target != nil && decisionNameMatchesUnit(decision.TargetUnitID, *target) {
+					decision.TargetUnitID = candidate.TargetUnitID
+					break
+				}
+			}
+		}
+	}
+	if decision.TargetUnitID != "" {
+		if target := resolveUnitLoose(byID, decision.TargetUnitID); target != nil {
+			decision.TargetUnitID = target.ID
+		}
+	}
+	if decision.ItemID != "" {
+		for _, candidate := range candidates {
+			if candidate.ItemID == "" || candidate.Action != decision.Action {
+				continue
+			}
+			if strings.EqualFold(decision.ItemID, candidate.ItemID) || strings.EqualFold(decision.ItemID, displayItemName(candidate.ItemID)) {
+				decision.ItemID = candidate.ItemID
+				break
+			}
+		}
+	}
+	if decision.Activity != "" {
+		for _, candidate := range candidates {
+			if candidate.Activity == "" || candidate.Action != DecisionActionGather {
+				continue
+			}
+			if strings.EqualFold(string(decision.Activity), string(candidate.Activity)) || strings.EqualFold(string(decision.Activity), productionActivityDisplayName(candidate.Activity)) {
+				decision.Activity = candidate.Activity
+				break
+			}
+		}
+	}
+	if decision.StructureType != "" {
+		for _, candidate := range candidates {
+			if candidate.StructureType == "" || candidate.Action != DecisionActionBuild {
+				continue
+			}
+			if strings.EqualFold(string(decision.StructureType), string(candidate.StructureType)) || strings.EqualFold(string(decision.StructureType), structureDisplayName(candidate.StructureType)) {
+				decision.StructureType = candidate.StructureType
+				break
+			}
+		}
+	}
+	return decision
+}
+
+func decisionNameMatchesUnit(value string, target unit.Record) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, candidate := range []string{target.ID, target.Identity.Name, target.Identity.Nickname, target.DisplayName()} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(value, candidate) ||
+			(len(value) >= 6 && strings.HasPrefix(strings.ToLower(candidate), strings.ToLower(value))) ||
+			(len(candidate) >= 6 && strings.HasPrefix(strings.ToLower(value), strings.ToLower(candidate))) ||
+			strings.Contains(candidate, value) ||
+			strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveUnitLoose(byID map[string]*unit.Record, value string) *unit.Record {
+	value = strings.TrimSpace(value)
+	if value == "" || len(byID) == 0 {
+		return nil
+	}
+	if target := byID[value]; target != nil {
+		return target
+	}
+	var matched *unit.Record
+	for _, candidate := range byID {
+		if candidate == nil || !decisionNameMatchesUnit(value, *candidate) {
+			continue
+		}
+		if matched != nil && matched.ID != candidate.ID {
+			return nil
+		}
+		matched = candidate
+	}
+	return matched
+}
+
+func decisionFromCandidate(candidate decisionCandidate, choice unitDecisionChoicePayload) unitDecisionPayload {
+	decision := unitDecisionPayload{
+		Action:        candidate.Action,
+		Activity:      candidate.Activity,
+		SkillID:       candidate.SkillID,
+		TradeKind:     candidate.TradeKind,
+		ItemID:        candidate.ItemID,
+		ItemName:      candidate.ItemName,
+		OtherItemID:   candidate.OtherItemID,
+		Price:         candidate.Price,
+		GoldAmount:    candidate.GoldAmount,
+		GroundLootID:  candidate.GroundLootID,
+		Memory:        choice.Memory,
+		Knowledge:     choice.Knowledge,
+		StructureID:   candidate.StructureID,
+		StructureType: candidate.StructureType,
+		TargetUnitID:  candidate.TargetUnitID,
+		TargetQ:       candidate.TargetQ,
+		TargetR:       candidate.TargetR,
+		NextAction:    choice.NextAction,
+		Speak:         choice.Speak,
+		Reasoning:     choice.Reasoning,
+	}
+	if candidate.Action == DecisionActionTrade {
+		if choice.TradeKind != "" {
+			decision.TradeKind = choice.TradeKind
+		}
+		if choice.TargetUnitID != "" {
+			decision.TargetUnitID = choice.TargetUnitID
+		}
+		if choice.ItemID != "" {
+			decision.ItemID = choice.ItemID
+		}
+		if choice.GoldAmount > 0 {
+			decision.GoldAmount = choice.GoldAmount
+		}
+		if choice.Price > 0 {
+			decision.Price = choice.Price
+		}
+	}
+	return normalizeDecision(decision)
+}
+
+func decisionCandidateMatchesChoice(candidate decisionCandidate, choice unitDecisionPayload) bool {
+	if candidate.Action != choice.Action {
+		return false
+	}
+	switch candidate.Action {
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		return matchOptionalString(candidate.TargetUnitID, choice.TargetUnitID) && matchOptionalString(candidate.StructureID, choice.StructureID)
+	case DecisionActionSkill:
+		return candidate.SkillID == choice.SkillID && matchOptionalString(candidate.TargetUnitID, choice.TargetUnitID)
+	case DecisionActionMove:
+		return candidate.TargetQ == choice.TargetQ && candidate.TargetR == choice.TargetR
+	case DecisionActionGather:
+		return candidate.Activity == choice.Activity
+	case DecisionActionBuild:
+		return candidate.StructureType == choice.StructureType
+	case DecisionActionTrade:
+		return candidate.TradeKind == choice.TradeKind && matchOptionalString(candidate.TargetUnitID, choice.TargetUnitID) && matchOptionalString(candidate.ItemID, choice.ItemID)
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		return candidate.TargetUnitID == choice.TargetUnitID
+	case DecisionActionEquip, DecisionActionEat:
+		return candidate.ItemID == choice.ItemID
+	case DecisionActionPickup:
+		return matchOptionalString(candidate.GroundLootID, choice.GroundLootID)
+	case DecisionActionDemolish:
+		return matchOptionalString(candidate.StructureID, choice.StructureID)
+	default:
+		return true
+	}
+}
+
+func matchOptionalString(candidateValue string, choiceValue string) bool {
+	return strings.TrimSpace(candidateValue) == "" || strings.TrimSpace(candidateValue) == strings.TrimSpace(choiceValue)
+}
+
+func matchOptionalInt(candidateValue int, choiceValue int) bool {
+	return candidateValue == 0 || candidateValue == choiceValue
+}
+
+// validateDecision 校验模型产出的决策是否满足动作与目标约束。
+func validateDecision(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	decision unitDecisionPayload,
+	remainingAP int,
+) error {
+	if decision.Reasoning == "" {
+		return fmt.Errorf("reasoning must not be empty")
+	}
+	if cost := decisionCost(decision); cost > remainingAP {
+		return fmt.Errorf("action %q requires %d AP but only %d left", decision.Action, cost, remainingAP)
+	}
+	if isUnitPregnant(state, actor.ID) && pregnancyBlockedAction(decision.Action) {
+		return fmt.Errorf("pregnant units cannot participate in combat or building")
+	}
+
+	switch decision.Action {
+	case DecisionActionAttack:
+		if decision.TargetUnitID != "" {
+			target := resolveTarget(targetIDs, byID, decision.TargetUnitID, actor)
+			if target == nil || target.ID != decision.TargetUnitID {
+				return fmt.Errorf("target_unit_id %q is not a valid visible enemy id", decision.TargetUnitID)
+			}
+			return nil
+		}
+		if decision.StructureID != "" {
+			if _, structure := resolveHostileStructureTarget(state, actor, decision.StructureID); structure == nil {
+				return fmt.Errorf("structure_id %q is not a valid hostile structure", decision.StructureID)
+			}
+			return nil
+		}
+		return fmt.Errorf("attack decision requires target_unit_id or structure_id")
+	case DecisionActionCharge:
+		if decision.TargetUnitID != "" {
+			target := resolveTarget(targetIDs, byID, decision.TargetUnitID, actor)
+			if target == nil || target.ID != decision.TargetUnitID {
+				return fmt.Errorf("target_unit_id %q is not a valid visible enemy id", decision.TargetUnitID)
+			}
+			return nil
+		}
+		if decision.StructureID != "" {
+			if _, structure := resolveHostileStructureTarget(state, actor, decision.StructureID); structure == nil {
+				return fmt.Errorf("structure_id %q is not a valid hostile structure", decision.StructureID)
+			}
+			return nil
+		}
+		return fmt.Errorf("charge decision requires target_unit_id or structure_id")
+	case DecisionActionHeavyAttack:
+		if decision.TargetUnitID != "" {
+			target := resolveTarget(targetIDs, byID, decision.TargetUnitID, actor)
+			if target == nil || target.ID != decision.TargetUnitID {
+				return fmt.Errorf("target_unit_id %q is not a valid visible enemy id", decision.TargetUnitID)
+			}
+			return nil
+		}
+		if decision.StructureID != "" {
+			if _, structure := resolveHostileStructureTarget(state, actor, decision.StructureID); structure == nil {
+				return fmt.Errorf("structure_id %q is not a valid hostile structure", decision.StructureID)
+			}
+			return nil
+		}
+		return fmt.Errorf("heavy_attack decision requires target_unit_id or structure_id")
+	case DecisionActionSkill:
+		definition, ok := combatSkillByID(decision.SkillID)
+		if !ok {
+			return fmt.Errorf("unsupported skill_id %q", decision.SkillID)
+		}
+		if definition.APCost > remainingAP {
+			return fmt.Errorf("skill %q requires %d AP but only %d left", decision.SkillID, definition.APCost, remainingAP)
+		}
+		if definition.RequiresTarget {
+			if decision.TargetUnitID == "" {
+				return fmt.Errorf("skill %q requires target_unit_id", decision.SkillID)
+			}
+			switch definition.TargetMode {
+			case "ally", "ally_or_self":
+				target, ok := byID[decision.TargetUnitID]
+				if !ok || !isBattleReady(*target) {
+					return fmt.Errorf("target_unit_id %q is invalid", decision.TargetUnitID)
+				}
+				if target.FactionID != actor.FactionID || (definition.TargetMode == "ally" && target.ID == actor.ID) {
+					return fmt.Errorf("target_unit_id %q is not an eligible ally target", decision.TargetUnitID)
+				}
+				if target.ID != actor.ID && unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, target.Status.PositionQ, target.Status.PositionR) > 1 {
+					return fmt.Errorf("ally target_unit_id %q is not adjacent", decision.TargetUnitID)
+				}
+			default:
+				target := resolveTarget(targetIDs, byID, decision.TargetUnitID, actor)
+				if target == nil || target.ID != decision.TargetUnitID {
+					return fmt.Errorf("target_unit_id %q is not a valid visible enemy id", decision.TargetUnitID)
+				}
+			}
+		}
+		return nil
+	case DecisionActionMove:
+		coord := decisionCoord(decision)
+		if !inBounds(state.Map, coord) {
+			return fmt.Errorf("move target %d,%d is out of bounds", coord.Q, coord.R)
+		}
+		if coord.Q == actor.Status.PositionQ && coord.R == actor.Status.PositionR {
+			return fmt.Errorf("move target must differ from the current position")
+		}
+		if unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, coord.Q, coord.R) != 1 {
+			return fmt.Errorf("move target %d,%d must be adjacent", coord.Q, coord.R)
+		}
+		if occupiedByAnother(byID, actor.ID, coord) {
+			return fmt.Errorf("move target %d,%d is occupied", coord.Q, coord.R)
+		}
+		return nil
+	case DecisionActionDefend, DecisionActionObserve:
+		return nil
+	case DecisionActionSay:
+		target, err := resolveDialogueTarget(state, byID, actor, decision.TargetUnitID)
+		if err != nil {
+			return err
+		}
+		if target == nil {
+			return fmt.Errorf("say target_unit_id %q is invalid", decision.TargetUnitID)
+		}
+		if strings.TrimSpace(firstNonEmptyText(decision.Speak, decision.NextAction)) == "" {
+			return fmt.Errorf("say requires non-empty speak or next_action")
+		}
+		return nil
+	case DecisionActionDialogue:
+		target, err := resolveDialogueTarget(state, byID, actor, decision.TargetUnitID)
+		if err != nil {
+			return err
+		}
+		if target == nil {
+			return fmt.Errorf("dialogue target_unit_id %q is invalid", decision.TargetUnitID)
+		}
+		return nil
+	case DecisionActionAssist:
+		if decision.TargetUnitID == "" {
+			return fmt.Errorf("assist decision requires target_unit_id")
+		}
+		target, ok := byID[decision.TargetUnitID]
+		if !ok || !isBattleReady(*target) {
+			return fmt.Errorf("assist target_unit_id %q is invalid", decision.TargetUnitID)
+		}
+		if target.FactionID != actor.FactionID || target.ID == actor.ID {
+			return fmt.Errorf("assist target_unit_id %q must be an allied unit", decision.TargetUnitID)
+		}
+		if unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, target.Status.PositionQ, target.Status.PositionR) > 1 {
+			return fmt.Errorf("assist target %q is not adjacent", decision.TargetUnitID)
+		}
+		return nil
+	case DecisionActionTrade:
+		target, err := resolveTradeTarget(state, byID, actor, decision.TargetUnitID)
+		if err != nil {
+			return err
+		}
+		if target == nil {
+			return fmt.Errorf("trade target_unit_id %q is invalid", decision.TargetUnitID)
+		}
+		switch decision.TradeKind {
+		case TradeActionKindGift:
+			if decision.ItemID == "" {
+				return fmt.Errorf("trade gift requires item_id")
+			}
+			if !hasItem(*actor, decision.ItemID) {
+				return fmt.Errorf("actor does not own trade item %q", decision.ItemID)
+			}
+		case TradeActionKindGold:
+			if decision.GoldAmount <= 0 {
+				return fmt.Errorf("trade gold transfer requires positive gold_amount")
+			}
+			if actor.Status.Wallet < decision.GoldAmount {
+				return fmt.Errorf("actor does not have enough gold for transfer")
+			}
+		case TradeActionKindSell:
+			if decision.ItemID == "" {
+				return fmt.Errorf("trade sell requires item_id")
+			}
+			if decision.Price <= 0 {
+				return fmt.Errorf("trade sell requires positive price")
+			}
+			if !hasItem(*actor, decision.ItemID) {
+				return fmt.Errorf("actor does not own sell item %q", decision.ItemID)
+			}
+			if target.Status.Wallet < decision.Price {
+				return fmt.Errorf("target does not have enough gold for purchase")
+			}
+		default:
+			return fmt.Errorf("unsupported trade_kind %q", decision.TradeKind)
+		}
+		return nil
+	case DecisionActionRomance:
+		target, err := resolveAdjacentInteractionTarget(byID, actor, decision.TargetUnitID)
+		if err != nil {
+			return err
+		}
+		if dialogueBlockedByPolicy(state, actor, target) {
+			return fmt.Errorf("cross-faction contact is currently forbidden")
+		}
+		if actor.Social.LoverUnitID != "" || target.Social.LoverUnitID != "" {
+			return fmt.Errorf("romance requires adjacent single units")
+		}
+		return nil
+	case DecisionActionFamily:
+		target, err := resolveAdjacentInteractionTarget(byID, actor, decision.TargetUnitID)
+		if err != nil {
+			return err
+		}
+		if dialogueBlockedByPolicy(state, actor, target) {
+			return fmt.Errorf("cross-faction contact is currently forbidden")
+		}
+		if !canAttemptFamilyAction(state, actor, target) {
+			return fmt.Errorf("family requires adjacent mutual lovers and at least one turn after romance")
+		}
+		return nil
+	case DecisionActionPickup:
+		if resolveGroundLootAtActor(state, actor, decision.GroundLootID) == nil {
+			return fmt.Errorf("pickup requires a ground loot drop under the actor")
+		}
+		return nil
+	case DecisionActionDemolish:
+		if _, structure := resolveFriendlyStructureAtActor(state, actor, decision.StructureID); structure == nil {
+			return fmt.Errorf("demolish requires a friendly structure under the actor")
+		}
+		return nil
+	case DecisionActionGather, DecisionActionBuild, DecisionActionForge, DecisionActionUpgrade, DecisionActionEquip:
+		return validateProductionDecision(state, actor, decision)
+	case DecisionActionEat:
+		switch decision.ItemID {
+		case "", "ration":
+			if !hasBackpackItem(*actor, "ration") {
+				return fmt.Errorf("eat requires ration in backpack")
+			}
+		case "healing_potion":
+			if !hasBackpackItem(*actor, "healing_potion") {
+				return fmt.Errorf("healing potion requires healing_potion in backpack")
+			}
+			if actor.Status.HP >= 100 {
+				return fmt.Errorf("healing potion requires damaged hp")
+			}
+		default:
+			return fmt.Errorf("unsupported eat item_id %q", decision.ItemID)
+		}
+		return nil
+	case DecisionActionHold:
+		return nil
+	default:
+		return fmt.Errorf("unsupported action %q", decision.Action)
+	}
+}
+
+// summarizeDecision 汇总决策文本，供日志与前端摘要复用。
+func summarizeDecision(_ map[string]*unit.Record, decision unitDecisionPayload) string {
+	nextAction := strings.TrimSpace(decision.NextAction)
+	reasoning := strings.TrimSpace(decision.Reasoning)
+	if nextAction != "" {
+		if reasoning != "" && !strings.Contains(nextAction, reasoning) {
+			return fmt.Sprintf("%s（%s）", nextAction, reasoning)
+		}
+		return nextAction
+	}
+	if speak := strings.TrimSpace(decision.Speak); speak != "" {
+		if reasoning != "" && !strings.Contains(speak, reasoning) {
+			return fmt.Sprintf("%s（%s）", speak, reasoning)
+		}
+		return speak
+	}
+	if memory := strings.TrimSpace(decision.Memory); memory != "" {
+		if reasoning != "" && !strings.Contains(memory, reasoning) {
+			return fmt.Sprintf("%s（%s）", memory, reasoning)
+		}
+		return memory
+	}
+	return reasoning
+}
+
+// unitDecisionSystemPrompt 生成执行阶段决策的 system prompt。
+func unitDecisionSystemPrompt(actor *unit.Record) string {
+	identity := "未知单位"
+	if actor != nil {
+		identity = fmt.Sprintf("名称=%s；ID=%s；姓名=%s；昵称=%s；阵营=%s", actor.DisplayName(), actor.ID, actor.Identity.Name, actor.Identity.Nickname, actor.FactionID)
+	}
+	return fmt.Sprintf(
+		"你是战术游戏《群像》中的一个 AI 单位。你的身份是：%s。你必须清楚区分“点名给你的任务”和“点名给别人的任务”，不要把别人的结婚、生育、交易或战斗任务当成自己的任务。%s只能返回 JSON，且不要解释规则外内容。任何无效动作都会被判失败。",
+		identity,
+		sharedAIDecisionPrinciplesPrompt(),
+	)
+}
+
+func sharedAIDecisionPrinciplesPrompt() string {
+	return "你不是玩家，你是一名有独立人格、记忆和风险判断的 AI 单位。所有实际操作都由单位自己执行，包括吃饭、吃药、交谈、交易、采集、建造与战斗；指挥官只会给自然语言方针，或在部署阶段和单位说话。请综合人设、性格、记忆、关系、当前状态、周围环境和最新方针，决定本执行阶段要做的一件事。方针很重要，是理解阵营意图的强信号，但不是遥控指令；单位仍要结合自己的性格、亲疏记忆、附近威胁、资源和生存风险做判断。也可以在输出里自行总结新发现的世界规律。探索原则：单位是独立个体，有自己的意识和好奇心；在不违背生存与当前关键目标的前提下，要主动尝试不同可能性，探索这个世界、每一种地形、每一段人际关系、每一个候选动作带来的结果；探索、生存和关键任务稳定后，可以尽量发展伴侣关系、结婚叙事并共同养育孩子。若上下文明确标注 defiant=true，可优先保命或按自身判断行动。生存规则：饥饿度降到 0 会直接死亡；饥饿度高于 80 时每回合自动恢复 3 HP；如果饥饿度低于 30 且候选里有吃口粮，吃口粮是最高优先级生存动作，低于 10 时必须先吃；如果没有口粮且饥饿偏低，要主动寻找食物来源，优先采集、打猎、钓鱼、靠近可产粮地形、向相邻单位交易或索要口粮，不要原地空耗到饿死；受伤时可以选择合法治疗药剂候选恢复 HP。输出时必须先看候选动作和合法 JSON 字段示例，action 与参数只能从候选里复制，坐标和单位 ID 不要自行推断；move 必须同时复制同一行合法候选里的 target_q 和 target_r，不能只填一个坐标或把不同行坐标拼在一起。"
+}
+
+// dialogueSystemPrompt 生成单位对话的 system prompt。
+func dialogueSystemPrompt(record unit.Record) string {
+	return fmt.Sprintf(
+		"你是《群像》中的单位 %s。请以这个单位的身份，用简短中文回复玩家。回复应体现性格、当前状态和立场，不要代替玩家下命令，也不要把自己说成玩家的遥控器；后续是否进食、交易、采集、建造与战斗，都由你自己判断。只能返回 JSON。",
+		record.DisplayName(),
+	)
+}
+
+func unitDialogueReplySystemPrompt(record unit.Record) string {
+	return fmt.Sprintf(
+		"你是《群像》中的单位 %s。另一个单位正在和你交流，你必须只代表自己即时回应一句话；回复应体现性格、当前状态、关系与战场处境，不要替对方说话，不要写旁白。只能返回 JSON。",
+		record.DisplayName(),
+	)
+}
+
+// reflectionSystemPrompt 生成单位反思（气泡+记忆）的 system prompt。
+func reflectionSystemPrompt(record unit.Record) string {
+	return fmt.Sprintf(
+		"你是《群像》中的单位 %s。刚刚发生了一件和你有关的事。请以这个单位自己的口吻，产出一句适合显示在头顶气泡里的短句，以及一句你会记住的第一人称记忆。memory 不要空泛，要记录具体事实：谁、对我/我对谁、多少伤害、使用什么武器/物品、移动到什么坐标、发现周围什么单位或机会。不要写系统旁白，不要把自己说成玩家的遥控器。只能返回 JSON。",
+		record.DisplayName(),
+	)
+}
+
+// buildDecisionPrompt 将环境、性格、记忆、关系与候选动作压成单提示词，驱动单位自主决策。
+func buildDecisionPrompt(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	candidates []decisionCandidate,
+	remainingAP int,
+	memorySummary string,
+	relationSummary string,
+	knowledgeSummary string,
+	defiant bool,
+) string {
+	var builder strings.Builder
+	reachableMoves := reachableMoveOptions(state.Map, byID, actor)
+
+	fmt.Fprintln(&builder, "单位决策提示词版本: action_params_v4")
+	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
+	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
+	fmt.Fprintf(&builder, "你本次可用 AP: %d\n", remainingAP)
+	fmt.Fprintf(&builder, "你所属阵营: %s\n", actor.FactionID)
+	fmt.Fprintf(&builder, "当前抗命标记(defiant): %t\n", defiant)
+	fmt.Fprintf(&builder, "阵营自然语言方针上下文: %s\n", directiveForUnit(state, actor.ID, actor.FactionID))
+	fmt.Fprintf(&builder, "指令归属参考: %s\n", actorDirectiveFocusForPrompt(state, byID, actor))
+	if reassignment := reassignmentDirectiveForUnit(state, actor.ID); reassignment != "" {
+		fmt.Fprintf(&builder, "阵营给你的调岗要求: %s\n", reassignment)
+	}
+	if defiant {
+		fmt.Fprintln(&builder, "动摇检查结论：你当前处于 defiant=true，可无视阵营方针，优先保命或按自身判断执行行动。")
+	}
+	fmt.Fprintf(&builder, "你的资料: %s\n", describeUnit(*actor, nil))
+	fmt.Fprintf(&builder, "你的家庭关系: %s\n", summarizeSocialTiesForPrompt(*actor, byID))
+	fmt.Fprintf(&builder, "孕期状态: %s\n", pregnancyStatusForPrompt(state, byID, actor))
+	fmt.Fprintf(&builder, "你的性格: %s\n", summarizeActorPersonality(*actor))
+	if biography := strings.TrimSpace(actor.Identity.Biography); biography != "" {
+		fmt.Fprintf(&builder, "你的生平: %s\n", biography)
+	}
+	fmt.Fprintf(&builder, "你的环境摘要: %s\n", summarizeImmediateEnvironment(state, byID, actor))
+	if strings.TrimSpace(memorySummary) == "" {
+		memorySummary = summarizeUnitMemoryWithTurn(*actor, state.TurnState.Turn, 6)
+	}
+	fmt.Fprintf(&builder, "你记得的重点:\n%s\n", memorySummary)
+	if strings.TrimSpace(relationSummary) == "" {
+		relationSummary = relationSummaryNoKnown
+	}
+	fmt.Fprintf(&builder, "你与其他单位的关系网:\n%s\n", relationSummary)
+	if strings.TrimSpace(knowledgeSummary) == "" {
+		knowledgeSummary = "无"
+	}
+	fmt.Fprintf(&builder, "你已掌握的世界规律:\n%s\n", knowledgeSummary)
+	fmt.Fprintf(
+		&builder,
+		"你脚下地形: %s，当前攻击距离: %d\n",
+		terrainDisplayName(terrainAt(state.Map, world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR})),
+		attackReachWithWeather(state, *actor),
+	)
+	fmt.Fprintf(&builder, "你视野范围内的地形:\n%s\n", summarizeVisibleTerrain(state, byID, actor, 18))
+	fmt.Fprintf(&builder, "最近敌军距离: %d\n", nearestThreatDistance(state, byID, actor))
+	fmt.Fprintf(&builder, "你当前属性受影响说明:\n%s\n", summarizeCurrentAttributeInfluences(state, *actor))
+	fmt.Fprintf(&builder, "你脚下设施: %s\n", summarizeStructureAt(state.Structures, world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR}))
+	fmt.Fprintf(&builder, "你脚下可做的生产/建造: %s\n", currentTileOpportunitySummary(state, byID, *actor))
+	fmt.Fprintf(&builder, "地块产出与可做事项:\n%s\n", terrainProductionRuleSummary())
+	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
+	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
+	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, actor, 6))
+	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, actor.ID, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "即时反应信号:\n%s\n", reactionSignalsForPrompt(state, byID, actor, targetIDs))
+	fmt.Fprintf(&builder, "可见友军:\n%s\n", summarizeFaction(state, byID, actor, visibleAlliedIDs(state, byID, actor)))
+	fmt.Fprintf(&builder, "可见敌军:\n%s\n", summarizeFaction(state, byID, actor, targetIDs))
+	fmt.Fprintf(&builder, "本回合可交谈对象:\n%s\n", formatDialogueOptions(state, byID, actor))
+	fmt.Fprintf(&builder, "本回合可到达地块与可执行事项:\n%s\n", formatMoveOptions(state, actor, reachableMoves))
+	fmt.Fprintf(&builder, "候选动作解释:\n%s\n", formatDecisionActionExplanations(candidates))
+	fmt.Fprintf(&builder, "候选动作列表:\n%s\n", formatDecisionCandidates(candidates, byID))
+	fmt.Fprintf(&builder, "可直接照抄的合法候选 JSON 字段:\n%s\n", formatConcreteDecisionCandidateChoices(candidates, byID))
+	fmt.Fprintf(&builder, "本轮选择提示:\n%s\n", formatDecisionSelectionHint(state, byID, actor, targetIDs, remainingAP, candidates))
+	fmt.Fprintln(&builder, "决策流程:")
+	fmt.Fprintln(&builder, "1. 先确认本轮真正能执行什么：只能从候选动作列表里选一个 action；环境、视野、可到达地块、脚下机会都只是参考，不是候选就不能选。")
+	fmt.Fprintln(&builder, "2. 再理解方针：方针可能同时给多人分配不同任务。若有明确归属，按与你相关的部分理解；若无明确归属，按全局方向结合你的性格、记忆、关系和局势判断。")
+	fmt.Fprintln(&builder, "3. 然后按风险排序：饥饿/濒死/贴身威胁优先；其次落实与你相关且当前可执行的方针；再考虑关系、交易、装备、建设、探索。")
+	fmt.Fprintln(&builder, "4. 最后填 JSON：优先从“可直接照抄的合法候选 JSON 字段”复制同一行 action 和参数，只自行填写 next_action、speak、memory、reasoning、knowledge。")
+	fmt.Fprintln(&builder, "动作合法性:")
+	fmt.Fprintln(&builder, "1. move 只能移动到本回合可到达列表里的相邻合法地块；target_q/target_r 必须来自同一行合法候选 JSON，必须整对复制，不能只看 q 后自行补 r，不能把两个不同行的坐标拆开重组，不要填当前位置、单位坐标、敌人坐标、友军坐标或视野地形坐标。")
+	fmt.Fprintln(&builder, "2. 如果方针或目标需要前往某个地块（例如山地挖矿、废墟/山地建铁匠铺、森林采木、靠近交易对象），但该目标地块不在本回合可到达列表里，不要直接填写那个远处坐标；应从合法 move 候选中选择最能靠近目标的一格，先接近，后续回合再继续移动或执行 gather/build/forge/upgrade。")
+	fmt.Fprintln(&builder, "3. attack/charge/heavy_attack/skill/trade/assist/dialogue/say 的 target_unit_id 必须使用候选中的合法单位 ID；UUID 不要截断，不能用坐标、阵营名或模糊称呼代替。")
+	fmt.Fprintln(&builder, "4. build/gather/forge/upgrade/equip/eat/pickup/demolish 的 structure_type/activity/item_id/ground_loot_id/structure_id 必须来自候选或候选说明。")
+	fmt.Fprintln(&builder, "5. 每次只执行一个动作；不要在一个 JSON 里表达移动后再交易、移动后再攻击、采集后再建造。")
+	fmt.Fprintln(&builder, "行动取舍:")
+	fmt.Fprintln(&builder, "1. 生存：饥饿度低于 10 且有 eat:ration 必须先吃；低于 30 且有 eat:ration 时优先吃。若没有口粮但饥饿偏低，要优先找吃的：候选里有 gather/hunt/forage/fish 就采集食物，有 trade/dialogue/say 就向相邻单位交易或求口粮，有 move 就朝森林、河谷、村庄、城市、农田或可采集地块移动。受伤且有治疗药剂时，可选择治疗。")
+	fmt.Fprintln(&builder, "2. 方针：defiant=false 时方针是强信号，但不是遥控；能落实且不违背生存、人格、关键记忆、关系和现场风险的候选应优先。defiant=true 时可优先保命或按自身判断。")
+	fmt.Fprintln(&builder, "3. 战斗：有贴身敌人时，优先攻击、防御、撤离、支援或治疗；没有安全压力时，不要把 observe/defend 当默认动作。")
+	fmt.Fprintf(&builder, "4. 关系：romance/family 是主动推进亲密关系或家庭的候选；romance 用于表白/确认伴侣，但需要双方至少多个不同回合真实交流并有熟悉基础后才会出现或触发。只在你本人愿意、对方也可能愿意且候选存在时选择；没有 romance 候选时，应先用 dialogue/say 自然相处。family 用于互为恋人且已过至少一回合后共同养育孩子；双方同意后进入 %d 回合孕期，到期才会出生；孕期单位不能参与战斗和建筑；阵营方针不能强迫恋爱或生育。\n", pregnancyDurationTurns)
+	fmt.Fprintln(&builder, "5. 交易：只有候选里出现 trade 才能直接交易；trade 只对相邻目标出现。面对敌方或不信任目标时，可以先给少量好处示好，再推进出售、调拨或后续交易。")
+	fmt.Fprintln(&builder, "6. 装备：只有候选里出现 forge/upgrade/equip 时才锻造、强化或换装。upgrade 表示你已在己方完工铁匠铺、材料与 AP 足够；选择时 item_id 必须来自候选。")
+	fmt.Fprintln(&builder, "7. 生产建设：gather/build 只在候选存在时选择。若当前格已经能建造/采集，不要仅因相邻格也有机会就移动，除非方针、威胁、支援或治疗需要。不要计划建造小屋、房子、营地或婚房；当前真实建筑只有农田、铁匠铺、陷阱、炮台、瞭望塔。")
+	fmt.Fprintln(&builder, "8. 沟通：如果你不懂方针、看不清敌情、需要确认交易/装备/路线，或有新发现要分享，且候选中有 dialogue/say，可以优先交谈；选择 say 时 speak 写实际台词。")
+	fmt.Fprintln(&builder, "9. 即时反应信号只是你感知到的压力、机会或回应需求，不是系统替你下达的动作；是否攻击、撤退、回应或继续任务，仍由你按候选动作自主决定。")
+	fmt.Fprintln(&builder, "装备强化说明:")
+	fmt.Fprintln(&builder, "1. 每次 upgrade 只提升 1 级；升级到 +N 消耗铁矿N+石料N，护甲/鞋履额外皮革N，饰品额外宝石max(1,N-1)，远程/弓/弩额外木材N。材料不足不会出现 upgrade 候选。")
+	fmt.Fprintln(&builder, "2. 强化收益：武器每级攻击+4、防御+1；护甲每级防御+3；鞋履每级防御+1、每2级移动+1；饰品每级攻击+1、防御+2。")
+	fmt.Fprintln(&builder, "3. 如果方针要求锻造/强化但当前没有己方已完工铁匠铺，不能直接 forge/upgrade；应先采集木材、石料、铁矿等建造材料，在城市/村庄/废墟/山地等合法地块选择 build:forge 自己修建铁匠铺，完工后再锻造或强化。")
+	fmt.Fprintln(&builder, "4. 如果缺少建造或强化材料，不要原地空耗；候选中有 gather 时优先采集所需材料，有 trade/dialogue/say 时可向相邻单位交易或索要材料，有 move 时朝能产出木材、石料、铁矿、皮革、宝石的地形移动。")
+	fmt.Fprintln(&builder, "5. AP 规则：gather/build/forge/upgrade 都需要 2 AP；equip 需要 1 AP。若你本次只有 1 AP，脚下又是关键材料点或合法建造点，不要随便离开，优先 hold/defend/observe 等待下次 2 AP 再采集、建造、锻造或强化。")
+	fmt.Fprintln(&builder, "输出字段:")
+	fmt.Fprintln(&builder, "1. action 必填；候选参数里出现的 target_unit_id、target_q、target_r、skill_id、activity、structure_type、item_id、trade_kind、gold_amount、price、ground_loot_id 等字段也要一并填写。")
+	fmt.Fprintf(&builder, "2. next_action 必填，最多 12 个字；speak 也必填，建议小于 %d 个字，要像你本人临场脱口而出；选择 say 时 speak 应写实际台词；memory 必填，最多 60 个字，要记录具体事实。\n", llmSpeakPromptLimit)
+	fmt.Fprintln(&builder, "3. reasoning 必填，用一句话说明本次判断受哪些因素影响，例如方针、地形、饥饿、设施、记忆、关系或威胁。knowledge 可选；没学到新规律就留空。")
+
+	return builder.String()
+}
+
+// buildDialoguePrompt 构建对话任务的 user prompt，上下文含记忆与环境。
+func buildDialoguePrompt(
+	state State,
+	byID map[string]*unit.Record,
+	record unit.Record,
+	playerMessage string,
+	memorySummary string,
+	relationSummary string,
+	knowledgeSummary string,
+) string {
+	var builder strings.Builder
+
+	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
+	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
+	fmt.Fprintf(&builder, "阵营自然语言方针上下文: %s\n", directiveForUnit(state, record.ID, record.FactionID))
+	fmt.Fprintf(&builder, "你的资料: %s\n", describeUnit(record, nil))
+	fmt.Fprintf(&builder, "你的家庭关系: %s\n", summarizeSocialTiesForPrompt(record, byID))
+	fmt.Fprintf(&builder, "你的性格: %s\n", summarizeActorPersonality(record))
+	fmt.Fprintf(&builder, "你的环境摘要: %s\n", summarizeImmediateEnvironment(state, byID, &record))
+	if strings.TrimSpace(memorySummary) == "" {
+		memorySummary = summarizeUnitMemoryWithTurn(record, state.TurnState.Turn, 6)
+	}
+	fmt.Fprintf(&builder, "你记得的重点:\n%s\n", memorySummary)
+	if strings.TrimSpace(relationSummary) == "" {
+		relationSummary = relationSummaryNoKnown
+	}
+	fmt.Fprintf(&builder, "你的关系网:\n%s\n", relationSummary)
+	if strings.TrimSpace(knowledgeSummary) == "" {
+		knowledgeSummary = "无"
+	}
+	fmt.Fprintf(&builder, "你已掌握的世界规律:\n%s\n", knowledgeSummary)
+	fmt.Fprintf(
+		&builder,
+		"你脚下地形: %s，当前攻击距离: %d\n",
+		terrainDisplayName(terrainAt(state.Map, world.Coord{Q: record.Status.PositionQ, R: record.Status.PositionR})),
+		attackReachWithWeather(state, record),
+	)
+	fmt.Fprintf(&builder, "你视野范围内的地形:\n%s\n", summarizeVisibleTerrain(state, byID, &record, 18))
+	fmt.Fprintf(&builder, "你当前属性受影响说明:\n%s\n", summarizeCurrentAttributeInfluences(state, record))
+	fmt.Fprintf(&builder, "你脚下设施: %s\n", summarizeStructureAt(state.Structures, world.Coord{Q: record.Status.PositionQ, R: record.Status.PositionR}))
+	fmt.Fprintf(&builder, "你脚下可做的生产/建造: %s\n", currentTileOpportunitySummary(state, byID, record))
+	fmt.Fprintf(&builder, "地块产出与可做事项:\n%s\n", terrainProductionRuleSummary())
+	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
+	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
+	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, &record, 6))
+	fmt.Fprintf(&builder, "周围态势:\n%s\n", summarizeFaction(state, byID, &record, opposingIDs(state, record.FactionID)))
+	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, record.ID, state.TurnState.Turn, 8))
+	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "玩家刚才对你说: %s\n", strings.TrimSpace(playerMessage))
+	fmt.Fprintln(&builder, "回复规则:")
+	fmt.Fprintln(&builder, "1. 请直接以单位口吻回复，不要超出 3 句；另外再给出 memory，表示你会记住这次对话的一句第一人称短句。")
+	fmt.Fprintln(&builder, "2. 回复要和行动决策一致：你可以表达意愿、计划或提醒，但回复本身不会立即执行行动；真正移动、采集、建造、交易、锻造、强化仍必须等执行阶段从合法候选动作中选择。")
+	fmt.Fprintln(&builder, "3. 谈生产/定居/补给时只能引用当前真实地形、材料和建筑；不要承诺建小屋、房子、营地或其他不存在的建筑。")
+	fmt.Fprintln(&builder, "4. 不能创造候选动作之外的事，不能创造不存在的建筑、资源或交易方式。体现你会基于环境、性格和记忆自行判断，而不是等玩家逐项遥控。")
+
+	return builder.String()
+}
+
+func buildUnitDialogueReplyPrompt(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	target *unit.Record,
+	actorLine string,
+	memorySummary string,
+	relationSummary string,
+	knowledgeSummary string,
+) string {
+	var builder strings.Builder
+	if target == nil {
+		return "目标单位不存在。"
+	}
+	actorName := "对方"
+	if actor != nil {
+		actorName = actor.DisplayName()
+	}
+
+	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
+	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
+	fmt.Fprintf(&builder, "阵营自然语言方针上下文: %s\n", directiveForUnit(state, target.ID, target.FactionID))
+	fmt.Fprintf(&builder, "你的资料: %s\n", describeUnit(*target, nil))
+	fmt.Fprintf(&builder, "你的家庭关系: %s\n", summarizeSocialTiesForPrompt(*target, byID))
+	fmt.Fprintf(&builder, "你的性格: %s\n", summarizeActorPersonality(*target))
+	fmt.Fprintf(&builder, "你的环境摘要: %s\n", summarizeImmediateEnvironment(state, byID, target))
+	if actor != nil {
+		fmt.Fprintf(&builder, "对方资料: %s\n", describeUnit(*actor, target))
+	}
+	if strings.TrimSpace(memorySummary) == "" {
+		memorySummary = summarizeUnitMemoryWithTurn(*target, state.TurnState.Turn, 6)
+	}
+	fmt.Fprintf(&builder, "你记得的重点:\n%s\n", memorySummary)
+	if strings.TrimSpace(relationSummary) == "" {
+		relationSummary = relationSummaryNoKnown
+	}
+	fmt.Fprintf(&builder, "你的关系网:\n%s\n", relationSummary)
+	if strings.TrimSpace(knowledgeSummary) == "" {
+		knowledgeSummary = "无"
+	}
+	fmt.Fprintf(&builder, "你已掌握的世界规律:\n%s\n", knowledgeSummary)
+	fmt.Fprintf(
+		&builder,
+		"你脚下地形: %s，当前攻击距离: %d\n",
+		terrainDisplayName(terrainAt(state.Map, world.Coord{Q: target.Status.PositionQ, R: target.Status.PositionR})),
+		attackReachWithWeather(state, *target),
+	)
+	fmt.Fprintf(&builder, "你视野范围内的地形:\n%s\n", summarizeVisibleTerrain(state, byID, target, 18))
+	fmt.Fprintf(&builder, "你脚下设施: %s\n", summarizeStructureAt(state.Structures, world.Coord{Q: target.Status.PositionQ, R: target.Status.PositionR}))
+	fmt.Fprintf(&builder, "你脚下可做的生产/建造: %s\n", currentTileOpportunitySummary(state, byID, *target))
+	fmt.Fprintf(&builder, "地块产出与可做事项:\n%s\n", terrainProductionRuleSummary())
+	fmt.Fprintf(&builder, "设施建造条件与收益:\n%s\n", structureRuleSummary())
+	fmt.Fprintf(&builder, "当前不支持的建筑叙事: %s\n", unsupportedStructureRuleSummary())
+	fmt.Fprintf(&builder, "关键材料来源:\n%s\n", materialSourceSummary())
+	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, target, 6))
+	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, target.ID, state.TurnState.Turn, 8))
+	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "%s 刚才对你说: %s\n", actorName, strings.TrimSpace(actorLine))
+	fmt.Fprintln(&builder, "回复规则:")
+	fmt.Fprintln(&builder, "1. 请直接以你自己的口吻即时回复，不要超过 2 句；另外给出 memory，表示你会记住这次单位间交流的一句第一人称短句。")
+	fmt.Fprintln(&builder, "2. 回复要和行动决策一致：你可以表达意愿、计划或提醒，但回复本身不会立即执行行动；真正移动、采集、建造、交易、锻造、强化仍必须等执行阶段从合法候选动作中选择。")
+	fmt.Fprintln(&builder, "3. 谈生产/定居/补给时只能引用当前真实地形、材料和建筑；不要承诺建小屋、房子、营地或其他不存在的建筑。")
+	fmt.Fprintln(&builder, "4. 不能创造候选动作之外的事，不能创造不存在的建筑、资源或交易方式。")
+
+	return builder.String()
+}
+
+// buildReflectionPrompt 构建反思任务的 user prompt，上下文含事件与状态。
+func buildReflectionPrompt(
+	state State,
+	byID map[string]*unit.Record,
+	record unit.Record,
+	eventSummary string,
+	memorySummary string,
+	relationSummary string,
+	knowledgeSummary string,
+) string {
+	var builder strings.Builder
+
+	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
+	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
+	fmt.Fprintf(&builder, "阵营自然语言方针上下文: %s\n", directiveForUnit(state, record.ID, record.FactionID))
+	fmt.Fprintf(&builder, "你的资料: %s\n", describeUnit(record, nil))
+	fmt.Fprintf(&builder, "你的家庭关系: %s\n", summarizeSocialTiesForPrompt(record, byID))
+	fmt.Fprintf(&builder, "你的性格: %s\n", summarizeActorPersonality(record))
+	fmt.Fprintf(&builder, "你的环境摘要: %s\n", summarizeImmediateEnvironment(state, byID, &record))
+	if strings.TrimSpace(memorySummary) == "" {
+		memorySummary = summarizeUnitMemoryWithTurn(record, state.TurnState.Turn, 6)
+	}
+	fmt.Fprintf(&builder, "你记得的重点:\n%s\n", memorySummary)
+	if strings.TrimSpace(relationSummary) == "" {
+		relationSummary = relationSummaryNoKnown
+	}
+	fmt.Fprintf(&builder, "你的关系网:\n%s\n", relationSummary)
+	if strings.TrimSpace(knowledgeSummary) == "" {
+		knowledgeSummary = "无"
+	}
+	fmt.Fprintf(&builder, "你已掌握的世界规律:\n%s\n", knowledgeSummary)
+	fmt.Fprintf(&builder, "你当前属性受影响说明:\n%s\n", summarizeCurrentAttributeInfluences(state, record))
+	fmt.Fprintf(&builder, "你能感知到的伤亡:\n%s\n", summarizeCasualtiesForPrompt(state, byID, &record, 6))
+	fmt.Fprintf(&builder, "最近对话:\n%s\n", summarizeDialogueHistory(state.DialogueHistory, record.ID, state.TurnState.Turn, 6))
+	fmt.Fprintf(&builder, "最近事件:\n%s\n", summarizeLogs(state.Logs, state.TurnState.Turn, 5))
+	fmt.Fprintf(&builder, "刚发生的事: %s\n", strings.TrimSpace(eventSummary))
+	fmt.Fprintln(&builder, "请只返回 JSON，并遵守：")
+	fmt.Fprintln(&builder, "1. bubble 是你此刻会说或会冒出来的一句短句，最多 16 个字，适合放在头顶气泡里。")
+	fmt.Fprintln(&builder, "2. memory 是你会记住的第一人称记忆，最多 60 个字；必须优先写具体事实，例如谁对我造成多少伤害、用了什么、我移动到什么位置、附近发现了什么。")
+	fmt.Fprintln(&builder, "3. 两句都要像你本人，不要写成系统说明、旁白、总结报告或玩家操作提示。")
+	fmt.Fprintln(&builder, "4. 如果这件事和吃饭、交易、调拨、补给或施工有关，要体现那是你自己判断并执行的。")
+
+	return builder.String()
+}
+
+// decisionCoord 解析决策中的目标坐标。
+func decisionCoord(decision unitDecisionPayload) world.Coord {
+	return world.Coord{Q: decision.TargetQ, R: decision.TargetR}
+}
+
+// alliedIDs 获取单位所属阵营的在场单位 ID 列表。
+func alliedIDs(state State, factionID string) []string {
+	if factionID == state.PlayerFactionID {
+		return state.PlayerUnitIDs
+	}
+	if factionID == FactionWildling {
+		return state.WildUnitIDs
+	}
+	return state.EnemyUnitIDs
+}
+
+// opposingIDs 获取单位对立阵营的在场单位 ID 列表。
+func opposingIDs(state State, factionID string) []string {
+	return opposedUnitIDs(state, factionID)
+}
+
+// visibleAlliedIDs 返回 actor 在当前迷雾设置下可感知的友军 ID。
+func visibleAlliedIDs(state State, byID map[string]*unit.Record, actor *unit.Record) []string {
+	if actor == nil {
+		return nil
+	}
+	ids := visibleUnitIDs(state, byID, actor, alliedIDs(state, actor.FactionID))
+	filtered := make([]string, 0, len(ids))
+	for _, unitID := range ids {
+		if unitID == actor.ID {
+			continue
+		}
+		filtered = append(filtered, unitID)
+	}
+	return filtered
+}
+
+// visibleOpposingIDs 返回 actor 在当前迷雾设置下可感知的敌对单位 ID；无雾时等同 opposingIDs。
+func visibleOpposingIDs(state State, byID map[string]*unit.Record, actor *unit.Record) []string {
+	if actor == nil {
+		return nil
+	}
+	return visibleUnitIDs(state, byID, actor, opposingIDs(state, actor.FactionID))
+}
+
+// visibleUnitIDs 根据本局迷雾设置与单位视野过滤候选单位。
+func visibleUnitIDs(state State, byID map[string]*unit.Record, actor *unit.Record, unitIDs []string) []string {
+	if !state.FogOfWarEnabled || actor == nil {
+		return append([]string{}, unitIDs...)
+	}
+	baseRange := actor.Stats.Derived.Vision
+	if baseRange <= 0 {
+		baseRange = 5
+	}
+	visibleTiles, err := world.ComputeVisibleTiles(
+		state.Map,
+		world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR},
+		baseRange,
+	)
+	if err != nil {
+		return nil
+	}
+	visibleByCoord := make(map[world.Coord]bool, len(visibleTiles))
+	for _, coord := range visibleTiles {
+		visibleByCoord[coord] = true
+	}
+
+	visibleIDs := make([]string, 0, len(unitIDs))
+	for _, unitID := range unitIDs {
+		record, ok := byID[unitID]
+		if !ok || record == nil || !isBattleReady(*record) {
+			continue
+		}
+		coord := world.Coord{Q: record.Status.PositionQ, R: record.Status.PositionR}
+		if visibleByCoord[coord] {
+			visibleIDs = append(visibleIDs, unitID)
+		}
+	}
+	return visibleIDs
+}
+
+// summarizeFaction 汇总友军/敌军概况，供模型判断威胁与协同。
+func summarizeFaction(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	unitIDs []string,
+) string {
+	lines := make([]string, 0, len(unitIDs))
+	for _, unitID := range unitIDs {
+		record, ok := byID[unitID]
+		if !ok || !isBattleReady(*record) {
+			continue
+		}
+		lines = append(lines, describeUnit(*record, actor))
+	}
+
+	if len(lines) == 0 {
+		return "无"
+	}
+
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+// describeUnit 生成单位可读描述文本；从他人视角展示时不暴露 UUID 和详细属性。
+func describeUnit(record unit.Record, perspective *unit.Record) string {
+	if perspective != nil {
+		distance := unit.HexDistance(
+			perspective.Status.PositionQ,
+			perspective.Status.PositionR,
+			record.Status.PositionQ,
+			record.Status.PositionR,
+		)
+		return fmt.Sprintf(
+			"名称=%s[%s] 坐标=%d,%d 距离=%d 状态=%s",
+			record.DisplayName(),
+			record.FactionID,
+			record.Status.PositionQ,
+			record.Status.PositionR,
+			distance,
+			record.Status.LifeState,
+		)
+	}
+
+	description := fmt.Sprintf(
+		"名称=%s[%s] HP=%d ATK=%d DEF=%d MOV=%d 坐标=%d,%d 状态=%s 背包=%s 装备=%s",
+		record.DisplayName(),
+		record.FactionID,
+		record.Status.HP,
+		record.Status.Attack,
+		record.Status.Defense,
+		record.Status.Move,
+		record.Status.PositionQ,
+		record.Status.PositionR,
+		record.Status.LifeState,
+		formatInventoryStacksForLLM(record.Inventory.Backpack),
+		formatEquipmentStacksForLLM(record.Inventory.Equipment),
+	)
+
+	return description
+}
+
+func summarizeSocialTiesForPrompt(record unit.Record, byID map[string]*unit.Record) string {
+	parts := make([]string, 0, 3)
+	if lover := socialTieName(record.Social.LoverUnitID, byID); lover != "" {
+		parts = append(parts, "伴侣="+lover)
+	}
+	if parents := socialTieNames(record.Social.ParentUnitIDs, byID); parents != "" {
+		parts = append(parts, "父母="+parents)
+	}
+	if children := socialTieNames(record.Social.ChildUnitIDs, byID); children != "" {
+		parts = append(parts, "小孩="+children)
+	}
+	if len(parts) == 0 {
+		return "无已知伴侣、父母或小孩"
+	}
+	return strings.Join(parts, "；")
+}
+
+func socialTieNames(unitIDs []string, byID map[string]*unit.Record) string {
+	names := make([]string, 0, len(unitIDs))
+	for _, unitID := range unitIDs {
+		if name := socialTieName(unitID, byID); name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, "、")
+}
+
+func socialTieName(unitID string, byID map[string]*unit.Record) string {
+	unitID = strings.TrimSpace(unitID)
+	if unitID == "" {
+		return ""
+	}
+	if record := byID[unitID]; record != nil {
+		return fmt.Sprintf("%s[%s]", record.DisplayName(), record.FactionID)
+	}
+	return unitID
+}
+
+func formatInventoryStacksForLLM(stacks []unit.ItemStack) string {
+	if len(stacks) == 0 {
+		return "无"
+	}
+	parts := make([]string, 0, len(stacks))
+	for _, stack := range stacks {
+		if stack.ItemID == "" || stack.Quantity <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s x%d(%s)", displayStackName(stack), stack.Quantity, formatItemStackEffect(stack)))
+	}
+	if len(parts) == 0 {
+		return "无"
+	}
+	if len(parts) > 6 {
+		parts = parts[:6]
+	}
+	return strings.Join(parts, "/")
+}
+
+func formatEquipmentStacksForLLM(equipment map[string]unit.ItemStack) string {
+	if len(equipment) == 0 {
+		return "无"
+	}
+	parts := make([]string, 0, len(equipment))
+	for slot, stack := range equipment {
+		if stack.ItemID == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)", slot, displayStackName(stack), formatItemStackEffect(stack)))
+	}
+	if len(parts) == 0 {
+		return "无"
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "/")
+}
+
+// summarizeDialogueHistory 汇总最近对话并附回合相对时间标签。
+func summarizeDialogueHistory(history []DialogueMessage, unitID string, currentTurn int, limit int) string {
+	lines := make([]string, 0, limit)
+	for index := len(history) - 1; index >= 0 && len(lines) < limit; index-- {
+		if history[index].UnitID != unitID {
+			continue
+		}
+		entry := history[index]
+		lines = append(lines, fmt.Sprintf("%s: %s（%s）", entry.Speaker, entry.Message, relativeTurnLabel(currentTurn, entry.Turn)))
+	}
+
+	if len(lines) == 0 {
+		return "无"
+	}
+
+	reverseStrings(lines)
+	return strings.Join(lines, "\n")
+}
+
+// summarizeLogs 返回最近事件，并附上“本回合/N回合前”时间标签，便于模型理解时序。
+func summarizeLogs(logs []LogEntry, currentTurn int, limit int) string {
+	if len(logs) == 0 {
+		return "无"
+	}
+
+	start := len(logs) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	lines := make([]string, 0, len(logs)-start)
+	for _, entry := range logs[start:] {
+		lines = append(lines, fmt.Sprintf("%s（%s）", entry.Message, relativeTurnLabel(currentTurn, entry.Turn)))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// relativeTurnLabel 把绝对回合号转换为模型更容易消费的相对时间表达。
+func relativeTurnLabel(currentTurn int, eventTurn int) string {
+	if eventTurn <= 0 {
+		return "时间未知"
+	}
+	if currentTurn <= 0 {
+		return fmt.Sprintf("T%d", eventTurn)
+	}
+	delta := currentTurn - eventTurn
+	if delta <= 0 {
+		return "本回合"
+	}
+	return fmt.Sprintf("%d回合前", delta)
+}
+
+// reverseStrings 原地反转字符串切片顺序。
+func reverseStrings(items []string) {
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+}
+
+// canonicalizeTargetReference 把目标引用规范化为可用 unit_id。
+func canonicalizeTargetReference(
+	targetIDs []string,
+	byID map[string]*unit.Record,
+	value string,
+) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	if target, ok := byID[value]; ok && isTargetCandidate(targetIDs, target.ID) && isBattleReady(*target) {
+		return target.ID
+	}
+
+	lowerValue := strings.ToLower(value)
+	for _, targetID := range targetIDs {
+		target, ok := byID[targetID]
+		if !ok || !isBattleReady(*target) {
+			continue
+		}
+		if strings.ToLower(target.ID) == lowerValue || strings.ToLower(target.DisplayName()) == lowerValue {
+			return target.ID
+		}
+	}
+
+	return value
+}
+
+// isTargetCandidate 判断目标是否属于当前候选目标集合。
+func isTargetCandidate(targetIDs []string, targetID string) bool {
+	for _, candidateID := range targetIDs {
+		if candidateID == targetID {
+			return true
+		}
+	}
+	return false
+}
+
+// reachableMoveOptions 计算单位本回合可到达坐标集合。
+func reachableMoveOptions(
+	snapshot world.MapSnapshot,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+) []world.Coord {
+	options := make([]world.Coord, 0, 6)
+	current := world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR}
+	for _, coord := range axialNeighbors(current) {
+		if !inBounds(snapshot, coord) || occupiedByAnother(byID, actor.ID, coord) {
+			continue
+		}
+		options = append(options, coord)
+	}
+
+	sort.Slice(options, func(i, j int) bool {
+		if options[i].Q != options[j].Q {
+			return options[i].Q < options[j].Q
+		}
+		return options[i].R < options[j].R
+	})
+	return options
+}
+
+// buildDecisionCandidates 汇总战斗/移动/生产等候选动作并按 AP 过滤。
+func buildDecisionCandidates(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	remainingAP int,
+) []decisionCandidate {
+	snapshot := state.Map
+	candidates := []decisionCandidate{{
+		ID:      "hold",
+		Action:  DecisionActionHold,
+		Summary: "原地观察，暂不推进。",
+	}}
+	if remainingAP <= 0 {
+		return candidates
+	}
+
+	pregnant := isUnitPregnant(state, actor.ID)
+	reach := attackReachWithWeather(state, *actor)
+	weatherMoveMultiplier := weatherAdjustedMoveMultiplier(state, *actor)
+	if !pregnant {
+		for _, targetID := range targetIDs {
+			target, ok := byID[targetID]
+			if !ok || !isBattleReady(*target) {
+				continue
+			}
+			distance := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, target.Status.PositionQ, target.Status.PositionR)
+			if remainingAP >= decisionActionCost(DecisionActionAttack) {
+				if distance <= reach {
+					candidates = append(candidates, decisionCandidate{
+						ID:           fmt.Sprintf("attack:%s", target.ID),
+						Action:       DecisionActionAttack,
+						TargetUnitID: target.ID,
+						Summary:      fmt.Sprintf("进攻 %s。", target.DisplayName()),
+					})
+				}
+			}
+			if remainingAP >= decisionActionCost(DecisionActionHeavyAttack) {
+				if distance <= reach+1 {
+					candidates = append(candidates, decisionCandidate{
+						ID:           fmt.Sprintf("heavy:%s", target.ID),
+						Action:       DecisionActionHeavyAttack,
+						TargetUnitID: target.ID,
+						Summary:      fmt.Sprintf("重击 %s（1.5x 伤害，命中率较低）。", target.DisplayName()),
+					})
+				}
+			}
+			if remainingAP >= decisionActionCost(DecisionActionCharge) && effectiveMoveRange(actor.Status.Move, weatherMoveMultiplier) >= 1 {
+				if distance <= reach+2 {
+					candidates = append(candidates, decisionCandidate{
+						ID:           fmt.Sprintf("charge:%s", target.ID),
+						Action:       DecisionActionCharge,
+						TargetUnitID: target.ID,
+						Summary:      fmt.Sprintf("冲锋接敌 %s（2 格机动后立刻攻击）。", target.DisplayName()),
+					})
+				}
+			}
+		}
+		candidates = append(candidates, buildStructureCombatCandidates(state, actor, remainingAP)...)
+	}
+	for _, equipment := range buildEquipmentCandidates(state, actor) {
+		if decisionActionCost(equipment.Action) > remainingAP {
+			continue
+		}
+		candidates = append(candidates, equipment)
+	}
+	if remainingAP >= decisionActionCost(DecisionActionEat) && shouldOfferEatCandidate(actor) {
+		eatSummary := fmt.Sprintf("吃下一份口粮，恢复 35 点饥饿度（当前饥饿 %d）。", actor.Status.Hunger)
+		if actor.Status.Hunger < 30 {
+			eatSummary = fmt.Sprintf("紧急吃下一份口粮，恢复 35 点饥饿度，避免饥饿恶化或归零死亡（当前饥饿 %d）。", actor.Status.Hunger)
+		}
+		candidates = append(candidates, decisionCandidate{
+			ID:      "eat:ration",
+			Action:  DecisionActionEat,
+			ItemID:  "ration",
+			Summary: eatSummary,
+		})
+	}
+	if remainingAP >= decisionActionCost(DecisionActionEat) && shouldOfferHealingPotionCandidate(actor) {
+		candidates = append(candidates, decisionCandidate{
+			ID:      "heal:healing_potion",
+			Action:  DecisionActionEat,
+			ItemID:  "healing_potion",
+			Summary: fmt.Sprintf("喝下一瓶治疗药剂，恢复 25 HP（当前 HP %d）。", actor.Status.HP),
+		})
+	}
+	if remainingAP >= decisionActionCost(DecisionActionPickup) {
+		for _, drop := range groundLootAtCoord(state, actor.Status.PositionQ, actor.Status.PositionR) {
+			candidates = append(candidates, decisionCandidate{
+				ID:           fmt.Sprintf("pickup:%s", drop.ID),
+				Action:       DecisionActionPickup,
+				GroundLootID: drop.ID,
+				Summary:      fmt.Sprintf("拾取脚下遗落物：%s。", formatItemStacksWithEffects(drop.Items)),
+			})
+		}
+	}
+
+	economyCandidates := buildEconomyCandidates(state, byID, actor)
+	prioritizeEconomy := shouldPrioritizeEconomyAction(state, byID, actor, economyCandidates)
+	if !prioritizeEconomy && directivePrefersBuild(directiveForUnit(state, actor.ID, actor.FactionID)) && hasDecisionCandidateAction(economyCandidates, DecisionActionBuild) {
+		prioritizeEconomy = true
+	}
+	appendAffordableEconomy := func() {
+		for _, economy := range economyCandidates {
+			if decisionActionCost(economy.Action) > remainingAP {
+				continue
+			}
+			if pregnant && (economy.Action == DecisionActionBuild || economy.Action == DecisionActionDemolish) {
+				continue
+			}
+			candidates = append(candidates, economy)
+		}
+	}
+
+	if prioritizeEconomy {
+		appendAffordableEconomy()
+	}
+
+	if !pregnant && remainingAP >= decisionActionCost(DecisionActionDefend) {
+		candidates = append(candidates, decisionCandidate{
+			ID:      "defend",
+			Action:  DecisionActionDefend,
+			Summary: "进入防御姿态，降低受击伤害。",
+		})
+		candidates = append(candidates, decisionCandidate{
+			ID:      "observe",
+			Action:  DecisionActionObserve,
+			Summary: "观察校准，下一次攻击更精准。",
+		})
+	}
+
+	if !pregnant && remainingAP >= decisionActionCost(DecisionActionAssist) {
+		for _, allyID := range alliedIDs(state, actor.FactionID) {
+			if allyID == actor.ID {
+				continue
+			}
+			ally, ok := byID[allyID]
+			if !ok || !isBattleReady(*ally) {
+				continue
+			}
+			if unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, ally.Status.PositionQ, ally.Status.PositionR) > 1 {
+				continue
+			}
+			candidates = append(candidates, decisionCandidate{
+				ID:           fmt.Sprintf("assist:%s", ally.ID),
+				Action:       DecisionActionAssist,
+				TargetUnitID: ally.ID,
+				Summary:      fmt.Sprintf("援助相邻队友 %s，增强其抗压。", ally.DisplayName()),
+			})
+		}
+	}
+
+	if remainingAP >= decisionActionCost(DecisionActionSay) {
+		candidates = append(candidates, buildSayCandidates(state, byID, actor)...)
+	}
+
+	if remainingAP >= decisionActionCost(DecisionActionDialogue) {
+		candidates = append(candidates, buildDialogueCandidates(state, byID, actor)...)
+	}
+
+	if remainingAP >= decisionActionCost(DecisionActionTrade) {
+		candidates = append(candidates, buildTradeCandidates(state, byID, actor)...)
+	}
+
+	if remainingAP >= decisionActionCost(DecisionActionRomance) {
+		candidates = append(candidates, buildRomanceCandidates(state, byID, actor)...)
+	}
+
+	if !pregnant {
+		candidates = append(candidates, buildSkillCandidates(state, byID, actor, targetIDs, remainingAP)...)
+	}
+
+	if !prioritizeEconomy {
+		appendAffordableEconomy()
+	}
+
+	if remainingAP >= decisionActionCost(DecisionActionMove) {
+		for _, option := range reachableMoveOptions(snapshot, byID, actor) {
+			candidates = append(candidates, decisionCandidate{
+				ID:      fmt.Sprintf("move:%d:%d", option.Q, option.R),
+				Action:  DecisionActionMove,
+				TargetQ: option.Q,
+				TargetR: option.R,
+				Summary: moveCandidateSummary(state, option),
+			})
+		}
+	}
+
+	return candidates
+}
+
+// shouldOfferEatCandidate 判断是否把吃口粮作为正式候选动作交给单位决策。
+func shouldOfferEatCandidate(actor *unit.Record) bool {
+	if actor == nil || actor.Status.LifeState != unit.LifeStateActive {
+		return false
+	}
+	if actor.Status.Hunger >= 85 {
+		return false
+	}
+	return hasBackpackItem(*actor, "ration")
+}
+
+func shouldOfferHealingPotionCandidate(actor *unit.Record) bool {
+	if actor == nil || actor.Status.LifeState != unit.LifeStateActive || actor.Status.HP >= 100 {
+		return false
+	}
+	return hasBackpackItem(*actor, "healing_potion")
+}
+
+// hasDecisionCandidateAction 判断候选列表里是否包含指定动作。
+func hasDecisionCandidateAction(candidates []decisionCandidate, action DecisionAction) bool {
+	for _, candidate := range candidates {
+		if candidate.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldPrioritizeEconomyAction 判断当前局势下是否应把经济类候选提前给模型。
+// 敌军尚远而脚下已有合法经济动作时，优先展示 build/gather，避免默认掉进稳阵/原地观察。
+func shouldPrioritizeEconomyAction(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	economyCandidates []decisionCandidate,
+) bool {
+	if actor == nil || len(economyCandidates) == 0 {
+		return false
+	}
+	if actor.Status.HP < 70 {
+		return false
+	}
+	if nearestThreatDistance(state, byID, actor) < 8 {
+		return false
+	}
+	for _, allyID := range alliedIDs(state, actor.FactionID) {
+		if allyID == actor.ID {
+			continue
+		}
+		ally := byID[allyID]
+		if ally == nil || !isBattleReady(*ally) {
+			continue
+		}
+		if unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, ally.Status.PositionQ, ally.Status.PositionR) <= 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// formatDecisionCandidates 格式化候选动作列表为提示词文本。
+func formatDecisionCandidates(candidates []decisionCandidate, byID map[string]*unit.Record) string {
+	groups := make([]decisionCandidatePromptGroup, 0, len(candidates))
+	groupIndex := make(map[string]int, len(candidates))
+	for _, candidate := range candidates {
+		summary := decisionCandidatePromptSummary(candidate, byID)
+		if candidate.Action == DecisionActionAttack || candidate.Action == DecisionActionHeavyAttack || candidate.Action == DecisionActionCharge {
+			if target, ok := byID[candidate.TargetUnitID]; ok {
+				if candidate.Action == DecisionActionHeavyAttack {
+					summary = fmt.Sprintf("重击 %s（1.5x 伤害，命中率较低）。", target.DisplayName())
+				} else if candidate.Action == DecisionActionCharge {
+					summary = fmt.Sprintf("冲锋接敌 %s（2 格机动后立刻攻击）。", target.DisplayName())
+				} else {
+					summary = fmt.Sprintf("进攻 %s。", target.DisplayName())
+				}
+			}
+		}
+		apCost := candidate.APCost
+		if apCost <= 0 {
+			apCost = decisionActionCost(candidate.Action)
+		}
+		params := formatDecisionCandidateParamSlots(candidate)
+		key := fmt.Sprintf("%s{%s}:ap=%d", candidate.Action, params, apCost)
+		index, exists := groupIndex[key]
+		if !exists {
+			groupIndex[key] = len(groups)
+			groups = append(groups, decisionCandidatePromptGroup{
+				Action: candidate.Action,
+				Params: params,
+				APCost: apCost,
+			})
+			index = len(groups) - 1
+		}
+		groups[index].Summaries = appendUniqueText(groups[index].Summaries, summary)
+		groups[index].Domains = appendUniqueText(groups[index].Domains, formatDecisionCandidateDomain(candidate, byID))
+	}
+	lines := make([]string, 0, len(groups))
+	for _, group := range groups {
+		detailParts := make([]string, 0, 3)
+		if len(group.Summaries) > 0 {
+			detailParts = append(detailParts, strings.Join(trimSentenceEnds(limitStringSlice(group.Summaries, 3)), "；"))
+		}
+		if len(group.Summaries) > 3 {
+			detailParts = append(detailParts, fmt.Sprintf("另有%d条同类说明", len(group.Summaries)-3))
+		}
+		if group.Action == DecisionActionMove {
+			if movePairs := formatLegalMovePairsForCorrection(candidates); movePairs != "" {
+				detailParts = append(detailParts, "合法 move 坐标对："+movePairs)
+			}
+		}
+		if len(group.Domains) > 0 {
+			detailParts = append(detailParts, "可填参数："+strings.Join(limitStringSlice(group.Domains, 8), "；"))
+			if len(group.Domains) > 8 {
+				detailParts = append(detailParts, fmt.Sprintf("另有%d组参数可选，见下方合法候选 JSON 字段", len(group.Domains)-8))
+			}
+		}
+		if rule := decisionCandidateGroupRule(group.Action); rule != "" {
+			detailParts = append(detailParts, "规则："+rule)
+		}
+		if len(detailParts) == 0 {
+			detailParts = append(detailParts, "按动作解释和参数槽位填写")
+		}
+		lines = append(lines, fmt.Sprintf("- %s{%s}: AP=%d // %s。", group.Action, group.Params, group.APCost, strings.Join(detailParts, "；")))
+	}
+	return strings.Join(lines, "\n")
+}
+
+type decisionCandidatePromptGroup struct {
+	Action    DecisionAction
+	Params    string
+	APCost    int
+	Summaries []string
+	Domains   []string
+}
+
+func formatConcreteDecisionCandidateChoices(candidates []decisionCandidate, byID map[string]*unit.Record) string {
+	if len(candidates) == 0 {
+		return "无"
+	}
+	lines := make([]string, 0, len(candidates))
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		fields := formatRecommendedJSONFields(candidate)
+		if fields == "" {
+			continue
+		}
+		key := string(candidate.Action) + ":" + fields
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		summary := strings.TrimRight(strings.TrimSpace(decisionCandidatePromptSummary(candidate, byID)), "。")
+		if summary == "" {
+			summary = "照抄该行字段即可"
+		}
+		lines = append(lines, fmt.Sprintf("- %s // %s。", fields, summary))
+	}
+	if len(lines) == 0 {
+		return "无"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func appendUniqueText(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func limitStringSlice(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func trimSentenceEnds(values []string) []string {
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimRight(strings.TrimSpace(value), "。；")
+		if value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+	return trimmed
+}
+
+func decisionCandidateGroupRule(action DecisionAction) string {
+	switch action {
+	case DecisionActionMove:
+		return "只能从“本回合可到达地块与可执行事项”逐字选择一行坐标填写 target_q/target_r；不要填写视野地形列表、自己/友军/敌军所在坐标；目标格有单位或不在该列表中会失败。"
+	case DecisionActionTrade:
+		return "target_unit_id 必须照抄相邻交易对象的完整单位ID，不能截断 UUID；trade_kind 为 gift/gold/sell；gift/sell 时 item_id 可填写背包物品ID或名称；gold_amount/price 必须为正整数且钱包足够。"
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		return "target_unit_id 可填写可交互目标的单位ID或姓名；目标必须在视野/相邻交互规则允许范围内。"
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		return "target_unit_id 可填写合法敌方单位ID或姓名；若攻击设施则填写 structure_id；目标必须在当前动作距离规则内。"
+	case DecisionActionSkill:
+		return "skill_id 必须是当前可用技能；需要目标时 target_unit_id 可填写合法单位ID或姓名。"
+	case DecisionActionGather:
+		return "activity 可填写当前地块支持的采集类型ID或中文名称，如采集/挖矿/钓鱼/打猎/收割农田。"
+	case DecisionActionBuild:
+		return "structure_type 可填写当前地块和材料允许建设的设施类型ID或中文名称。"
+	case DecisionActionEquip, DecisionActionEat, DecisionActionForge, DecisionActionUpgrade:
+		return "item_id 可填写背包/可制作/可强化物品的ID或名称，必须满足装备、食用、锻造或强化规则。"
+	case DecisionActionPickup:
+		return "ground_loot_id 可留空或填写脚下掉落物ID；只能拾取脚下仍存在的掉落物。"
+	case DecisionActionDemolish:
+		return "structure_id 可留空或填写脚下友方设施ID；只能拆除脚下友方设施。"
+	}
+	return ""
+}
+
+func decisionCandidateExample(candidate decisionCandidate, byID map[string]*unit.Record) string {
+	switch candidate.Action {
+	case DecisionActionMove:
+		return fmt.Sprintf("%d,%d", candidate.TargetQ, candidate.TargetR)
+	case DecisionActionTrade:
+		targetName := candidate.TargetUnitID
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			targetName = target.DisplayName()
+		}
+		switch candidate.TradeKind {
+		case TradeActionKindGift:
+			return fmt.Sprintf("gift %s 给 %s", displayItemName(candidate.ItemID), targetName)
+		case TradeActionKindGold:
+			return fmt.Sprintf("gold 给 %s，上限示例%d", targetName, candidate.GoldAmount)
+		case TradeActionKindSell:
+			return fmt.Sprintf("sell %s 给 %s", displayItemName(candidate.ItemID), targetName)
+		}
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			return target.DisplayName()
+		}
+		return candidate.TargetUnitID
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack, DecisionActionSkill:
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			return target.DisplayName()
+		}
+		return firstNonEmptyText(candidate.TargetUnitID, candidate.StructureID)
+	case DecisionActionGather:
+		return string(candidate.Activity)
+	case DecisionActionBuild:
+		return string(candidate.StructureType)
+	case DecisionActionEquip, DecisionActionEat, DecisionActionForge, DecisionActionUpgrade:
+		return displayItemName(candidate.ItemID)
+	case DecisionActionPickup:
+		return candidate.GroundLootID
+	case DecisionActionDemolish:
+		return candidate.StructureID
+	}
+	return ""
+}
+
+func validateNoLegacyDecisionPrompt(prompt string) error {
+	legacyFragments := []string{
+		"option_",
+		"[AP=",
+		"candidate_id，不能自造动作",
+		"选一个 candidate_id",
+	}
+	for _, fragment := range legacyFragments {
+		if strings.Contains(prompt, fragment) {
+			return fmt.Errorf("decision prompt still contains legacy candidate format %q", fragment)
+		}
+	}
+	return nil
+}
+
+func decisionCandidatePromptSummary(candidate decisionCandidate, byID map[string]*unit.Record) string {
+	switch candidate.Action {
+	case DecisionActionMove:
+		return "移动到一个相邻合法地块；具体 target_q/target_r 从“本回合可到达地块与可执行事项”中选择。"
+	case DecisionActionTrade:
+		targetName := "相邻目标"
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			targetName = target.DisplayName()
+		}
+		switch candidate.TradeKind {
+		case TradeActionKindGift:
+			return fmt.Sprintf("向 %s 赠送一件你背包中的物品；item_id 由你根据背包和目标需求填写。", targetName)
+		case TradeActionKindGold:
+			return fmt.Sprintf("向 %s 调拨一笔金币；gold_amount 由你按局势自行填写。", targetName)
+		case TradeActionKindSell:
+			return fmt.Sprintf("向 %s 出售一件你背包中的物品；item_id 与 price 都由你自行填写并接受规则校验。", targetName)
+		}
+	case DecisionActionGather:
+		return strings.TrimSpace("在当前地块执行一种合法采集/生产；activity 由你从当前地块机会中填写。" + " " + candidate.Summary)
+	case DecisionActionBuild:
+		return strings.TrimSpace("在当前地块建造或续建一种合法设施；structure_type 由你按地形与材料填写。" + " " + candidate.Summary)
+	}
+	return candidate.Summary
+}
+
+func formatDecisionCandidateDomain(candidate decisionCandidate, byID map[string]*unit.Record) string {
+	parts := make([]string, 0, 4)
+	switch candidate.Action {
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		if candidate.TargetUnitID != "" {
+			parts = append(parts, fmt.Sprintf("target_unit_id 可选域：%s", candidate.TargetUnitID))
+		}
+		if candidate.StructureID != "" {
+			parts = append(parts, fmt.Sprintf("structure_id 可选域：%s", candidate.StructureID))
+		}
+	case DecisionActionMove:
+		parts = append(parts, fmt.Sprintf("target_q/target_r 可选域：%d,%d", candidate.TargetQ, candidate.TargetR))
+	case DecisionActionGather:
+		if candidate.Activity != "" {
+			parts = append(parts, fmt.Sprintf("activity 可选域：%s", candidate.Activity))
+		}
+	case DecisionActionBuild:
+		if candidate.StructureType != "" {
+			parts = append(parts, fmt.Sprintf("structure_type 可选域：%s", candidate.StructureType))
+		}
+	case DecisionActionSkill:
+		if candidate.SkillID != "" {
+			parts = append(parts, fmt.Sprintf("skill_id 可选域：%s", candidate.SkillID))
+		}
+		if candidate.TargetUnitID != "" {
+			parts = append(parts, fmt.Sprintf("target_unit_id 可选域：%s", candidate.TargetUnitID))
+		}
+	case DecisionActionEquip, DecisionActionEat, DecisionActionForge, DecisionActionUpgrade:
+		if candidate.ItemID != "" {
+			parts = append(parts, fmt.Sprintf("item_id 可选域：%s", candidate.ItemID))
+		}
+	case DecisionActionPickup:
+		if candidate.GroundLootID != "" {
+			parts = append(parts, fmt.Sprintf("ground_loot_id 可选域：%s", candidate.GroundLootID))
+		}
+	case DecisionActionDemolish:
+		if candidate.StructureID != "" {
+			parts = append(parts, fmt.Sprintf("structure_id 可选域：%s", candidate.StructureID))
+		}
+	}
+	if candidate.Action == DecisionActionTrade || candidate.Action == DecisionActionSay || candidate.Action == DecisionActionDialogue || candidate.Action == DecisionActionAssist || candidate.Action == DecisionActionRomance || candidate.Action == DecisionActionFamily {
+		if target := byID[candidate.TargetUnitID]; target != nil {
+			parts = append(parts, fmt.Sprintf("target_unit_id 可选域：%s（%s）", candidate.TargetUnitID, target.DisplayName()))
+		}
+	}
+	if candidate.Action == DecisionActionTrade {
+		switch candidate.TradeKind {
+		case TradeActionKindGift:
+			parts = append(parts, fmt.Sprintf("trade_kind 可选域：gift；完整target_unit_id：%s；item_id 可选域：%s（%s）", candidate.TargetUnitID, candidate.ItemID, displayItemName(candidate.ItemID)))
+		case TradeActionKindGold:
+			parts = append(parts, fmt.Sprintf("trade_kind 可选域：gold；完整target_unit_id：%s；gold_amount 可选域：1..%d，由你按意图自拟且不能超过钱包", candidate.TargetUnitID, max(1, candidate.GoldAmount)))
+		case TradeActionKindSell:
+			parts = append(parts, fmt.Sprintf("trade_kind 可选域：sell；完整target_unit_id：%s；item_id 可选域：%s（%s）；price 由你自拟且对方买得起", candidate.TargetUnitID, candidate.ItemID, displayItemName(candidate.ItemID)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "；")
+}
+
+func formatDecisionActionExplanations(candidates []decisionCandidate) string {
+	seen := map[DecisionAction]struct{}{}
+	lines := make([]string, 0, 8)
+	for _, candidate := range candidates {
+		if _, exists := seen[candidate.Action]; exists {
+			continue
+		}
+		seen[candidate.Action] = struct{}{}
+		if explanation := decisionActionExplanation(candidate.Action); explanation != "" {
+			lines = append(lines, fmt.Sprintf("- %s: %s", candidate.Action, explanation))
+		}
+	}
+	if len(lines) == 0 {
+		return "无"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func decisionActionExplanation(action DecisionAction) string {
+	switch action {
+	case DecisionActionHold:
+		return "原地等待，不消耗 AP。"
+	case DecisionActionDefend:
+		return "进入防御姿态，降低接下来受到的伤害。"
+	case DecisionActionObserve:
+		return "观察校准，提高后续攻击稳定性。"
+	case DecisionActionMove:
+		return "移动到相邻坐标；必须返回 target_q/target_r。"
+	case DecisionActionAttack:
+		return "普通攻击可见敌方单位或敌方设施；返回 target_unit_id 或 structure_id。"
+	case DecisionActionHeavyAttack:
+		return "重击，伤害更高但命中更不稳；返回 target_unit_id 或 structure_id。"
+	case DecisionActionCharge:
+		return "冲锋接敌并攻击；返回 target_unit_id 或 structure_id。"
+	case DecisionActionSkill:
+		return "施放技能；必须返回 skill_id，若技能需要目标则返回 target_unit_id。"
+	case DecisionActionAssist:
+		return "援助相邻友军；必须返回 target_unit_id。"
+	case DecisionActionSay:
+		return "向视野内目标说一句话；返回 target_unit_id，speak 是实际台词。"
+	case DecisionActionDialogue:
+		return "与视野内目标交谈并交换判断；返回 target_unit_id。"
+	case DecisionActionTrade:
+		return "赠送/卖出物品或调拨金币；返回 trade_kind、target_unit_id 及 item_id/gold_amount/price 等参数。"
+	case DecisionActionRomance:
+		return "主动表露心意；返回 target_unit_id，仍需双方同意。"
+	case DecisionActionFamily:
+		return "与恋人组建家庭；返回 target_unit_id。"
+	case DecisionActionGather:
+		return "在当前地块采集资源；返回 activity。"
+	case DecisionActionBuild:
+		return "在当前地块建造设施；返回 structure_type。"
+	case DecisionActionForge:
+		return "在铁匠铺锻造装备；按候选参数返回。"
+	case DecisionActionUpgrade:
+		return "在铁匠铺强化装备；按候选参数返回。"
+	case DecisionActionEquip:
+		return "穿戴背包中的装备；返回 item_id。"
+	case DecisionActionEat:
+		return "使用食物或药剂；返回 item_id。"
+	case DecisionActionPickup:
+		return "拾取脚下掉落物；返回 ground_loot_id。"
+	case DecisionActionDemolish:
+		return "拆除脚下友方设施；返回 structure_id。"
+	default:
+		return ""
+	}
+}
+
+func formatDecisionCandidateParams(candidate decisionCandidate) string {
+	params := make([]string, 0, 8)
+	appendStringParam := func(key string, value string) {
+		if strings.TrimSpace(value) != "" {
+			params = append(params, fmt.Sprintf("%s=%s", key, strings.TrimSpace(value)))
+		}
+	}
+	appendIntParam := func(key string, value int) {
+		if value != 0 {
+			params = append(params, fmt.Sprintf("%s=%d", key, value))
+		}
+	}
+	appendStringParam("activity", string(candidate.Activity))
+	appendStringParam("skill_id", candidate.SkillID)
+	appendStringParam("trade_kind", string(candidate.TradeKind))
+	appendStringParam("item_id", candidate.ItemID)
+	appendStringParam("item_name", candidate.ItemName)
+	appendStringParam("other_item_id", candidate.OtherItemID)
+	appendIntParam("price", candidate.Price)
+	appendIntParam("gold_amount", candidate.GoldAmount)
+	appendStringParam("ground_loot_id", candidate.GroundLootID)
+	appendStringParam("structure_id", candidate.StructureID)
+	appendStringParam("structure_type", string(candidate.StructureType))
+	appendStringParam("target_unit_id", candidate.TargetUnitID)
+	if candidate.Action == DecisionActionMove {
+		params = append(params, fmt.Sprintf("target_q=%d", candidate.TargetQ), fmt.Sprintf("target_r=%d", candidate.TargetR))
+	}
+	if len(params) == 0 {
+		return "无"
+	}
+	return strings.Join(params, ", ")
+}
+
+func formatDecisionCandidateParamSlots(candidate decisionCandidate) string {
+	params := make([]string, 0, 8)
+	appendParam := func(key string, slot string) {
+		slot = strings.TrimSpace(slot)
+		if slot == "" {
+			return
+		}
+		params = append(params, fmt.Sprintf("%s=<%s>", key, slot))
+	}
+	switch candidate.Action {
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		if strings.TrimSpace(candidate.TargetUnitID) != "" {
+			appendParam("target_unit_id", "可见敌方单位ID")
+		}
+		if strings.TrimSpace(candidate.StructureID) != "" {
+			appendParam("structure_id", "敌方设施ID")
+		}
+	case DecisionActionSkill:
+		appendParam("skill_id", "可用技能ID")
+		if strings.TrimSpace(candidate.TargetUnitID) != "" {
+			appendParam("target_unit_id", "合法目标单位ID")
+		}
+	case DecisionActionMove:
+		appendParam("target_q", "从可到达列表行首复制")
+		appendParam("target_r", "从可到达列表行首复制")
+	case DecisionActionGather:
+		appendParam("activity", "当前地块可采集类型")
+	case DecisionActionBuild:
+		appendParam("structure_type", "当前地块可建设施类型")
+	case DecisionActionTrade:
+		appendParam("trade_kind", "gift|gold|sell")
+		appendParam("target_unit_id", "相邻交易对象ID")
+		switch candidate.TradeKind {
+		case TradeActionKindGift:
+			appendParam("item_id", "背包物品ID")
+		case TradeActionKindGold:
+			appendParam("gold_amount", "自拟正整数金币数")
+		case TradeActionKindSell:
+			appendParam("item_id", "背包物品ID")
+			appendParam("price", "自拟正整数售价")
+		}
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		appendParam("target_unit_id", "可交互单位ID")
+	case DecisionActionForge:
+		appendParam("item_id", "可锻造装备ID")
+	case DecisionActionUpgrade:
+		appendParam("item_id", "可强化装备ID")
+	case DecisionActionEquip:
+		appendParam("item_id", "背包装备ID")
+	case DecisionActionEat:
+		appendParam("item_id", "可用食物或药剂ID")
+	case DecisionActionPickup:
+		appendParam("ground_loot_id", "脚下掉落物ID")
+	case DecisionActionDemolish:
+		appendParam("structure_id", "脚下友方设施ID")
+	}
+	if len(params) == 0 {
+		return "无"
+	}
+	return strings.Join(params, ", ")
+}
+
+func formatDecisionSelectionHint(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	remainingAP int,
+	candidates []decisionCandidate,
+) string {
+	lines := make([]string, 0, 4)
+	if movePairs := formatLegalMovePairsForCorrection(candidates); movePairs != "" {
+		lines = append(lines, fmt.Sprintf("若选择 move，target_q/target_r 只能使用这些完整坐标对之一：%s。必须从同一行候选 JSON 整对复制，不能只复制 target_q 后自行猜 target_r；不要填当前位置、敌人坐标、友军坐标或“视野范围内的地形”坐标。", movePairs))
+	}
+	if recommended, ok := recommendedDecisionCandidate(state, byID, actor, targetIDs, remainingAP, candidates); ok {
+		lines = append(lines, fmt.Sprintf("建议优先考虑：%s。", formatRecommendedCandidate(recommended, byID)))
+		lines = append(lines, fmt.Sprintf("若采纳建议，JSON 参数照这样填：%s。", formatRecommendedJSONFields(recommended)))
+		lines = append(lines, "建议不是强制；如果你的性格、记忆、关系或现场风险支持别的选择，也必须从候选动作列表里选，并填写该候选要求的合法参数。")
+	}
+	if len(lines) == 0 {
+		return "没有额外提示；按候选动作列表选择。"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func actorDirectiveFocusForPrompt(state State, byID map[string]*unit.Record, actor *unit.Record) string {
+	if actor == nil {
+		return "无"
+	}
+	directive := directiveForUnit(state, actor.ID, actor.FactionID)
+	actorClauses, namedClauses := actorNamedDirectiveClauses(directive, byID, actor)
+	if len(actorClauses) > 0 {
+		return "可能与你直接相关：" + strings.Join(actorClauses, "；")
+	}
+	if len(namedClauses) > 0 {
+		return "方针包含点名任务，但未识别到直接点名你；按全局意图和现场情况判断。"
+	}
+	return "未识别到点名任务；按全局意图和自身判断行动。"
+}
+
+func actorDirectiveForRecommendation(state State, byID map[string]*unit.Record, actor *unit.Record) string {
+	if actor == nil {
+		return ""
+	}
+	directive := directiveForUnit(state, actor.ID, actor.FactionID)
+	actorClauses, namedClauses := actorNamedDirectiveClauses(directive, byID, actor)
+	if len(actorClauses) > 0 {
+		return strings.Join(actorClauses, "\n")
+	}
+	if len(namedClauses) > 0 {
+		return ""
+	}
+	return directive
+}
+
+func actorNamedDirectiveClauses(directive string, byID map[string]*unit.Record, actor *unit.Record) ([]string, []string) {
+	actorClauses := make([]string, 0, 2)
+	namedClauses := make([]string, 0, 2)
+	for _, clause := range splitDirectiveClauses(directive) {
+		if directiveClauseMentionsUnit(clause, actor) {
+			actorClauses = append(actorClauses, directiveSegmentForUnit(clause, byID, actor))
+			namedClauses = append(namedClauses, clause)
+			continue
+		}
+		if directiveClauseMentionsFactionUnit(clause, byID, actor.FactionID) {
+			namedClauses = append(namedClauses, clause)
+		}
+	}
+	return actorClauses, namedClauses
+}
+
+func directiveSegmentForUnit(clause string, byID map[string]*unit.Record, actor *unit.Record) string {
+	clause = strings.TrimSpace(clause)
+	if clause == "" || actor == nil {
+		return clause
+	}
+	lowerClause := strings.ToLower(clause)
+	actorStart := -1
+	actorEnd := -1
+	for _, alias := range unitDirectiveAliases(*actor) {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias == "" {
+			continue
+		}
+		if index := strings.Index(lowerClause, alias); index >= 0 && (actorStart < 0 || index < actorStart) {
+			actorStart = index
+			actorEnd = index + len(alias)
+		}
+	}
+	if actorStart < 0 {
+		return clause
+	}
+
+	nextStart := len(clause)
+	for _, record := range byID {
+		if record == nil || record.ID == actor.ID || record.FactionID != actor.FactionID {
+			continue
+		}
+		for _, alias := range unitDirectiveAliases(*record) {
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias == "" {
+				continue
+			}
+			searchFrom := actorEnd
+			if searchFrom < 0 || searchFrom > len(lowerClause) {
+				searchFrom = actorStart + 1
+			}
+			if index := strings.Index(lowerClause[searchFrom:], alias); index >= 0 {
+				absolute := searchFrom + index
+				if absolute > actorStart && absolute < nextStart {
+					nextStart = absolute
+				}
+			}
+		}
+	}
+	if nextStart < len(clause) {
+		between := strings.TrimSpace(clause[actorEnd:nextStart])
+		if strings.ContainsAny(between, "和与跟同、") {
+			nextStart = nextUnitMentionAfter(lowerClause, byID, actor, actor.FactionID, nextStart+1)
+		}
+	}
+
+	segment := strings.TrimSpace(clause[actorStart:nextStart])
+	if segment == "" {
+		return clause
+	}
+	return segment
+}
+
+func nextUnitMentionAfter(lowerClause string, byID map[string]*unit.Record, actor *unit.Record, factionID string, offset int) int {
+	next := len(lowerClause)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(lowerClause) {
+		return next
+	}
+	for _, record := range byID {
+		if record == nil || (actor != nil && record.ID == actor.ID) || record.FactionID != factionID {
+			continue
+		}
+		for _, alias := range unitDirectiveAliases(*record) {
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias == "" {
+				continue
+			}
+			if index := strings.Index(lowerClause[offset:], alias); index >= 0 {
+				absolute := offset + index
+				if absolute < next {
+					next = absolute
+				}
+			}
+		}
+	}
+	return next
+}
+
+func splitDirectiveClauses(text string) []string {
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case '\n', '\r', '。', '；', ';', '！', '!', '？', '?':
+			return true
+		default:
+			return false
+		}
+	})
+	clauses := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			clauses = append(clauses, field)
+		}
+	}
+	return clauses
+}
+
+func directiveClauseMentionsFactionUnit(clause string, byID map[string]*unit.Record, factionID string) bool {
+	for _, record := range byID {
+		if record == nil || record.FactionID != factionID {
+			continue
+		}
+		if directiveClauseMentionsUnit(clause, record) {
+			return true
+		}
+	}
+	return false
+}
+
+func directiveClauseMentionsUnit(clause string, record *unit.Record) bool {
+	if record == nil {
+		return false
+	}
+	lowerClause := strings.ToLower(strings.TrimSpace(clause))
+	if lowerClause == "" {
+		return false
+	}
+	for _, alias := range unitDirectiveAliases(*record) {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && strings.Contains(lowerClause, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func unitDirectiveAliases(record unit.Record) []string {
+	return []string{
+		record.ID,
+		record.DisplayName(),
+		record.Identity.Name,
+		record.Identity.Nickname,
+	}
+}
+
+func recommendedDecisionCandidate(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	remainingAP int,
+	candidates []decisionCandidate,
+) (decisionCandidate, bool) {
+	if len(candidates) == 0 {
+		return decisionCandidate{}, false
+	}
+	for _, candidate := range candidates {
+		if candidate.Action == DecisionActionEat {
+			return candidate, true
+		}
+	}
+	if actor != nil && actor.Status.Hunger < 30 && !hasBackpackItem(*actor, "ration") {
+		if candidate, ok := firstFoodSeekingCandidate(candidates); ok {
+			return candidate, true
+		}
+	}
+	directive := strings.ToLower(actorDirectiveForRecommendation(state, byID, actor))
+	equipmentDirective := directivePrefersEquipmentWork(directive)
+	if remainingAP < decisionActionCost(DecisionActionGather) &&
+		(equipmentDirective || directivePrefersBuild(directive)) &&
+		hasCurrentTileEconomyOpportunity(state, byID, actor) {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionHold, DecisionActionDefend, DecisionActionObserve); ok {
+			return candidate, true
+		}
+	}
+	if containsAny(directive, "恋爱", "生小孩", "生孩子", "生育", "孩子", "家庭", "亲密") {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionFamily, DecisionActionRomance, DecisionActionDialogue, DecisionActionSay); ok {
+			return candidate, true
+		}
+	}
+	if containsAny(directive, "交易", "贸易", "调拨", "赠送", "出售") {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionTrade, DecisionActionSay, DecisionActionDialogue); ok {
+			return candidate, true
+		}
+		if candidate, ok := bestMoveTowardNearestTarget(byID, actor, targetIDs, candidates); ok {
+			return candidate, true
+		}
+	}
+	if equipmentDirective {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionUpgrade, DecisionActionForge, DecisionActionEquip, DecisionActionBuild, DecisionActionGather); ok {
+			return candidate, true
+		}
+		if candidate, ok := bestMoveTowardProductionGoal(state, actor, candidates); ok {
+			return candidate, true
+		}
+	}
+	if directivePrefersBuild(directive) {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionBuild, DecisionActionGather); ok {
+			return candidate, true
+		}
+		if candidate, ok := bestMoveTowardProductionGoal(state, actor, candidates); ok {
+			return candidate, true
+		}
+	}
+	if containsAny(directive, "进攻", "攻击", "压上", "击溃", "追击", "集火") {
+		if candidate, ok := bestCombatCandidate(byID, actor, targetIDs, candidates); ok {
+			return candidate, true
+		}
+		if candidate, ok := bestMoveTowardNearestTarget(byID, actor, targetIDs, candidates); ok {
+			return candidate, true
+		}
+	}
+	if nearestThreatDistance(state, byID, actor) <= 1 {
+		if candidate, ok := bestCombatCandidate(byID, actor, targetIDs, candidates); ok {
+			return candidate, true
+		}
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionDefend); ok {
+			return candidate, true
+		}
+	}
+	if nearestThreatDistance(state, byID, actor) >= 8 {
+		if candidate, ok := firstCandidateByActions(candidates, DecisionActionBuild, DecisionActionGather); ok {
+			return candidate, true
+		}
+	}
+	if candidate, ok := bestMoveTowardNearestTarget(byID, actor, targetIDs, candidates); ok {
+		return candidate, true
+	}
+	return firstCandidateByActions(candidates, DecisionActionObserve, DecisionActionDefend, DecisionActionHold)
+}
+
+func firstCandidateByActions(candidates []decisionCandidate, actions ...DecisionAction) (decisionCandidate, bool) {
+	for _, action := range actions {
+		for _, candidate := range candidates {
+			if candidate.Action == action {
+				return candidate, true
+			}
+		}
+	}
+	return decisionCandidate{}, false
+}
+
+func bestCombatCandidate(
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	candidates []decisionCandidate,
+) (decisionCandidate, bool) {
+	target := nearestBattleReady(targetIDs, byID, actor)
+	for _, action := range []DecisionAction{DecisionActionAttack, DecisionActionHeavyAttack, DecisionActionCharge} {
+		for _, candidate := range candidates {
+			if candidate.Action != action {
+				continue
+			}
+			if target == nil || candidate.TargetUnitID == target.ID {
+				return candidate, true
+			}
+		}
+	}
+	return decisionCandidate{}, false
+}
+
+func firstFoodSeekingCandidate(candidates []decisionCandidate) (decisionCandidate, bool) {
+	for _, action := range []DecisionAction{DecisionActionGather, DecisionActionTrade, DecisionActionDialogue, DecisionActionSay, DecisionActionMove} {
+		for _, candidate := range candidates {
+			if candidate.Action != action {
+				continue
+			}
+			if action == DecisionActionGather && !foodSeekingActivity(candidate.Activity) {
+				continue
+			}
+			return candidate, true
+		}
+	}
+	return decisionCandidate{}, false
+}
+
+func foodSeekingActivity(activity ProductionActivity) bool {
+	switch activity {
+	case ProductionActivityForage, ProductionActivityHunt, ProductionActivityFish:
+		return true
+	default:
+		return false
+	}
+}
+
+func directivePrefersEquipmentWork(text string) bool {
+	return containsAny(
+		strings.ToLower(strings.TrimSpace(text)),
+		"升级装备",
+		"强化装备",
+		"强化武器",
+		"升级武器",
+		"锻造",
+		"强化",
+		"升级",
+		"铁匠铺",
+		"整备装备",
+		"装备",
+		"武器",
+		"护甲",
+		"forge",
+		"upgrade",
+		"equip",
+	)
+}
+
+func hasCurrentTileEconomyOpportunity(state State, byID map[string]*unit.Record, actor *unit.Record) bool {
+	if actor == nil {
+		return false
+	}
+	for _, candidate := range buildEconomyCandidates(state, byID, actor) {
+		if candidate.Action == DecisionActionGather || candidate.Action == DecisionActionBuild {
+			return true
+		}
+	}
+	return false
+}
+
+func bestMoveTowardProductionGoal(
+	state State,
+	actor *unit.Record,
+	candidates []decisionCandidate,
+) (decisionCandidate, bool) {
+	if actor == nil {
+		return decisionCandidate{}, false
+	}
+	var chosen decisionCandidate
+	bestScore := -1 << 30
+	found := false
+	for _, candidate := range candidates {
+		if candidate.Action != DecisionActionMove {
+			continue
+		}
+		terrain := terrainAt(state.Map, world.Coord{Q: candidate.TargetQ, R: candidate.TargetR})
+		score := productionGoalTerrainScore(terrain)
+		if score <= 0 {
+			continue
+		}
+		if !found || score > bestScore {
+			chosen = candidate
+			bestScore = score
+			found = true
+		}
+	}
+	return chosen, found
+}
+
+func productionGoalTerrainScore(terrain world.TerrainID) int {
+	score := 0
+	if terrainSupportsActivity(terrain, ProductionActivityMine) {
+		score += 40
+	}
+	if terrainSupportsActivity(terrain, ProductionActivityForage) {
+		score += 30
+	}
+	if terrainSupportsStructure(terrain, StructureTypeForge) {
+		score += 20
+	}
+	if terrainSupportsActivity(terrain, ProductionActivityHunt) {
+		score += 8
+	}
+	return score
+}
+
+func bestMoveTowardNearestTarget(
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	targetIDs []string,
+	candidates []decisionCandidate,
+) (decisionCandidate, bool) {
+	target := nearestBattleReady(targetIDs, byID, actor)
+	var chosen decisionCandidate
+	bestDistance := 1 << 30
+	found := false
+	for _, candidate := range candidates {
+		if candidate.Action != DecisionActionMove {
+			continue
+		}
+		distance := 0
+		if target != nil {
+			distance = unit.HexDistance(candidate.TargetQ, candidate.TargetR, target.Status.PositionQ, target.Status.PositionR)
+		}
+		if !found || distance < bestDistance || (distance == bestDistance && (candidate.TargetQ < chosen.TargetQ || (candidate.TargetQ == chosen.TargetQ && candidate.TargetR < chosen.TargetR))) {
+			chosen = candidate
+			bestDistance = distance
+			found = true
+		}
+	}
+	return chosen, found
+}
+
+func formatRecommendedCandidate(candidate decisionCandidate, byID map[string]*unit.Record) string {
+	params := recommendedCandidateParams(candidate)
+	text := fmt.Sprintf("action=%s", candidate.Action)
+	if params != "" {
+		text += "，" + params
+	}
+	if summary := strings.TrimSpace(decisionCandidatePromptSummary(candidate, byID)); summary != "" {
+		text += "；理由=" + summary
+	}
+	return text
+}
+
+func formatRecommendedJSONFields(candidate decisionCandidate) string {
+	parts := []string{fmt.Sprintf(`"action":"%s"`, candidate.Action)}
+	appendString := func(name string, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, fmt.Sprintf(`"%s":"%s"`, name, value))
+		}
+	}
+	appendInt := func(name string, value int) {
+		if value > 0 {
+			parts = append(parts, fmt.Sprintf(`"%s":%d`, name, value))
+		}
+	}
+	switch candidate.Action {
+	case DecisionActionMove:
+		parts = append(parts, fmt.Sprintf(`"target_q":%d`, candidate.TargetQ), fmt.Sprintf(`"target_r":%d`, candidate.TargetR))
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		appendString("target_unit_id", candidate.TargetUnitID)
+		appendString("structure_id", candidate.StructureID)
+	case DecisionActionSkill:
+		appendString("skill_id", candidate.SkillID)
+		appendString("target_unit_id", candidate.TargetUnitID)
+	case DecisionActionGather:
+		appendString("activity", string(candidate.Activity))
+	case DecisionActionBuild:
+		appendString("structure_type", string(candidate.StructureType))
+	case DecisionActionTrade:
+		appendString("trade_kind", string(candidate.TradeKind))
+		appendString("target_unit_id", candidate.TargetUnitID)
+		appendString("item_id", candidate.ItemID)
+		appendInt("gold_amount", candidate.GoldAmount)
+		appendInt("price", candidate.Price)
+	case DecisionActionSay, DecisionActionDialogue, DecisionActionAssist, DecisionActionRomance, DecisionActionFamily:
+		appendString("target_unit_id", candidate.TargetUnitID)
+	case DecisionActionForge, DecisionActionUpgrade, DecisionActionEquip, DecisionActionEat:
+		appendString("item_id", candidate.ItemID)
+	case DecisionActionPickup:
+		appendString("ground_loot_id", candidate.GroundLootID)
+	case DecisionActionDemolish:
+		appendString("structure_id", candidate.StructureID)
+	}
+	return "{" + strings.Join(parts, ",") + `,"next_action":"自行填写","speak":"自行填写","memory":"自行填写","reasoning":"自行填写"}`
+}
+
+func recommendedCandidateParams(candidate decisionCandidate) string {
+	parts := make([]string, 0, 5)
+	appendString := func(name string, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, fmt.Sprintf("%s=%s", name, value))
+		}
+	}
+	appendInt := func(name string, value int) {
+		if value > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", name, value))
+		}
+	}
+	switch candidate.Action {
+	case DecisionActionMove:
+		parts = append(parts, fmt.Sprintf("target_q=%d", candidate.TargetQ), fmt.Sprintf("target_r=%d", candidate.TargetR))
+	case DecisionActionAttack, DecisionActionCharge, DecisionActionHeavyAttack:
+		appendString("target_unit_id", candidate.TargetUnitID)
+		appendString("structure_id", candidate.StructureID)
+	case DecisionActionSkill:
+		appendString("skill_id", candidate.SkillID)
+		appendString("target_unit_id", candidate.TargetUnitID)
+	case DecisionActionGather:
+		appendString("activity", string(candidate.Activity))
+	case DecisionActionBuild:
+		appendString("structure_type", string(candidate.StructureType))
+	case DecisionActionTrade:
+		appendString("trade_kind", string(candidate.TradeKind))
+		appendString("target_unit_id", candidate.TargetUnitID)
+		appendString("item_id", candidate.ItemID)
+		appendInt("gold_amount", candidate.GoldAmount)
+		appendInt("price", candidate.Price)
+	case DecisionActionUpgrade, DecisionActionEquip, DecisionActionEat:
+		appendString("item_id", candidate.ItemID)
+	case DecisionActionPickup:
+		appendString("ground_loot_id", candidate.GroundLootID)
+	case DecisionActionDemolish:
+		appendString("structure_id", candidate.StructureID)
+	}
+	return strings.Join(parts, "，")
+}
+
+func summarizeVisibleTerrain(state State, byID map[string]*unit.Record, actor *unit.Record, limit int) string {
+	if actor == nil || limit <= 0 {
+		return "无"
+	}
+	vision := actor.Stats.Derived.Vision
+	if vision <= 0 {
+		vision = 5
+	}
+	coords, err := world.ComputeVisibleTiles(state.Map, world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR}, vision)
+	if err != nil || len(coords) == 0 {
+		return "无"
+	}
+	sort.Slice(coords, func(i, j int) bool {
+		di := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, coords[i].Q, coords[i].R)
+		dj := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, coords[j].Q, coords[j].R)
+		if di != dj {
+			return di < dj
+		}
+		if coords[i].Q != coords[j].Q {
+			return coords[i].Q < coords[j].Q
+		}
+		return coords[i].R < coords[j].R
+	})
+	lines := make([]string, 0, limit)
+	for _, coord := range coords {
+		if len(lines) >= limit {
+			break
+		}
+		terrainName := terrainDisplayName(terrainAt(state.Map, coord))
+		distance := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, coord.Q, coord.R)
+		structure := summarizeStructureAt(state.Structures, coord)
+		occupants := summarizeVisibleOccupantsAt(byID, coord)
+		lines = append(lines, fmt.Sprintf("- %d,%d 距%d：%s；设施=%s；单位=%s", coord.Q, coord.R, distance, terrainName, structure, occupants))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarizeVisibleOccupantsAt(byID map[string]*unit.Record, coord world.Coord) string {
+	if len(byID) == 0 {
+		return "无"
+	}
+	parts := make([]string, 0, 2)
+	for _, record := range byID {
+		if record == nil || !isBattleReady(*record) {
+			continue
+		}
+		if record.Status.PositionQ == coord.Q && record.Status.PositionR == coord.R {
+			parts = append(parts, fmt.Sprintf("%s[%s]", record.DisplayName(), record.FactionID))
+		}
+	}
+	if len(parts) == 0 {
+		return "无"
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "/")
+}
+
+// formatMoveOptions 格式化可移动坐标集合及到达后可执行事项为提示词文本。
+func formatMoveOptions(state State, actor *unit.Record, options []world.Coord) string {
+	if len(options) == 0 {
+		return "无相邻可走格，若不想进攻就选择 hold。"
+	}
+
+	lines := make([]string, 0, len(options))
+	for _, option := range options {
+		lines = append(lines, fmt.Sprintf("- target_q=%d target_r=%d（坐标 %d,%d）：%s", option.Q, option.R, option.Q, option.R, tileOpportunitySummary(state, actor, option)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatDialogueOptions 格式化本回合可交谈目标；交谈动作只允许视野内且未被外交策略禁止的非自己单位。
+func formatDialogueOptions(state State, byID map[string]*unit.Record, actor *unit.Record) string {
+	targets := visibleCommunicationTargets(state, byID, actor)
+	lines := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if dialogueBlockedByPolicy(state, actor, target) {
+			continue
+		}
+		distance := unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, target.Status.PositionQ, target.Status.PositionR)
+		lines = append(lines, fmt.Sprintf(
+			"- 名称=%s[%s] 坐标=%d,%d 距离=%d（视野内）",
+			target.DisplayName(),
+			target.FactionID,
+			target.Status.PositionQ,
+			target.Status.PositionR,
+			distance,
+		))
+	}
+	if len(lines) == 0 {
+		return "无（交谈只能选择视野内的非自己单位；被外交策略禁止的跨阵营接触不会进入候选）"
+	}
+	return strings.Join(lines, "\n")
+}

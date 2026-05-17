@@ -1,0 +1,9 @@
+./inventory.go
+./lives.go
+./personality.go
+./profile.go
+./repository.go
+./trade.go
+./lives_test.go
+./repository_test.go
+./trade_test.go
