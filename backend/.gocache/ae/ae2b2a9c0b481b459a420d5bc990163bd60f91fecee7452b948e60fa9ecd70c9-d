@@ -1,7 +1,0 @@
-./provider_openai_compatible.go
-./service.go
-./types.go
-./validator.go
-./provider_openai_compatible_test.go
-./service_test.go
-./validator_test.go

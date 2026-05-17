@@ -1,4 +1,0 @@
-./duel_auth.go
-./router.go
-./router_account_test.go
-./router_duel_test.go
