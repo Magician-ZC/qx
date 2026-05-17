@@ -1,0 +1,27 @@
+{
+  "http_addr": ":8080",
+  "db_driver": "sqlite",
+  "sqlite_path": "data/session.db",
+  "openai": {
+    "base_url": "https://api.openai.com/v1",
+    "wire_api": "chat_completions",
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "timeout_seconds": "180"
+  },
+  "deepseek": {
+    "base_url": "",
+    "wire_api": "chat_completions",
+    "api_key": "",
+    "model": ""
+  },
+  "openai_fallbacks": [
+    {
+      "base_url": "",
+      "wire_api": "chat_completions",
+      "api_key": "",
+      "model": ""
+    }
+  ],
+  "openrouter_api_keys": ""
+}

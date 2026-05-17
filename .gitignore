@@ -1,0 +1,13 @@
+.DS_Store
+.cache/
+.gocache/
+.playwright-mcp/
+
+backend/config.local.json
+backend/server
+backend/.gocache/
+backend/.DS_Store
+backend/cmd/.DS_Store
+
+frontend/.DS_Store
+frontend/.idea/

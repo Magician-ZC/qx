@@ -4,15 +4,19 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-const defaultLLMEnvFile = "/Users/bytedance/PycharmProjects/llm_alpha/llm_alpha_pipeline/.env"
+const defaultConfigFile = "config.local.json"
 
-var loadEnvOnce sync.Once
+var (
+	loadConfigOnce sync.Once
+	loadEnvOnce    sync.Once
+)
 
 // LLMEndpoint 结构体用于承载该模块的核心数据。
 type LLMEndpoint struct {
@@ -26,7 +30,9 @@ type LLMEndpoint struct {
 // Config 结构体用于承载该模块的核心数据。
 type Config struct {
 	HTTPAddr                string
+	DBDriver                string
 	SQLitePath              string
+	MySQLDSN                string
 	PostgresDSN             string
 	AuthTokenTTL            time.Duration
 	ReadTimeout             time.Duration
@@ -47,6 +53,7 @@ type Config struct {
 
 // Load 从环境变量加载服务配置，并应用默认值与安全边界。
 func Load() Config {
+	loadExternalConfigFile()
 	loadExternalEnvFile()
 
 	openAIBaseURL := getAnyEnv([]string{"QUNXIANG_OPENAI_BASE_URL", "OPENAI_BASE_URL"}, "https://api.openai.com/v1")
@@ -54,6 +61,9 @@ func Load() Config {
 	openAIAPIKey := getAnyEnv([]string{"QUNXIANG_OPENAI_API_KEY", "OPENAI_API_KEY"}, "")
 	openAIModel := getAnyEnv([]string{"QUNXIANG_OPENAI_MODEL", "OPENAI_MODEL"}, "gpt-4o-mini")
 	openAIReasoningEffort := getAnyEnv([]string{"QUNXIANG_OPENAI_REASONING_EFFORT", "OPENAI_REASONING_EFFORT"}, "")
+	if isOpenRouterBaseURL(openAIBaseURL) {
+		openAIAPIKey = mergeKeyLists(openAIAPIKey, getAnyEnv([]string{"QUNXIANG_OPENROUTER_API_KEYS", "OPENROUTER_API_KEYS"}, ""))
+	}
 	llmTimeout := parseDurationSeconds(
 		getAnyEnv([]string{"QUNXIANG_OPENAI_TIMEOUT_SECONDS", "OPENAI_TIMEOUT_SECONDS"}, "180"),
 		180*time.Second,
@@ -61,7 +71,9 @@ func Load() Config {
 
 	return Config{
 		HTTPAddr:                getAnyEnv([]string{"QUNXIANG_HTTP_ADDR"}, ":8080"),
+		DBDriver:                strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_DB_DRIVER"}, "sqlite")),
 		SQLitePath:              getAnyEnv([]string{"QUNXIANG_SQLITE_PATH"}, "data/session.db"),
+		MySQLDSN:                strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_MYSQL_DSN", "MYSQL_DSN"}, "")),
 		PostgresDSN:             strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_POSTGRES_DSN", "POSTGRES_DSN"}, "")),
 		AuthTokenTTL:            parseDurationHours(getAnyEnv([]string{"QUNXIANG_AUTH_TOKEN_TTL_HOURS"}, "72"), 72*time.Hour),
 		ReadTimeout:             parseServerDurationSeconds(getAnyEnv([]string{"QUNXIANG_READ_TIMEOUT_SECONDS"}, "10"), 10*time.Second),
@@ -81,10 +93,114 @@ func Load() Config {
 	}
 }
 
-// loadExternalEnvFile 从外部 .env 文件补充环境变量（仅在缺失时注入）。
+type localConfigFile struct {
+	HTTPAddr          string                `json:"http_addr"`
+	DBDriver          string                `json:"db_driver"`
+	SQLitePath        string                `json:"sqlite_path"`
+	MySQLDSN          string                `json:"mysql_dsn"`
+	PostgresDSN       string                `json:"postgres_dsn"`
+	AuthTokenTTLHours string                `json:"auth_token_ttl_hours"`
+	ReadTimeoutSecs   string                `json:"read_timeout_seconds"`
+	WriteTimeoutSecs  string                `json:"write_timeout_seconds"`
+	OpenRouterAPIKeys string                `json:"openrouter_api_keys"`
+	OpenAI            localEndpointConfig   `json:"openai"`
+	DeepSeek          localEndpointConfig   `json:"deepseek"`
+	OpenAIFallbacks   []localEndpointConfig `json:"openai_fallbacks"`
+	Env               map[string]string     `json:"env"`
+}
+
+type localEndpointConfig struct {
+	BaseURL         string `json:"base_url"`
+	WireAPI         string `json:"wire_api"`
+	APIKey          string `json:"api_key"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	TimeoutSeconds  string `json:"timeout_seconds"`
+}
+
+// loadExternalConfigFile 从本地 JSON 配置补充环境变量（仅在缺失时注入）。
+func loadExternalConfigFile() {
+	loadConfigOnce.Do(func() {
+		path := strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_CONFIG_FILE"}, defaultConfigFile))
+		if path == "" {
+			return
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+
+		var file localConfigFile
+		if err := json.Unmarshal(data, &file); err != nil {
+			return
+		}
+
+		setEnvIfMissing("QUNXIANG_HTTP_ADDR", file.HTTPAddr)
+		setEnvIfMissing("QUNXIANG_DB_DRIVER", file.DBDriver)
+		setEnvIfMissing("QUNXIANG_SQLITE_PATH", file.SQLitePath)
+		setEnvIfMissing("QUNXIANG_MYSQL_DSN", file.MySQLDSN)
+		setEnvIfMissing("QUNXIANG_POSTGRES_DSN", file.PostgresDSN)
+		setEnvIfMissing("QUNXIANG_AUTH_TOKEN_TTL_HOURS", file.AuthTokenTTLHours)
+		setEnvIfMissing("QUNXIANG_READ_TIMEOUT_SECONDS", file.ReadTimeoutSecs)
+		setEnvIfMissing("QUNXIANG_WRITE_TIMEOUT_SECONDS", file.WriteTimeoutSecs)
+		setEnvIfMissing("QUNXIANG_OPENROUTER_API_KEYS", file.OpenRouterAPIKeys)
+
+		applyLocalEndpoint("QUNXIANG_OPENAI", file.OpenAI)
+		if strings.TrimSpace(file.OpenAI.TimeoutSeconds) != "" {
+			setEnvIfMissing("QUNXIANG_OPENAI_TIMEOUT_SECONDS", file.OpenAI.TimeoutSeconds)
+		}
+		applyLocalEndpoint("QUNXIANG_DEEPSEEK", file.DeepSeek)
+
+		fallbackPrefixes := []string{
+			"QUNXIANG_OPENAI_FALLBACK",
+			"QUNXIANG_OPENAI_SECOND_FALLBACK",
+			"QUNXIANG_OPENAI_THIRD_FALLBACK",
+			"QUNXIANG_OPENAI_FOURTH_FALLBACK",
+			"QUNXIANG_OPENAI_FIFTH_FALLBACK",
+			"QUNXIANG_OPENAI_SIXTH_FALLBACK",
+			"QUNXIANG_OPENAI_SEVENTH_FALLBACK",
+			"QUNXIANG_OPENAI_EIGHTH_FALLBACK",
+		}
+		for index, endpoint := range file.OpenAIFallbacks {
+			if index >= len(fallbackPrefixes) {
+				break
+			}
+			applyLocalEndpoint(fallbackPrefixes[index], endpoint)
+		}
+
+		for key, value := range file.Env {
+			setEnvIfMissing(key, value)
+		}
+	})
+}
+
+func applyLocalEndpoint(prefix string, endpoint localEndpointConfig) {
+	setEnvIfMissing(prefix+"_BASE_URL", endpoint.BaseURL)
+	setEnvIfMissing(prefix+"_WIRE_API", endpoint.WireAPI)
+	setEnvIfMissing(prefix+"_API_KEY", endpoint.APIKey)
+	setEnvIfMissing(prefix+"_MODEL", endpoint.Model)
+	setEnvIfMissing(prefix+"_REASONING_EFFORT", endpoint.ReasoningEffort)
+}
+
+func setEnvIfMissing(key string, value string) {
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" {
+		return
+	}
+	if _, exists := os.LookupEnv(key); !exists {
+		_ = os.Setenv(key, value)
+	}
+}
+
+// loadExternalEnvFile 从显式指定的外部 .env 文件补充环境变量（仅在缺失时注入）。
 func loadExternalEnvFile() {
 	loadEnvOnce.Do(func() {
-		path := getAnyEnv([]string{"QUNXIANG_LLM_ENV_FILE"}, defaultLLMEnvFile)
+		path := strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_LLM_ENV_FILE"}, ""))
+		if path == "" {
+			return
+		}
 		file, err := os.Open(path)
 		if err != nil {
 			return
@@ -109,9 +225,7 @@ func loadExternalEnvFile() {
 				continue
 			}
 
-			if _, exists := os.LookupEnv(key); !exists {
-				_ = os.Setenv(key, value)
-			}
+			setEnvIfMissing(key, value)
 		}
 	})
 }
@@ -246,6 +360,9 @@ func collectOpenAIFallbacks() []LLMEndpoint {
 			Model:           strings.TrimSpace(getAnyEnv(descriptor.modelKeys, "")),
 			ReasoningEffort: strings.TrimSpace(getAnyEnv(descriptor.reasoningEffortKeys, "")),
 		}
+		if isOpenRouterBaseURL(endpoint.BaseURL) {
+			endpoint.APIKey = mergeKeyLists(endpoint.APIKey, getAnyEnv([]string{"QUNXIANG_OPENROUTER_API_KEYS", "OPENROUTER_API_KEYS"}, ""))
+		}
 		if endpoint.BaseURL == "" || endpoint.APIKey == "" || endpoint.Model == "" {
 			continue
 		}
@@ -265,4 +382,39 @@ func collectOpenAIFallbacks() []LLMEndpoint {
 	}
 
 	return fallbacks
+}
+
+func isOpenRouterBaseURL(baseURL string) bool {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == "https://openrouter.ai/api/v1"
+}
+
+func mergeKeyLists(primary string, extra string) string {
+	keys := splitConfigKeyList(primary)
+	keys = append(keys, splitConfigKeyList(extra)...)
+	if len(keys) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(keys))
+	merged := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, key)
+	}
+	return strings.Join(merged, ",")
+}
+
+func splitConfigKeyList(raw string) []string {
+	normalized := strings.NewReplacer("\n", ",", "\r", ",", ";", ",").Replace(raw)
+	parts := strings.Split(normalized, ",")
+	keys := make([]string, 0, len(parts))
+	for _, part := range parts {
+		key := strings.TrimSpace(part)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
