@@ -159,6 +159,9 @@ type Record struct {
 	Status      Status        `json:"status"`
 	Memory      MemoryProfile `json:"memory"`
 	Inventory   Inventory     `json:"inventory"`
+	// Version 是乐观并发版本号（M7.3-real-3-0），仅由 GetByID 从 version 列填充、供 SaveOptimistic 做条件写；
+	// 非 blob 字段、不参与序列化语义（json 仅为完整性）。其它读路径（ListBySession 等）不填，留 0。
+	Version int64 `json:"version,omitempty"`
 }
 
 // DisplayName 返回单位显示名；缺失时回落到单位 ID。

@@ -213,12 +213,8 @@ func mergeStringSet(next []string, current []string) []string {
 	return merged
 }
 
-// saveWithExecer 使用指定执行器持久化单位，便于复用事务上下文。
-func (repository *Repository) saveWithExecer(ctx context.Context, execer interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, record Record) error {
-	record = repository.mergePersistentSocialState(ctx, record)
-
+// marshalUnitBlobs 把 Record 的四个 JSON blob 序列化出来（Save / SaveOptimistic 共用）。
+func marshalUnitBlobs(record Record) (profile, personality, statusJSON, inventory string, err error) {
 	encodedProfile, err := json.Marshal(profileDocument{
 		Identity: record.Identity,
 		Stats:    record.Stats,
@@ -227,25 +223,36 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 		Memory:   record.Memory,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal unit profile: %w", err)
+		return "", "", "", "", fmt.Errorf("marshal unit profile: %w", err)
 	}
-
 	encodedPersonality, err := json.Marshal(record.Personality)
 	if err != nil {
-		return fmt.Errorf("marshal unit personality: %w", err)
+		return "", "", "", "", fmt.Errorf("marshal unit personality: %w", err)
 	}
-
 	encodedStatus, err := json.Marshal(record.Status)
 	if err != nil {
-		return fmt.Errorf("marshal unit status: %w", err)
+		return "", "", "", "", fmt.Errorf("marshal unit status: %w", err)
 	}
-
 	encodedInventory, err := json.Marshal(record.Inventory)
 	if err != nil {
-		return fmt.Errorf("marshal unit inventory: %w", err)
+		return "", "", "", "", fmt.Errorf("marshal unit inventory: %w", err)
+	}
+	return string(encodedProfile), string(encodedPersonality), string(encodedStatus), string(encodedInventory), nil
+}
+
+// saveWithExecer 使用指定执行器持久化单位，便于复用事务上下文。
+func (repository *Repository) saveWithExecer(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, record Record) error {
+	record = repository.mergePersistentSocialState(ctx, record)
+
+	encodedProfile, encodedPersonality, encodedStatus, encodedInventory, err := marshalUnitBlobs(record)
+	if err != nil {
+		return err
 	}
 
 	// life_state 双写灰度（沙盘 §8.7）：把 status_json.LifeState 去规范化到可查询的 life_state 列（每次 Save 同步）。
+	// version 每次更新单调 +1（乐观并发版本号，real-3-0）——所有写者透明递增，供 SaveOptimistic 检测并发修改。
 	// world_id/region_id/last_active_tick 由调度层方法赋值（SetUnitScope/TouchLastActiveTick），故**不**在此写，
 	// 避免被每次 Save 覆盖回默认值——新插入时取列默认、更新时保留。
 	query := `
@@ -269,6 +276,7 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			status_json = excluded.status_json,
 			inventory_json = excluded.inventory_json,
 			life_state = excluded.life_state,
+			version = version + 1,
 			updated_at = CURRENT_TIMESTAMP
 		`
 	if dbdialect.IsMySQL(repository.db) {
@@ -293,6 +301,7 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			status_json = VALUES(status_json),
 			inventory_json = VALUES(inventory_json),
 			life_state = VALUES(life_state),
+			version = version + 1,
 			updated_at = CURRENT_TIMESTAMP
 		`
 	}
@@ -303,16 +312,51 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 		record.SessionID,
 		record.FactionID,
 		record.DisplayName(),
-		string(encodedProfile),
-		string(encodedPersonality),
-		string(encodedStatus),
-		string(encodedInventory),
+		encodedProfile,
+		encodedPersonality,
+		encodedStatus,
+		encodedInventory,
 		normalizedLifeState(record.Status.LifeState),
 	); err != nil {
 		return fmt.Errorf("save unit %s: %w", record.ID, err)
 	}
 
 	return nil
+}
+
+// SaveOptimistic 条件写：仅当 units.version 仍等于 record.Version（读时版本）才更新（同语句 version+1），返回是否真的写入。
+// applied=false 表示自读取以来该单位被其它写者改过（战斗/HTTP，它们经 Save 必 version+1）——调用方应退避而非覆盖。
+// 是 region-runner 离线写让位战斗/HTTP、防丢更新的护栏（real-3-0）。
+//
+// 写入字段：status_json + **profile_json（整块，含 Social 与 Memory.RecentEventIDs）** + life_state + version；
+// 刻意不写 personality_json/inventory_json（缩小冲突面），且**不**调 mergePersistentSocialState。
+// ⚠️ 不丢 Social/profile 子字段的保证**完全来自 version 守护**（version 匹配 ⟺ 读后无人改过该行 ⟺ 写回的 Social 即当前值、
+// 为幂等 no-op），**而非「没写 Social」**——切勿放宽 version 守护（如改用 updated_at 秒级比较或加宽窗口），否则立即引入
+// profile/Social 丢更新。前置不变量：record 必须是同一调用内 GetByID 刚读出的快照（Version 与 Social/profile 同源）。
+// 另：applied 判定依赖 SET 内的 version=version+1 使匹配行必「变更」（兼容 go-sql-driver/mysql 的 changed-rows 语义），勿移除。
+func (repository *Repository) SaveOptimistic(ctx context.Context, record Record) (bool, error) {
+	encodedStatus, err := json.Marshal(record.Status)
+	if err != nil {
+		return false, fmt.Errorf("marshal unit status: %w", err)
+	}
+	encodedProfile, _, _, _, err := marshalUnitBlobs(record)
+	if err != nil {
+		return false, err
+	}
+	res, err := repository.db.ExecContext(
+		ctx,
+		`UPDATE units SET status_json = ?, profile_json = ?, life_state = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND version = ?`,
+		string(encodedStatus), encodedProfile, normalizedLifeState(record.Status.LifeState), record.ID, record.Version,
+	)
+	if err != nil {
+		return false, fmt.Errorf("save unit optimistic %s: %w", record.ID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("save unit optimistic %s rows affected: %w", record.ID, err)
+	}
+	return affected > 0, nil
 }
 
 // normalizedLifeState 把空生命态归一为 active（与 BootstrapRecord 默认一致），保证 life_state 列恒为合法值。
@@ -343,7 +387,8 @@ func (repository *Repository) GetByID(ctx context.Context, unitID string) (Recor
 			profile_json,
 			personality_json,
 			status_json,
-			inventory_json
+			inventory_json,
+			version
 		FROM units
 		WHERE id = ?
 		`,
@@ -357,6 +402,7 @@ func (repository *Repository) GetByID(ctx context.Context, unitID string) (Recor
 		&encodedPersonality,
 		&encodedStatus,
 		&encodedInventory,
+		&record.Version,
 	); err != nil {
 		return Record{}, fmt.Errorf("get unit %s: %w", unitID, err)
 	}

@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS units (
   region_id TEXT,
   life_state TEXT NOT NULL DEFAULT 'active',
   last_active_tick INTEGER NOT NULL DEFAULT 0,
+  -- 乐观并发版本号（M7.3-real-3-0）：每次 Save 单调 +1；region-runner 用 SaveOptimistic(WHERE version=读到的值) 检测
+  -- 并发修改、冲突即退避，避免覆盖战斗/HTTP 对同一单位的写。现有库经 dbmigrate 幂等补列。
+  version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

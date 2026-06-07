@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -86,9 +87,27 @@ func NewMutator(db *sql.DB, units *unit.Repository) *Mutator {
 	}
 }
 
-// Apply 执行一次状态变更并写入对应事件记录。
-// 该方法会更新单位状态、追加 recentEventIDs，并落盘标准化 events 行。
+// ErrConcurrentModification 表示乐观并发写未命中（自读取以来单位被其它写者改过），ApplyOptimistic 据此让调用方退避。
+var ErrConcurrentModification = errors.New("status: unit modified concurrently (optimistic conflict)")
+
+// Apply 执行一次状态变更并写入对应事件记录（无条件覆盖写，原有语义）。
 func (mutator *Mutator) Apply(ctx context.Context, mutation Mutation) (Result, error) {
+	return mutator.apply(ctx, mutation, func(ctx context.Context, record unit.Record) (bool, error) {
+		return true, mutator.units.Save(ctx, record)
+	})
+}
+
+// ApplyOptimistic 与 Apply 同，但用乐观并发条件写（SaveOptimistic）：若自 GetByID 以来该单位被其它写者改过，
+// 不覆盖、不落事件，返回 ErrConcurrentModification。供 region-runner 离线写让位战斗/HTTP，避免丢更新（real-3-0）。
+func (mutator *Mutator) ApplyOptimistic(ctx context.Context, mutation Mutation) (Result, error) {
+	return mutator.apply(ctx, mutation, func(ctx context.Context, record unit.Record) (bool, error) {
+		return mutator.units.SaveOptimistic(ctx, record)
+	})
+}
+
+// apply 是 Apply / ApplyOptimistic 的共用主体：查表→读单位→改字段→追加 recentEventIDs→按 save 策略落盘→落事件。
+// save 返回 (applied, err)：applied=false（仅乐观写可能）表示并发冲突，此时不落事件、返回 ErrConcurrentModification。
+func (mutator *Mutator) apply(ctx context.Context, mutation Mutation, save func(context.Context, unit.Record) (bool, error)) (Result, error) {
 	definition, ok := events.Lookup(mutation.ReasonCode)
 	if !ok {
 		return Result{}, fmt.Errorf("unknown reason code %s", mutation.ReasonCode)
@@ -116,8 +135,13 @@ func (mutator *Mutator) Apply(ctx context.Context, mutation Mutation) (Result, e
 		record.Memory.RecentEventIDs = record.Memory.RecentEventIDs[len(record.Memory.RecentEventIDs)-32:]
 	}
 
-	if err := mutator.units.Save(ctx, record); err != nil {
+	applied, err := save(ctx, record)
+	if err != nil {
 		return Result{}, err
+	}
+	if !applied {
+		// 乐观写冲突：自读取以来单位被改过，不覆盖、不落事件，让调用方退避。
+		return Result{}, ErrConcurrentModification
 	}
 
 	payload := EventPayload{

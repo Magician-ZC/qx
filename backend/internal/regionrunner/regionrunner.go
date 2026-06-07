@@ -13,6 +13,7 @@ package regionrunner
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -73,7 +74,7 @@ func (c Config) withDefaults() Config {
 // stats 是进程内累计遥测（原子）。
 type stats struct {
 	ticks, enqueued, claimed, completed, reclaimed, failed, backpressured int64
-	foraged, rested, deferred, dropped                                    int64 // real-2 应用态：觅食/休息/让位战斗/丢弃(逝者或删档)
+	foraged, rested, deferred, dropped, conflicted                        int64 // real-2/3 应用态：觅食/休息/让位战斗/丢弃(逝者或删档)/乐观并发冲突退避
 }
 
 // Runner 是 region-runner 引擎实例。
@@ -254,12 +255,18 @@ func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob
 	}
 
 	// L1 反射决策（零 LLM）：饿则觅食补口粮（HOT 盯到吃饱），否则日常消耗（缓慢变饿，驱动下次觅食，自然降温至 COLD）。
+	// 经 ApplyOptimistic 乐观并发写：若自读取以来该单位被战斗/HTTP 改过 → ErrConcurrentModification → 让位（不覆盖、
+	// 不计觅食/休息），COLD 重排稍后再来。这是 real-3-0 对「Mutator 读改写与并发写者丢更新」的硬化（§8.6 单位级串行化）。
 	if record.Status.Hunger < forageThreshold {
-		if _, err := r.mutator.Apply(ctx, status.Mutation{
+		if _, err := r.mutator.ApplyOptimistic(ctx, status.Mutation{
 			UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: forageGain,
 			ReasonCode: events.ReasonAmbientForage,
 		}); err != nil {
-			r.log.Warn("region-runner forage mutate", "unit", job.UnitID, "error", err)
+			if errors.Is(err, status.ErrConcurrentModification) {
+				atomic.AddInt64(&r.st.conflicted, 1)
+			} else {
+				r.log.Warn("region-runner forage mutate", "unit", job.UnitID, "error", err)
+			}
 			return scheduler.ClassifyTier(tick, lastActive), true
 		}
 		atomic.AddInt64(&r.st.foraged, 1)
@@ -268,11 +275,15 @@ func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob
 		}
 		return scheduler.TierHot, true
 	}
-	if _, err := r.mutator.Apply(ctx, status.Mutation{
+	if _, err := r.mutator.ApplyOptimistic(ctx, status.Mutation{
 		UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: -restConsume,
 		ReasonCode: events.ReasonAmbientRest,
 	}); err != nil {
-		r.log.Warn("region-runner rest mutate", "unit", job.UnitID, "error", err)
+		if errors.Is(err, status.ErrConcurrentModification) {
+			atomic.AddInt64(&r.st.conflicted, 1)
+		} else {
+			r.log.Warn("region-runner rest mutate", "unit", job.UnitID, "error", err)
+		}
 	} else {
 		atomic.AddInt64(&r.st.rested, 1)
 	}
@@ -391,5 +402,6 @@ func (r *Runner) Stats() map[string]any {
 		"rested":        atomic.LoadInt64(&r.st.rested),
 		"deferred":      atomic.LoadInt64(&r.st.deferred),
 		"dropped":       atomic.LoadInt64(&r.st.dropped),
+		"conflicted":    atomic.LoadInt64(&r.st.conflicted),
 	}
 }

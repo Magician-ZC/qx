@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS units (
   region_id VARCHAR(191) NULL,
   life_state VARCHAR(32) NOT NULL DEFAULT 'active',
   last_active_tick BIGINT NOT NULL DEFAULT 0,
+  version BIGINT NOT NULL DEFAULT 0,
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_units_session_id (session_id)

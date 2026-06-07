@@ -107,4 +107,6 @@ var UnitScopeColumns = []Column{
 	{Name: "region_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
 	{Name: "life_state", SQLiteType: "TEXT NOT NULL DEFAULT 'active'", MySQLType: "VARCHAR(32) NOT NULL DEFAULT 'active'"},
 	{Name: "last_active_tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "BIGINT NOT NULL DEFAULT 0"},
+	// version：乐观并发版本号（M7.3-real-3-0），Save 单调 +1，SaveOptimistic 据此检测并发修改。
+	{Name: "version", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "BIGINT NOT NULL DEFAULT 0"},
 }
