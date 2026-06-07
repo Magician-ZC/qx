@@ -91,3 +91,13 @@ var EventScopeColumns = []Column{
 	{Name: "region_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
 	{Name: "tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "BIGINT NOT NULL DEFAULT 0"},
 }
+
+// UnitScopeColumns 是 units 表的世界作用域 + 生命态调度列（沙盘 §8.7：加列不改义，双写灰度）。
+// life_state 是 status_json.LifeState 的去规范化可查询索引（Save 每次从 status 同步）；world_id/region_id/
+// last_active_tick 由调度层赋值（region-runner / HOT-WARM-COLD 分层 / wake 队列），用于「按 region 查在世单位」。
+var UnitScopeColumns = []Column{
+	{Name: "world_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "region_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "life_state", SQLiteType: "TEXT NOT NULL DEFAULT 'active'", MySQLType: "VARCHAR(32) NOT NULL DEFAULT 'active'"},
+	{Name: "last_active_tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "BIGINT NOT NULL DEFAULT 0"},
+}

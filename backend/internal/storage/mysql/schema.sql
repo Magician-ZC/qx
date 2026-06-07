@@ -7,6 +7,11 @@ CREATE TABLE IF NOT EXISTS units (
   personality_json LONGTEXT NOT NULL,
   status_json LONGTEXT NOT NULL,
   inventory_json LONGTEXT NOT NULL,
+  -- 大世界单位作用域 + 生命态调度列（沙盘 §8.7，双写灰度）。现有库经 dbmigrate 幂等补列。
+  world_id VARCHAR(191) NULL,
+  region_id VARCHAR(191) NULL,
+  life_state VARCHAR(32) NOT NULL DEFAULT 'active',
+  last_active_tick BIGINT NOT NULL DEFAULT 0,
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_units_session_id (session_id)

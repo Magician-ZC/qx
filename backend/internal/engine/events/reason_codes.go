@@ -25,8 +25,9 @@ const (
 	CategoryEconomy  Category = "economy_material"
 	CategoryRelation Category = "relation_change"
 	CategoryCommand  Category = "command_response"
-	CategoryFate     Category = "fate_event"    // 命运流程事件（相关性命中/待决策入队等，非状态变更）
-	CategoryPlayer   Category = "player_action" // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
+	CategoryFate      Category = "fate_event"      // 命运流程事件（相关性命中/待决策入队等，非状态变更）
+	CategoryPlayer    Category = "player_action"   // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
+	CategoryLifecycle Category = "lifecycle_event" // 大世界生命周期（出生/死亡/复仇得偿/势力崩塌/人格漂移，沙盘 §8.7）
 )
 
 // ReasonCode 类型定义用于统一该模块的数据表达。
@@ -59,6 +60,16 @@ const (
 
 	// 回响：本次自治选择被归因到一条真实的过往玩家动作（「因为你上次…，所以这次…」，宪法 §6.2）。
 	ReasonEchoLink ReasonCode = "ECHO_LINK"
+
+	// 大世界生命周期（沙盘 §8.7）。CHARACTER_DIED / LOYALTY_GAIN / LOYALTY_STRAIN 改保护字段、经 status.Mutator；
+	// 其余（出生/复仇得偿/势力崩塌/人格漂移）是流程事件，经 EmitProcessEvent 留痕（人格漂移非保护状态字段，不走 Mutator）。
+	ReasonCharacterBorn      ReasonCode = "CHARACTER_BORN"
+	ReasonCharacterDied      ReasonCode = "CHARACTER_DIED"
+	ReasonVengeanceFulfilled ReasonCode = "VENGEANCE_FULFILLED"
+	ReasonFactionCollapse    ReasonCode = "FACTION_COLLAPSE"
+	ReasonPersonalityDrift   ReasonCode = "PERSONALITY_DRIFT"
+	ReasonLoyaltyGain        ReasonCode = "LOYALTY_GAIN"
+	ReasonLoyaltyStrain      ReasonCode = "LOYALTY_STRAIN"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -94,6 +105,13 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonDecisionResolved, Category: CategoryFate, DisplayName: "决断已下", DefaultReasonText: "一件待决策的事有了着落", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonPlayerIntervention, Category: CategoryPlayer, DisplayName: "玩家接管", DefaultReasonText: "你直接为她拿了一次主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
 		{Code: ReasonEchoLink, Category: CategoryPlayer, DisplayName: "回响", DefaultReasonText: "因为你上次的选择，这次她做了不一样的事", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
+		{Code: ReasonCharacterBorn, Category: CategoryLifecycle, DisplayName: "新生", DefaultReasonText: "一个新生命降临到这个世界", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonCharacterDied, Category: CategoryLifecycle, DisplayName: "陨落", DefaultReasonText: "一个角色的生命走到了尽头", StatDomains: []string{"lives_remaining"}, ImportanceMin: 8, ImportanceMax: 10},
+		{Code: ReasonVengeanceFulfilled, Category: CategoryLifecycle, DisplayName: "夙愿得偿", DefaultReasonText: "她了结了一桩萦绕已久的恩怨", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonFactionCollapse, Category: CategoryLifecycle, DisplayName: "势力崩塌", DefaultReasonText: "一方势力土崩瓦解", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonPersonalityDrift, Category: CategoryLifecycle, DisplayName: "性情流转", DefaultReasonText: "经历沉淀，她的性情悄然变了一些", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonLoyaltyGain, Category: CategoryRelation, DisplayName: "归心", DefaultReasonText: "因为某些经历，她更认同你了", StatDomains: []string{"loyalty"}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonLoyaltyStrain, Category: CategoryRelation, DisplayName: "离心", DefaultReasonText: "某些经历让她对你生了疏离", StatDomains: []string{"loyalty"}, ImportanceMin: 3, ImportanceMax: 6},
 	}
 }
 

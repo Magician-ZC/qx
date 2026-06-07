@@ -11,6 +11,12 @@ CREATE TABLE IF NOT EXISTS units (
   personality_json TEXT NOT NULL DEFAULT '{}',
   status_json TEXT NOT NULL DEFAULT '{}',
   inventory_json TEXT NOT NULL DEFAULT '{}',
+  -- 大世界单位作用域 + 生命态调度列（沙盘 §8.7，双写灰度）：life_state 由 Save 从 status_json.LifeState 同步、
+  -- world_id/region_id/last_active_tick 由调度层 SetUnitScope/TouchLastActiveTick 赋值。现有库经 dbmigrate 幂等补列。
+  world_id TEXT,
+  region_id TEXT,
+  life_state TEXT NOT NULL DEFAULT 'active',
+  last_active_tick INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

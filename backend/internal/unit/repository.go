@@ -245,6 +245,9 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 		return fmt.Errorf("marshal unit inventory: %w", err)
 	}
 
+	// life_state 双写灰度（沙盘 §8.7）：把 status_json.LifeState 去规范化到可查询的 life_state 列（每次 Save 同步）。
+	// world_id/region_id/last_active_tick 由调度层方法赋值（SetUnitScope/TouchLastActiveTick），故**不**在此写，
+	// 避免被每次 Save 覆盖回默认值——新插入时取列默认、更新时保留。
 	query := `
 		INSERT INTO units (
 			id,
@@ -254,8 +257,9 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			profile_json,
 			personality_json,
 			status_json,
-			inventory_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			inventory_json,
+			life_state
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			session_id = excluded.session_id,
 			faction_id = excluded.faction_id,
@@ -264,6 +268,7 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			personality_json = excluded.personality_json,
 			status_json = excluded.status_json,
 			inventory_json = excluded.inventory_json,
+			life_state = excluded.life_state,
 			updated_at = CURRENT_TIMESTAMP
 		`
 	if dbdialect.IsMySQL(repository.db) {
@@ -276,8 +281,9 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			profile_json,
 			personality_json,
 			status_json,
-			inventory_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			inventory_json,
+			life_state
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			session_id = VALUES(session_id),
 			faction_id = VALUES(faction_id),
@@ -286,6 +292,7 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 			personality_json = VALUES(personality_json),
 			status_json = VALUES(status_json),
 			inventory_json = VALUES(inventory_json),
+			life_state = VALUES(life_state),
 			updated_at = CURRENT_TIMESTAMP
 		`
 	}
@@ -300,11 +307,20 @@ func (repository *Repository) saveWithExecer(ctx context.Context, execer interfa
 		string(encodedPersonality),
 		string(encodedStatus),
 		string(encodedInventory),
+		normalizedLifeState(record.Status.LifeState),
 	); err != nil {
 		return fmt.Errorf("save unit %s: %w", record.ID, err)
 	}
 
 	return nil
+}
+
+// normalizedLifeState 把空生命态归一为 active（与 BootstrapRecord 默认一致），保证 life_state 列恒为合法值。
+func normalizedLifeState(state string) string {
+	if state == "" {
+		return LifeStateActive
+	}
+	return state
 }
 
 // GetByID 按单位 ID 加载完整记录。
