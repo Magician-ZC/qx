@@ -277,3 +277,26 @@ func TestReclaimStaleJobs(t *testing.T) {
 		t.Fatalf("应 1 failed，得到 %d", n)
 	}
 }
+
+func TestPromoteWakeToJobAtomic(t *testing.T) {
+	db, ctx := newQueueDB(t)
+	if err := EnqueueWake(ctx, db, WakeEntry{UnitID: "u1", SessionID: "s1", RegionID: "r1", WakeAtTick: 3}); err != nil {
+		t.Fatalf("enqueue wake: %v", err)
+	}
+	id, err := PromoteWakeToJob(ctx, db, WakeEntry{UnitID: "u1", SessionID: "s1", WorldID: "w1", RegionID: "r1"}, 7)
+	if err != nil || id == "" {
+		t.Fatalf("promote 应返回 job id: id=%q err=%v", id, err)
+	}
+	// wake 已删、job 已入（同事务原子）。
+	if due, _ := ListDueWakes(ctx, db, "", "r1", 100, 100); len(due) != 0 {
+		t.Fatalf("promote 后 wake 应已删，得到 %+v", due)
+	}
+	job, _ := ClaimNextJob(ctx, db)
+	if job == nil || job.UnitID != "u1" || job.SessionID != "s1" || job.WorldID != "w1" || job.Tick != 7 {
+		t.Fatalf("promote 应入一条带完整作用域+tick 的 job，得到 %+v", job)
+	}
+	// 空 unit 被拒。
+	if _, err := PromoteWakeToJob(ctx, db, WakeEntry{}, 1); err == nil {
+		t.Fatalf("空 unit 应被拒")
+	}
+}

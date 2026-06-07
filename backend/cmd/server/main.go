@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"qunxiang/backend/internal/config"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/httpapi"
+	"qunxiang/backend/internal/regionrunner"
 	"qunxiang/backend/internal/session"
 	mysqlstore "qunxiang/backend/internal/storage/mysql"
 	postgresstore "qunxiang/backend/internal/storage/postgres"
@@ -48,6 +51,13 @@ func main() {
 
 	hub := ws.NewHub(logger)
 	aiService := ai.NewService(cfg, logger)
+
+	// 大世界 region-runner（M7.3-real-1，默认关闭、纯影子）：按真实时钟低频唤醒离线单位决策。
+	// QUNXIANG_REGION_RUNNER_ENABLED=true 才启动；QUNXIANG_REGION_TICK_SECONDS 设逻辑 tick 的秒长（默认 30）。
+	regionRunner := regionrunner.New(db, regionrunner.Config{
+		Enabled:     envBool("QUNXIANG_REGION_RUNNER_ENABLED"),
+		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
+	}, logger)
 	accountService := account.NewService(db, cfg.AuthTokenTTL)
 	if err := accountService.EnsureSchema(context.Background()); err != nil {
 		logger.Error("ensure account schema on sqlite", "error", err)
@@ -81,13 +91,14 @@ func main() {
 		logger.Info("primary account service enabled", "db_driver", cfg.DBDriver)
 	}
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Config:    cfg,
-		Logger:    logger,
-		Hub:       hub,
-		Store:     db,
-		AI:        aiService,
-		ColdStore: coldStore,
-		Accounts:  accountService,
+		Config:       cfg,
+		Logger:       logger,
+		Hub:          hub,
+		Store:        db,
+		AI:           aiService,
+		ColdStore:    coldStore,
+		Accounts:     accountService,
+		RegionRunner: regionRunner,
 	})
 
 	server := &http.Server{
@@ -101,6 +112,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 启动 region-runner（未 Enabled 时 Run 立即返回）；随关停信号 ctx 优雅退出。
+	runnerDone := make(chan struct{})
+	go func() {
+		regionRunner.Run(ctx)
+		close(runnerDone)
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -118,6 +136,13 @@ func main() {
 			os.Exit(1)
 		}
 
+		// 等 region-runner 跑完手头作业优雅退出（ctx 已取消，有界等待）。
+		select {
+		case <-runnerDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("region-runner did not stop in time")
+		}
+
 		logger.Info("backend stopped")
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -125,6 +150,24 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+// envBool 读布尔环境变量（true/1/yes/on 视为真，不区分大小写）。
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// envIntDefault 读整数环境变量，缺失/非法时回退默认值。
+func envIntDefault(key string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil {
+		return v
+	}
+	return def
 }
 
 func openPrimaryStore(cfg config.Config) (*sql.DB, error) {

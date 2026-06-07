@@ -32,13 +32,19 @@ import (
 
 // Dependencies 聚合 Router 初始化所需的外部依赖。
 type Dependencies struct {
-	Config    config.Config
-	Logger    *slog.Logger
-	Hub       *ws.Hub
-	Store     *sql.DB
-	AI        *ai.Service
-	ColdStore *sql.DB
-	Accounts  *account.Service
+	Config       config.Config
+	Logger       *slog.Logger
+	Hub          *ws.Hub
+	Store        *sql.DB
+	AI           *ai.Service
+	ColdStore    *sql.DB
+	Accounts     *account.Service
+	RegionRunner RegionRunnerStats // 可空：大世界 region-runner 遥测（/healthz 暴露）
+}
+
+// RegionRunnerStats 是 region-runner 暴露遥测的最小接口（避免 httpapi 依赖 regionrunner 包）。
+type RegionRunnerStats interface {
+	Stats() map[string]any
 }
 
 // NewRouter 组装 HTTP 路由、会话服务与实时推送链路。
@@ -201,6 +207,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"could_skip": reflexCouldSkip,
 				"skip_rate":  reflexSkipRate,
 			},
+		}
+
+		// 大世界 region-runner 遥测（M7.3-real-1）。注入了 runner 即暴露（含 enabled:false 表未启用）；未注入（如测试）则不出本块。
+		if deps.RegionRunner != nil {
+			status["region_runner"] = deps.RegionRunner.Stats()
 		}
 
 		if err := deps.Store.PingContext(c.Request.Context()); err != nil {

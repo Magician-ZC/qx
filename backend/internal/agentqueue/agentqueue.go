@@ -17,6 +17,9 @@
 //   3. 多世界作用域：ListDueWakes / 作业认领目前按 region_id 等值、未带 world_id。阶段-0 region_id==session_id 全局唯一
 //      故无碰撞；多世界落地后须按 (world_id, region_id) 限定，避免跨世界同名 region 互相串唤醒。作业认领刻意全局（共享
 //      worker 池 §9 全局在途上限），若需 region 亲和性再加 world/region 过滤。
+//   4. **RegionID 必填不变量**：DistinctWakeRegions 带 `region_id IS NOT NULL`、ListDueWakes 按 region_id 等值匹配，
+//      故空 RegionID 入队的 wake（存为 NULL）**永不会被 region-runner 发现 → 单位永久饿死**。real-4 seed 接入时
+//      EnqueueWake 的 RegionID 必填（MVP ==sessionID）；切勿以空 region 入队。
 package agentqueue
 
 import (
@@ -112,6 +115,31 @@ func RemoveWake(ctx context.Context, db *sql.DB, unitID string) error {
 	return nil
 }
 
+// WakeRegion 是一个有唤醒排期的 (world, region)（region-runner 遍历它们逐个推进）。
+type WakeRegion struct {
+	WorldID  string
+	RegionID string
+}
+
+// DistinctWakeRegions 列出唤醒队列里出现过的不同 (world_id, region_id)，供 region-runner 枚举待推进的 region。
+// 空队列返回空列表（runner 据此空转，零负载）。
+func DistinctWakeRegions(ctx context.Context, db *sql.DB) ([]WakeRegion, error) {
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT world_id, region_id FROM agent_wake_queue WHERE region_id IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("list distinct wake regions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]WakeRegion, 0)
+	for rows.Next() {
+		var worldID, regionID sql.NullString
+		if err := rows.Scan(&worldID, &regionID); err != nil {
+			return nil, fmt.Errorf("scan wake region: %w", err)
+		}
+		out = append(out, WakeRegion{WorldID: worldID.String, RegionID: regionID.String})
+	}
+	return out, rows.Err()
+}
+
 // ListDueWakes 拉某 (world,region) 内到点（wake_at_tick <= currentTick）的唤醒排期，按 wake_at_tick 升序（最该醒的先）。
 // worldID 为空时不按 world 过滤（MVP 单世界 / region_id 全局唯一）；非空时加 world_id 限定，避免跨世界同名 region 串唤醒。
 func ListDueWakes(ctx context.Context, db *sql.DB, worldID string, regionID string, currentTick int64, limit int) ([]WakeEntry, error) {
@@ -152,20 +180,55 @@ func ListDueWakes(ctx context.Context, db *sql.DB, worldID string, regionID stri
 	return out, rows.Err()
 }
 
+// rowExecer 是 INSERT 决策作业所需的最小依赖（*sql.DB 或 *sql.Tx 均满足），让入队逻辑可在事务内复用。
+type rowExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// insertPendingJob 在给定执行器上插一条 pending 作业，返回 ID。供 EnqueueJob（裸 db）与 PromoteWakeToJob（事务）复用。
+func insertPendingJob(ctx context.Context, exec rowExecer, job DecisionJob) (string, error) {
+	id := job.ID
+	if id == "" {
+		id = uuid.NewString()
+	}
+	if _, err := exec.ExecContext(ctx, `
+		INSERT INTO agent_decision_jobs (id, unit_id, session_id, world_id, region_id, status, tick, attempt, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, job.UnitID, nullable(job.SessionID), nullable(job.WorldID), nullable(job.RegionID), StatusPending, job.Tick, job.Attempt, nowTS()); err != nil {
+		return "", fmt.Errorf("enqueue decision job for %s: %w", job.UnitID, err)
+	}
+	return id, nil
+}
+
 // EnqueueJob 入队一条 pending 决策作业，返回作业 ID。
 func EnqueueJob(ctx context.Context, db *sql.DB, job DecisionJob) (string, error) {
 	if job.UnitID == "" {
 		return "", fmt.Errorf("enqueue job: empty unit id")
 	}
-	id := job.ID
-	if id == "" {
-		id = uuid.NewString()
+	return insertPendingJob(ctx, db, job)
+}
+
+// PromoteWakeToJob 把一条到点的唤醒**原子地**出队成决策作业：单事务内 DELETE wake + INSERT pending job。
+// 杜绝「删了 wake 却没入 job」（两步非事务在崩溃/出错缺口下让单位永久丢失、再不被唤醒）。返回作业 ID。
+// region-runner schedulePass 用它替代裸 RemoveWake+EnqueueJob 两步。双驱动：BeginTx 在 SQLite(单连接)/MySQL 均原子。
+func PromoteWakeToJob(ctx context.Context, db *sql.DB, w WakeEntry, tick int64) (string, error) {
+	if w.UnitID == "" {
+		return "", fmt.Errorf("promote wake: empty unit id")
 	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO agent_decision_jobs (id, unit_id, session_id, world_id, region_id, status, tick, attempt, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, job.UnitID, nullable(job.SessionID), nullable(job.WorldID), nullable(job.RegionID), StatusPending, job.Tick, job.Attempt, nowTS()); err != nil {
-		return "", fmt.Errorf("enqueue decision job for %s: %w", job.UnitID, err)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("promote wake (begin tx): %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_wake_queue WHERE unit_id = ?`, w.UnitID); err != nil {
+		return "", fmt.Errorf("promote wake (remove): %w", err)
+	}
+	id, err := insertPendingJob(ctx, tx, DecisionJob{UnitID: w.UnitID, SessionID: w.SessionID, WorldID: w.WorldID, RegionID: w.RegionID, Tick: tick})
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("promote wake (commit): %w", err)
 	}
 	return id, nil
 }
