@@ -218,6 +218,65 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 	return items, rows.Err()
 }
 
+// FateFeedItem 是命运四槽界面的一张卡（高光/待决策/回响）。
+type FateFeedItem struct {
+	Kind       string `json:"kind"`        // highlight / pending / echo
+	DecisionID string `json:"decision_id"` // pending 时可处理
+	Narrative  string `json:"narrative"`
+	OccurredAt string `json:"occurred_at"`
+}
+
+// OpenFateFeed 返回某角色命运四槽的最近卡片（高光 + 未决待决策 + 回响），按时间倒序。供前端首屏渲染。
+func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit int) ([]FateFeedItem, error) {
+	if service == nil || service.db == nil {
+		return nil, fmt.Errorf("open fate feed: missing db")
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	resolved, err := service.resolvedDecisionIDs(ctx, unitID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := service.db.QueryContext(ctx, `
+		SELECT reason_code, payload_json, occurred_at FROM events
+		WHERE actor_unit_id = ? AND reason_code IN (?, ?, ?)
+		ORDER BY occurred_at DESC LIMIT ?`,
+		unitID, string(events.ReasonInboxHighlight), string(events.ReasonPendingDecision), string(events.ReasonEchoLink), limit)
+	if err != nil {
+		return nil, fmt.Errorf("query fate feed: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]FateFeedItem, 0)
+	for rows.Next() {
+		var code, payloadJSON, occurredAt string
+		if err := rows.Scan(&code, &payloadJSON, &occurredAt); err != nil {
+			return nil, fmt.Errorf("scan fate feed: %w", err)
+		}
+		var payload struct {
+			DecisionID string `json:"decision_id"`
+			Narrative  string `json:"narrative"`
+		}
+		_ = json.Unmarshal([]byte(payloadJSON), &payload)
+		item := FateFeedItem{Narrative: payload.Narrative, OccurredAt: occurredAt}
+		switch code {
+		case string(events.ReasonPendingDecision):
+			if payload.DecisionID == "" || resolved[payload.DecisionID] {
+				continue // 已处理的待决策不再展示
+			}
+			item.Kind = "pending"
+			item.DecisionID = payload.DecisionID
+		case string(events.ReasonEchoLink):
+			item.Kind = "echo"
+		default:
+			item.Kind = "highlight"
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 // ResolveFateDecision 把一条待决策标记为已处理（写 DECISION_RESOLVED 留痕）。
 func (service *Service) ResolveFateDecision(ctx context.Context, sessionID string, unitID string, decisionID string, resolveType string) error {
 	if service == nil || service.db == nil {

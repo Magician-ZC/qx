@@ -1166,6 +1166,24 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"inbox": items})
 	})
+	// 命运四槽首屏：某角色最近的高光/待决策/回响卡。
+	router.GET("/api/fate/feed/:unitId", func(c *gin.Context) {
+		items, err := newSessionService().OpenFateFeed(c.Request.Context(), c.Param("unitId"), 30)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"feed": items})
+	})
+	// 角色状态卡：读单个单位（命运四槽的「状态卡」用）。
+	router.GET("/api/units/:id", func(c *gin.Context) {
+		rec, err := unit.NewRepository(deps.Store).GetByID(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"unit": rec})
+	})
 	router.POST("/api/fate/decisions/:decisionId/resolve", func(c *gin.Context) {
 		var request struct {
 			SessionID   string `json:"session_id"`
