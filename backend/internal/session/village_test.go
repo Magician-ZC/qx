@@ -1,0 +1,67 @@
+package session
+
+// 文件说明：出生关系网落库集成测试（对真实 SQLite）：20 人 + 入世界 + 织关系 + 可复现。
+
+import (
+	"context"
+	"testing"
+
+	"qunxiang/backend/internal/villageseed"
+	"qunxiang/backend/internal/world"
+)
+
+func TestSeedVillagePersists(t *testing.T) {
+	db, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid, err := world.Create(ctx, service.db, world.World{Name: "出生世界"})
+	if err != nil {
+		t.Fatalf("建世界失败: %v", err)
+	}
+
+	villagers, err := service.SeedVillage(ctx, "s1", "player", wid, 7)
+	if err != nil {
+		t.Fatalf("播种村庄失败: %v", err)
+	}
+	if len(villagers) != villageseed.VillageSize {
+		t.Fatalf("应落库 %d 人，得到 %d", villageseed.VillageSize, len(villagers))
+	}
+
+	// 人确实落库，且人格/生平持久化。
+	first := villagers[0]
+	rec, err := repo.GetByID(ctx, first.UnitID)
+	if err != nil {
+		t.Fatalf("取村民失败: %v", err)
+	}
+	if rec.Identity.Name != first.Member.Name {
+		t.Fatalf("姓名应一致：%q vs %q", rec.Identity.Name, first.Member.Name)
+	}
+	if rec.Personality.Courage != first.Member.Traits.Courage {
+		t.Fatalf("人格应持久化：%v vs %v", rec.Personality.Courage, first.Member.Traits.Courage)
+	}
+	if rec.Identity.Biography == "" || rec.Identity.Lineage == "" {
+		t.Fatalf("生平/出身应写入：%+v", rec.Identity)
+	}
+
+	// 全员入世界。
+	members, _ := world.Members(ctx, service.db, wid, 0)
+	if len(members) != villageseed.VillageSize {
+		t.Fatalf("应有 %d 人入世界，得到 %d", villageseed.VillageSize, len(members))
+	}
+
+	// 关系网落库（relations 表非空）。
+	var relCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relations`).Scan(&relCount); err != nil {
+		t.Fatalf("统计 relations 失败: %v", err)
+	}
+	if relCount == 0 {
+		t.Fatalf("出生关系网应落 relations 行")
+	}
+
+	// 可复现：落库的人名序列应与纯生成器一致。
+	gen := villageseed.Generate(wid, 7)
+	for i, vv := range villagers {
+		if vv.Member.Name != gen.Members[i].Name {
+			t.Fatalf("第 %d 人应与生成器一致：%q vs %q", i, vv.Member.Name, gen.Members[i].Name)
+		}
+	}
+}
