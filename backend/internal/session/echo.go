@@ -152,5 +152,11 @@ func (service *Service) SurfaceEcho(ctx context.Context, sessionID string, unitI
 	}); err != nil {
 		return false, err
 	}
+	// 实时推送回响卡到前端的「回响带」（best-effort）。
+	service.pushRealtime(sessionID, "fate_echo", map[string]any{
+		"unit_id":   unitID,
+		"narrative": card,
+		"valence":   valence,
+	})
 	return true, nil
 }

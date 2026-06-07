@@ -81,6 +81,7 @@ type Service struct {
 
 	asyncExecution   bool
 	progressReporter func(reason string, snapshot Snapshot, extra map[string]any)
+	broadcaster      Broadcaster
 	sessionSaveMu    sync.Mutex
 
 	coldSchemaMu    sync.Mutex
@@ -116,6 +117,27 @@ func NewServiceWithColdStore(db *sql.DB, llm completionClient, coldStore *sql.DB
 		memoryRefreshTurn: map[string]int{},
 		memoryRecallTurn:  map[string]int{},
 	}
+}
+
+// Broadcaster 向某会话的所有订阅客户端推送实时事件（*ws.Hub 结构上即满足，无需 session 依赖 ws）。
+type Broadcaster interface {
+	BroadcastSessionEvent(sessionID string, eventType string, payload any) int
+}
+
+// SetBroadcaster 注册实时广播器（用于命运收件箱/回响的 WS 实时推送）。
+func (service *Service) SetBroadcaster(b Broadcaster) {
+	if service == nil {
+		return
+	}
+	service.broadcaster = b
+}
+
+// pushRealtime 向会话订阅者推送一条实时事件（best-effort，无广播器则静默跳过）。
+func (service *Service) pushRealtime(sessionID string, eventType string, payload any) {
+	if service == nil || service.broadcaster == nil || sessionID == "" {
+		return
+	}
+	service.broadcaster.BroadcastSessionEvent(sessionID, eventType, payload)
 }
 
 // SetProgressReporter 注册进度回调，用于向前端推送增量快照事件。

@@ -124,6 +124,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		service := session.NewServiceWithColdStore(deps.Store, deps.AI, deps.ColdStore)
 		service.SetAsyncExecution(true)
 		service.SetProgressReporter(broadcastSessionProgress)
+		service.SetBroadcaster(hub) // 命运收件箱/回响卡的 WS 实时推送
 		// 开启归因强制：无源戏剧性自治选择优雅回退安全决策（设计宪法 §5）。
 		// 遥测见 Service.AttributionStats()；若线上 OOC 率过高可改回 false。
 		service.SetAttributionEnforcement(true)

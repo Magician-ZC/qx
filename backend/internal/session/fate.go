@@ -167,6 +167,14 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 			Props: map[string]any{"decision_id": out.DecisionID, "relevance": rel},
 		})
 	}
+	// 实时推送（best-effort）：让前端命运收件箱无需轮询即可即时看到新的高光/待决策卡。
+	service.pushRealtime(sessionID, "fate_inbox", map[string]any{
+		"unit_id":     owner.ID,
+		"route":       string(route),
+		"decision_id": out.DecisionID,
+		"narrative":   out.Card,
+		"relevance":   rel,
+	})
 	return out, nil
 }
 
