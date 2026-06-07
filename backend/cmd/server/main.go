@@ -54,10 +54,13 @@ func main() {
 
 	// 大世界 region-runner（M7.3-real-1，默认关闭、纯影子）：按真实时钟低频唤醒离线单位决策。
 	// QUNXIANG_REGION_RUNNER_ENABLED=true 才启动；QUNXIANG_REGION_TICK_SECONDS 设逻辑 tick 的秒长（默认 30）。
+	// Apply=false 时纯 shadow（只记日志，real-1）；QUNXIANG_REGION_RUNNER_APPLY=true 才真应用 L1 决策（real-2 灰度）。
 	regionRunner := regionrunner.New(db, regionrunner.Config{
 		Enabled:     envBool("QUNXIANG_REGION_RUNNER_ENABLED"),
+		Apply:       envBool("QUNXIANG_REGION_RUNNER_APPLY"),
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
+	regionRunner.SetExecutionGuard(session.IsExecutionRunning) // 让位聚焦战斗：在战会话的单位由战斗循环管
 	accountService := account.NewService(db, cfg.AuthTokenTTL)
 	if err := accountService.EnsureSchema(context.Background()); err != nil {
 		logger.Error("ensure account schema on sqlite", "error", err)

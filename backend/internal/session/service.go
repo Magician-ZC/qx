@@ -968,6 +968,11 @@ func unmarkAsyncExecutionRunning(sessionID string) {
 	asyncExecutionRegistry.Unlock()
 }
 
+// IsExecutionRunning 导出进程级「某会话正在聚焦战斗执行」判定，供 region-runner 让位战斗（不打扰在战单位）。
+func IsExecutionRunning(sessionID string) bool {
+	return isAsyncExecutionRunning(sessionID)
+}
+
 func isAsyncExecutionRunning(sessionID string) bool {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {

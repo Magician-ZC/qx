@@ -15,6 +15,7 @@ package unit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 )
@@ -55,6 +56,19 @@ func (repository *Repository) TouchLastActiveTick(ctx context.Context, unitID st
 		return fmt.Errorf("touch unit last_active_tick %s: %w", unitID, err)
 	}
 	return nil
+}
+
+// SchedulingState 读单位的调度态：last_active_tick（冷热分层用）+ life_state（跳过死/倒地用）。
+// 这两列是去规范化调度列，不在 Record blob 里，故单独读。
+func (repository *Repository) SchedulingState(ctx context.Context, unitID string) (lastActiveTick int64, lifeState string, err error) {
+	var life sql.NullString
+	if err := repository.db.QueryRowContext(ctx, `SELECT last_active_tick, life_state FROM units WHERE id = ?`, unitID).Scan(&lastActiveTick, &life); err != nil {
+		return 0, "", fmt.Errorf("get unit scheduling state %s: %w", unitID, err)
+	}
+	if life.String == "" {
+		return lastActiveTick, LifeStateActive, nil
+	}
+	return lastActiveTick, life.String, nil
 }
 
 // CountActiveByRegion 统计某 region 内生命态为 active 的单位数（调度容量/背压判定用，避免拉全量记录）。

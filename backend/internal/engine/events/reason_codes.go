@@ -19,12 +19,12 @@ type Category string
 
 // 常量定义区：集中声明该文件使用的共享配置。
 const (
-	CategoryCombat   Category = "combat_damage"
-	CategorySurvival Category = "survival_consumption"
-	CategoryEmotion  Category = "emotion_event"
-	CategoryEconomy  Category = "economy_material"
-	CategoryRelation Category = "relation_change"
-	CategoryCommand  Category = "command_response"
+	CategoryCombat    Category = "combat_damage"
+	CategorySurvival  Category = "survival_consumption"
+	CategoryEmotion   Category = "emotion_event"
+	CategoryEconomy   Category = "economy_material"
+	CategoryRelation  Category = "relation_change"
+	CategoryCommand   Category = "command_response"
 	CategoryFate      Category = "fate_event"      // 命运流程事件（相关性命中/待决策入队等，非状态变更）
 	CategoryPlayer    Category = "player_action"   // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
 	CategoryLifecycle Category = "lifecycle_event" // 大世界生命周期（出生/死亡/复仇得偿/势力崩塌/人格漂移，沙盘 §8.7）
@@ -39,6 +39,8 @@ const (
 	ReasonCombatDown      ReasonCode = "COMBAT_DOWN"
 	ReasonSurvivalMarch   ReasonCode = "SURVIVAL_MARCH_EXHAUST"
 	ReasonSurvivalHunger  ReasonCode = "SURVIVAL_HUNGER"
+	ReasonAmbientForage   ReasonCode = "AMBIENT_FORAGE" // 大世界离线自治：饿了在野外觅食补口粮（region-runner L1，§8.2）
+	ReasonAmbientRest     ReasonCode = "AMBIENT_REST"   // 大世界离线自治：日常起居的缓慢口粮消耗（中性，区别于"补给不足"的 SURVIVAL_HUNGER）
 	ReasonEmotionTrauma   ReasonCode = "EMOTION_TRAUMA"
 	ReasonEmotionReward   ReasonCode = "EMOTION_REWARD"
 	ReasonEconomyPurchase ReasonCode = "ECONOMY_PURCHASE"
@@ -90,6 +92,8 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCombatDown, Category: CategoryCombat, DisplayName: "倒地濒死", DefaultReasonText: "在战斗中被打至倒地", StatDomains: []string{"hp", "lives_remaining"}, ImportanceMin: 8, ImportanceMax: 10},
 		{Code: ReasonSurvivalMarch, Category: CategorySurvival, DisplayName: "行军透支", DefaultReasonText: "连续行军导致疲劳上升", StatDomains: []string{"fatigue"}, ImportanceMin: 2, ImportanceMax: 4},
 		{Code: ReasonSurvivalHunger, Category: CategorySurvival, DisplayName: "饥饿消耗", DefaultReasonText: "补给不足导致饥饿加深", StatDomains: []string{"hunger"}, ImportanceMin: 2, ImportanceMax: 4},
+		{Code: ReasonAmbientForage, Category: CategorySurvival, DisplayName: "野外觅食", DefaultReasonText: "她在战斗之外觅食，补充了口粮", StatDomains: []string{"hunger"}, ImportanceMin: 2, ImportanceMax: 4},
+		{Code: ReasonAmbientRest, Category: CategorySurvival, DisplayName: "日常消耗", DefaultReasonText: "她在战斗之外的日常起居里消耗了些口粮", StatDomains: []string{"hunger"}, ImportanceMin: 1, ImportanceMax: 2},
 		{Code: ReasonEmotionTrauma, Category: CategoryEmotion, DisplayName: "创伤事件", DefaultReasonText: "目睹惨烈事件后情绪受挫", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 9},
 		{Code: ReasonEmotionReward, Category: CategoryEmotion, DisplayName: "荣誉奖励", DefaultReasonText: "获得奖励后士气提升", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 8},
 		{Code: ReasonEconomyPurchase, Category: CategoryEconomy, DisplayName: "物资购买", DefaultReasonText: "花费金币购入物资", StatDomains: []string{"wallet"}, ImportanceMin: 2, ImportanceMax: 5},

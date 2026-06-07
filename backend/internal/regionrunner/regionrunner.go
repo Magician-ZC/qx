@@ -19,12 +19,23 @@ import (
 	"time"
 
 	"qunxiang/backend/internal/agentqueue"
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/scheduler"
+	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/unit"
+)
+
+// L1 觅食/休息生存循环参数（real-2，§8.2 动机栈 L1）：饿则觅食补口粮，否则休息（缓慢消耗）。
+const (
+	forageThreshold = 40 // hunger < 此值即觅食
+	forageGain      = 30 // 觅食补充的 hunger
+	restConsume     = 3  // 休息每次消耗的 hunger（缓慢变饿，驱动下次觅食）
 )
 
 // Config 是 region-runner 的运行参数。零值字段由 New 兜底为安全默认。
 type Config struct {
 	Enabled      bool          // 是否启动（main 按 QUNXIANG_REGION_RUNNER_ENABLED 设）
+	Apply        bool          // false=shadow（只记日志，real-1）；true=真应用 L1 决策（real-2，QUNXIANG_REGION_RUNNER_APPLY）
 	TickInterval time.Duration // 真实时钟每隔多久跑一次调度 pass
 	TickSeconds  int64         // 1 个逻辑 tick = 多少真实秒（wake_at_tick 的时间单位）
 	Workers      int           // worker 池 goroutine 数
@@ -62,23 +73,43 @@ func (c Config) withDefaults() Config {
 // stats 是进程内累计遥测（原子）。
 type stats struct {
 	ticks, enqueued, claimed, completed, reclaimed, failed, backpressured int64
+	foraged, rested, deferred, dropped                                    int64 // real-2 应用态：觅食/休息/让位战斗/丢弃(逝者或删档)
 }
 
 // Runner 是 region-runner 引擎实例。
 type Runner struct {
-	db  *sql.DB
-	cfg Config
-	log *slog.Logger
-	now func() time.Time // 注入式时钟（测试用固定时钟）
-	st  stats
+	db        *sql.DB
+	cfg       Config
+	log       *slog.Logger
+	now       func() time.Time  // 注入式时钟（测试用固定时钟）
+	units     *unit.Repository  // 读单位（觅食/休息决策）
+	mutator   *status.Mutator   // 经它改饥饿等保护字段、留痕
+	execGuard func(string) bool // 让位战斗：某会话在聚焦执行中则跳过其单位（默认恒 false）
+	st        stats
 }
 
-// New 构造 region-runner。now 为 nil 时用 time.Now。
+// New 构造 region-runner。now 用 time.Now；execGuard 默认恒 false（无战斗让位，测试/未接 session 时）。
 func New(db *sql.DB, cfg Config, log *slog.Logger) *Runner {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Runner{db: db, cfg: cfg.withDefaults(), log: log, now: time.Now}
+	units := unit.NewRepository(db)
+	return &Runner{
+		db:        db,
+		cfg:       cfg.withDefaults(),
+		log:       log,
+		now:       time.Now,
+		units:     units,
+		mutator:   status.NewMutator(db, units),
+		execGuard: func(string) bool { return false },
+	}
+}
+
+// SetExecutionGuard 注入「会话是否在聚焦战斗执行中」判定（main 接 session.IsExecutionRunning），用于让位战斗。
+func (r *Runner) SetExecutionGuard(guard func(string) bool) {
+	if guard != nil {
+		r.execGuard = guard
+	}
 }
 
 // withClock 注入时钟（测试用）。
@@ -130,8 +161,8 @@ func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 	return enqueued, nil
 }
 
-// processOne 让一个 worker 原子认领并处理一条作业。**shadow 模式**：不应用决策、不改单位，只记日志 + 重排唤醒 + 完成。
-// 返回是否处理了一条（false 表示队列空）。
+// processOne 让一个 worker 原子认领并处理一条作业：派发给 handleJob（shadow 记日志 / apply 真应用 L1），
+// 据其返回决定是否重排唤醒，最后完成作业。返回是否处理了一条（false 表示队列空）。
 func (r *Runner) processOne(ctx context.Context) (bool, error) {
 	job, err := agentqueue.ClaimNextJob(ctx, r.db)
 	if err != nil {
@@ -142,18 +173,15 @@ func (r *Runner) processOne(ctx context.Context) (bool, error) {
 	}
 	atomic.AddInt64(&r.st.claimed, 1)
 
-	// SHADOW（real-1）：此处本应跑分层决策（反射层/LLM）并经 Mutator 应用，现仅记日志、不触碰单位状态。
-	r.log.Debug("region-runner shadow decision", "unit", job.UnitID, "session", job.SessionID, "tick", job.Tick)
-
-	// 重排该单位下次唤醒。shadow 无单位 last-active 可读，按 WARM 节奏重排（避免 HOT 每 tick churn）；
-	// real-2 接单位后改为按 last_active_tick 的真实冷热分层（scheduler.PlanNextWake）。
-	tier := scheduler.TierWarm
-	next := scheduler.NextWakeTick(tier, r.currentTick())
-	if err := agentqueue.EnqueueWake(ctx, r.db, agentqueue.WakeEntry{
-		UnitID: job.UnitID, SessionID: job.SessionID, WorldID: job.WorldID, RegionID: job.RegionID,
-		WakeAtTick: next, Tier: string(tier),
-	}); err != nil {
-		r.log.Warn("region-runner re-enqueue wake", "unit", job.UnitID, "error", err)
+	tier, reschedule := r.handleJob(ctx, job)
+	if reschedule {
+		next := scheduler.NextWakeTick(tier, r.currentTick())
+		if err := agentqueue.EnqueueWake(ctx, r.db, agentqueue.WakeEntry{
+			UnitID: job.UnitID, SessionID: job.SessionID, WorldID: job.WorldID, RegionID: job.RegionID,
+			WakeAtTick: next, Tier: string(tier),
+		}); err != nil {
+			r.log.Warn("region-runner re-enqueue wake", "unit", job.UnitID, "error", err)
+		}
 	}
 
 	if err := agentqueue.CompleteJob(ctx, r.db, job.ID, agentqueue.StatusDone); err != nil {
@@ -161,6 +189,94 @@ func (r *Runner) processOne(ctx context.Context) (bool, error) {
 	}
 	atomic.AddInt64(&r.st.completed, 1)
 	return true, nil
+}
+
+// handleJob 处理一条作业，返回 (下次唤醒分层, 是否重排)。
+//   - shadow（!cfg.Apply）：只记日志、不碰单位，固定 WARM 重排。
+//   - apply（cfg.Apply）：跑 L1 反射决策并经 Mutator 应用，按真实冷热分层重排；单位已逝/在战则不重排或让位。
+func (r *Runner) handleJob(ctx context.Context, job *agentqueue.DecisionJob) (scheduler.Tier, bool) {
+	if !r.cfg.Apply {
+		r.log.Debug("region-runner shadow decision", "unit", job.UnitID, "session", job.SessionID, "tick", job.Tick)
+		return scheduler.TierWarm, true
+	}
+	return r.applyAmbientL1(ctx, job)
+}
+
+// applyAmbientL1 跑 L1 反射决策（觅食/休息生存循环）并经 Mutator 应用。返回 (下次分层, 是否重排)。
+//
+// ⚠️ 并发前置（评审 load-bearing，real-3 硬化前必读）：Mutator.Apply 是 GetByID→改→Save 的读改写（整 status_json
+// 全量写、无单位级锁），与战斗循环/HTTP 对同一单位的全量 Save 并发时存在「后写覆盖」丢更新。本步靠 ①让位战斗
+// （execGuard，下面在改前再查一次收窄窗口）②默认 Apply=false 兜底。**在任何会被战斗循环触达的会话开启 Apply 前，
+// 必须先落地单位级串行化（进程级 per-session 锁）或乐观并发（Save … WHERE updated_at=?）**——否则会丢战斗的 HP/士气改动。
+func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob) (scheduler.Tier, bool) {
+	tick := r.currentTick()
+
+	// 生命态/存在性优先判定（先于让位战斗，故逝者/删档无论是否在战都尽早清出调度）。
+	lastActive, lifeState, err := r.units.SchedulingState(ctx, job.UnitID)
+	if err != nil {
+		// 单位已不存在（删档/清理）→ 不重排，自然退出调度。
+		r.log.Debug("region-runner unit gone, drop", "unit", job.UnitID, "error", err)
+		atomic.AddInt64(&r.st.dropped, 1)
+		return scheduler.TierCold, false
+	}
+	switch lifeState {
+	case unit.LifeStateActive:
+		// 继续日常决策。
+	case unit.LifeStateDead:
+		// 已逝：永久退出日常调度（死亡走世界化，不归 region-runner）→ 不重排。
+		atomic.AddInt64(&r.st.dropped, 1)
+		return scheduler.TierCold, false
+	default:
+		// 倒地/恢复中等**暂态**：不动单位，但 COLD 低频回查——恢复为 active 后会重新进入日常觅食/休息，
+		// 不能像逝者那样 drop（否则恢复后再无 wake、永久脱离离线模拟）。
+		return scheduler.TierCold, true
+	}
+
+	// 让位战斗：会话在聚焦执行中 → 不打扰，HOT 稍后重试（避免与战斗循环并发改同一单位）。
+	if r.execGuard(job.SessionID) {
+		atomic.AddInt64(&r.st.deferred, 1)
+		return scheduler.TierHot, true
+	}
+
+	record, err := r.units.GetByID(ctx, job.UnitID)
+	if err != nil {
+		atomic.AddInt64(&r.st.dropped, 1)
+		return scheduler.TierCold, false
+	}
+	if record.Status.InCombat {
+		atomic.AddInt64(&r.st.deferred, 1)
+		return scheduler.TierHot, true
+	}
+	// 改前再查一次让位（收窄 RMW 竞态窗口：战斗可能在上面两次 DB 读期间刚启动）。
+	if r.execGuard(job.SessionID) {
+		atomic.AddInt64(&r.st.deferred, 1)
+		return scheduler.TierHot, true
+	}
+
+	// L1 反射决策（零 LLM）：饿则觅食补口粮（HOT 盯到吃饱），否则日常消耗（缓慢变饿，驱动下次觅食，自然降温至 COLD）。
+	if record.Status.Hunger < forageThreshold {
+		if _, err := r.mutator.Apply(ctx, status.Mutation{
+			UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: forageGain,
+			ReasonCode: events.ReasonAmbientForage,
+		}); err != nil {
+			r.log.Warn("region-runner forage mutate", "unit", job.UnitID, "error", err)
+			return scheduler.ClassifyTier(tick, lastActive), true
+		}
+		atomic.AddInt64(&r.st.foraged, 1)
+		if err := r.units.TouchLastActiveTick(ctx, job.UnitID, tick); err != nil {
+			r.log.Warn("region-runner touch last active", "unit", job.UnitID, "error", err)
+		}
+		return scheduler.TierHot, true
+	}
+	if _, err := r.mutator.Apply(ctx, status.Mutation{
+		UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: -restConsume,
+		ReasonCode: events.ReasonAmbientRest,
+	}); err != nil {
+		r.log.Warn("region-runner rest mutate", "unit", job.UnitID, "error", err)
+	} else {
+		atomic.AddInt64(&r.st.rested, 1)
+	}
+	return scheduler.ClassifyTier(tick, lastActive), true
 }
 
 // reclaim 跑一次 stale-running 回收，累计遥测。
@@ -262,7 +378,7 @@ func (r *Runner) processOneRecovered(ctx context.Context) (worked bool, err erro
 func (r *Runner) Stats() map[string]any {
 	return map[string]any{
 		"enabled":       r.cfg.Enabled,
-		"shadow":        true, // real-1 恒 shadow（不应用决策）
+		"shadow":        !r.cfg.Apply, // Apply=false 即 shadow（只记日志不应用）
 		"current_tick":  r.currentTick(),
 		"ticks":         atomic.LoadInt64(&r.st.ticks),
 		"enqueued":      atomic.LoadInt64(&r.st.enqueued),
@@ -271,5 +387,9 @@ func (r *Runner) Stats() map[string]any {
 		"reclaimed":     atomic.LoadInt64(&r.st.reclaimed),
 		"failed":        atomic.LoadInt64(&r.st.failed),
 		"backpressured": atomic.LoadInt64(&r.st.backpressured),
+		"foraged":       atomic.LoadInt64(&r.st.foraged),
+		"rested":        atomic.LoadInt64(&r.st.rested),
+		"deferred":      atomic.LoadInt64(&r.st.deferred),
+		"dropped":       atomic.LoadInt64(&r.st.dropped),
 	}
 }
