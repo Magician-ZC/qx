@@ -205,3 +205,19 @@ CREATE TABLE IF NOT EXISTS world_members (
 );
 
 CREATE INDEX IF NOT EXISTS idx_world_members_character ON world_members(character_unit_id);
+
+-- 世界Boss：全世界共享一个血池的协作目标（设计文档 docs/PvE威胁系统.md 世界Boss）。
+-- 异步参战——不同玩家的角色在不同时间各自出手，每次出手记进世界总线(WORLD_BOSS_STRIKE)，
+-- 总线即贡献账本；血池清零时按账本全员分赃并广播 WORLD_BOSS_DEFEATED。hp_remaining 的原子递减 + 单次结算闩锁防双结算。
+CREATE TABLE IF NOT EXISTS world_bosses (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  hp_max INTEGER NOT NULL,
+  hp_remaining INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  region_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_bosses_world ON world_bosses(world_id, status);

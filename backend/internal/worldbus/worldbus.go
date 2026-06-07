@@ -114,6 +114,20 @@ func ListByWorld(ctx context.Context, q Querier, worldID string, limit int) ([]C
 	return scanCrossEvents(rows)
 }
 
+// ListByWorldKind 返回某世界某类型的全部跨事件，按权威顺序，**不设默认上限**——
+// 用于结算等必须读到完整账本的场景（worldboss 贡献账本若被 LIMIT 截断会少分赃）。
+func ListByWorldKind(ctx context.Context, q Querier, worldID string, kind EventKind) ([]CrossEvent, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, world_id, actor_unit_id, target_unit_id, event_kind, region_id, importance, world_tick, payload_json, occurred_at
+		FROM cross_events WHERE world_id = ? AND event_kind = ?
+		ORDER BY world_tick ASC, occurred_at ASC, id ASC`, worldID, string(kind))
+	if err != nil {
+		return nil, fmt.Errorf("worldbus list by world kind: %w", err)
+	}
+	defer rows.Close()
+	return scanCrossEvents(rows)
+}
+
 // ListForCharacter 返回某角色作为 actor 或 target 牵涉到的跨玩家事件（喂给命运收件箱的跨玩家关联）。
 func ListForCharacter(ctx context.Context, q Querier, worldID string, characterID string, limit int) ([]CrossEvent, error) {
 	if limit <= 0 {

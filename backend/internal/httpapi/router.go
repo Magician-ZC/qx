@@ -1283,6 +1283,48 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"event_id": id})
 	})
 
+	// 投放一头世界Boss（全世界共享血池的协作目标）。
+	router.POST("/api/worlds/:worldId/bosses", func(c *gin.Context) {
+		var body struct {
+			Name     string `json:"name"`
+			HP       int    `json:"hp"`
+			RegionID string `json:"region_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := newSessionService().SpawnWorldBoss(c.Request.Context(), c.Param("worldId"), body.Name, body.HP, body.RegionID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"boss_id": id})
+	})
+
+	// 对世界Boss出手一次（异步协作：原子扣血→记总线→血池清零则全员分赃）。真实动作。
+	router.POST("/api/worlds/:worldId/bosses/:bossId/strike", func(c *gin.Context) {
+		var body struct {
+			AttackerID string `json:"attacker_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		svc := newSessionService()
+		attacker, err := unit.NewRepository(deps.Store).GetByID(c.Request.Context(), body.AttackerID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := svc.StrikeWorldBoss(c.Request.Context(), c.Param("worldId"), c.Param("bossId"), &attacker)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"strike": result})
+	})
+
 	// C-15: client only sends input, server remains the authoritative state owner.
 	router.GET("/ws", hub.Handle)
 
