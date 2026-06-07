@@ -58,6 +58,8 @@ type unitDecisionChoicePayload struct {
 	Memory        string             `json:"memory,omitempty"`
 	Knowledge     string             `json:"knowledge,omitempty"`
 	Reasoning     string             `json:"reasoning"`
+	// Attribution 可选：「她为什么这么选」的结构化归因，经 engine/decision 校验「意外但合理」。
+	Attribution *attributionPayload `json:"attribution,omitempty"`
 }
 
 // unitDecisionPayload 结构体用于承载该模块的核心数据。
@@ -270,6 +272,19 @@ func (service *Service) generateUnitDecision(
 	if err := validateDecision(state, byID, actor, targetIDs, decision, remainingAP); err != nil {
 		cause := fmt.Errorf("invalid unit decision: %w", err)
 		return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+	}
+
+	// 归因校验（engine/decision，「意外但合理」的代码强制，设计宪法 §5）。
+	// 默认影子模式：仅计入 OOC 遥测，不阻断决策；开启强制后，无源戏剧性归因回退安全决策。
+	if verdict, has := service.checkAttribution(actor, choice); has {
+		service.attrTotal.Add(1)
+		if !verdict.OK {
+			service.attrOOC.Add(1)
+			if service.attributionEnforced {
+				cause := fmt.Errorf("attribution rejected as OOC: %s", verdict.Reason)
+				return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+			}
+		}
 	}
 
 	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
@@ -1065,6 +1080,7 @@ func buildUnitDecisionSchema(candidates []decisionCandidate) []byte {
 				"type":      "string",
 				"minLength": 1,
 			},
+			"attribution": attributionDecisionSchema(nullableString),
 		},
 		"required":             []string{"action", "next_action", "memory", "reasoning"},
 		"additionalProperties": false,
@@ -1777,6 +1793,7 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "2. next_action 必填，最多 12 个字；speak 必须填写且不能为空，建议小于 %d 个字，要像你本人临场脱口而出。即使选择 hold/defend/observe/move/gather/build/upgrade 等非说话动作，也要写一句短促自语或对身边人的话；选择 say/dialogue 时 speak 应写实际台词。memory 必填，要记录具体事实。\n", llmSpeakPromptLimit)
 	fmt.Fprintln(&builder, "3. 禁止把 speak 留空、写空字符串或省略 speak 字段；如果一时无话可说，也要用角色口吻写一句短句，例如“先稳住”“我去看看”“别急”。")
 	fmt.Fprintln(&builder, "4. reasoning 必填，用一句话说明本次判断受哪些因素影响，例如方针、地形、饥饿、设施、记忆、关系或威胁。knowledge 可选；没学到新规律就留空。")
+	fmt.Fprintln(&builder, "5. attribution 可选：若要说明这次选择的根因，填 attribution.primary.kind 为 persona_trait(人格维：courage/loyalty/aggression/prudence/sociability/integrity/stability/ambition) 或 pressure(现实压力：hunger/threat/injury/fatigue/debt)，ref_id 用对应英文名，weight 0–1，narrative_zh 写一句不超过 40 字的因果说明；不确定就整体省略 attribution，绝不要编造前因。")
 
 	return builder.String()
 }
