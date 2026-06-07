@@ -1194,6 +1194,23 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"encounter": result})
 	})
 
+	// 触发一次组队野外Boss遭遇（多回合消耗战→按贡献分赃含 epic 仲裁/失败各自分级惩罚→各自命运收件箱）。真实动作。
+	router.POST("/api/sessions/:id/field-boss", func(c *gin.Context) {
+		var body struct {
+			UnitIDs []string `json:"unit_ids"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().TriggerFieldBoss(c.Request.Context(), c.Param("id"), body.UnitIDs)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"encounter": result})
+	})
+
 	// C-15: client only sends input, server remains the authoritative state owner.
 	router.GET("/ws", hub.Handle)
 
