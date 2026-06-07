@@ -83,6 +83,7 @@ npm run preview   # 预览生产构建
 
 - `engine/decision`：**决策层路由** `Router.Route(Situation) Decision`——安全反射(L1 护栏)优先 → 关键节点才升级 LLM → 日常零 LLM。把「<2% 上 LLM」从降级模式扶正为常态。
 - `engine/arbitration`：**零和仲裁原语** `Resolve(Contest) Outcome`——胜负仅由 `Score` + 确定性掷骰（FNV+splitmix64+A-Res 加权抽样），**与行动频率/入队顺序无关**，胜率∝Score。这是反 P2W 的机制保证。
+- `engine/decision` 的 `attribution.go`：**「意外但合理」的代码强制**（设计宪法 §5）。`ValidateAttribution(attr, snap)` 要求每个自治选择都带可解析的前因（人格/记忆/红线/关系/压力/回响），无源戏剧性意外判 OOC；`GateSurprise(action, in)` 把突然恋爱/卖传家宝/叛变硬绑前因。
 - `status.Mutator.ApplyBatch`：**批量状态写入**——把「每决策 ~15 次 DB 往返」收敛为「按单位读一次/写一次 + 单事务批量插事件」，与逐次 `Apply` 语义等价。
 - 这些包都有测试（`go test ./internal/engine/...`）。它们是新增能力，尚未全面接入 `session` 执行主链路（属渐进式升级，整合见 GDD §7.3 的引擎升级技术规格）。
 
