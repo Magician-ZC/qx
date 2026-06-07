@@ -165,7 +165,7 @@ Defeat → `ApplyDefeatPenalties`，**每条惩罚先过后果分级闸**（`enc
 ---
 
 ## 12. 落地阶段
-1. **engine 原语**（已落地 `engine/encounter`：贡献/分赃/惩罚闸/单人门）。
-2. **单人 elite/dungeon**（session 内即可：ThreatEvent 容器 + 自治参与 + combat_roll 多回合 + AllocateLoot + 后果分级闸 + relevance 耦合 + 祖魂语气）——**不依赖 World Bus，先落地见效**。
+1. **engine 原语**（✅已落地 `engine/encounter`：贡献/分赃/惩罚闸/单人门）。
+2. **单人 elite**（✅已落地一条链路 `session/threat.go` 的 `Service.ResolveEliteEncounter`：Threat 容器 + 反射护栏 + `combat_roll` 多回合消耗战 + `AllocateLoot` 分赃 + `DegradePenalty` 后果分级闸 + 经 `status.Mutator` 留痕 + 祖魂语气收件箱卡，含 DB 集成测试）——**不依赖 World Bus**。待补：威胁刷新调度、接入执行主循环（`decision.Router` StrategicFork 触发参与）、relevance 锚耦合进收件箱、dungeon 分段异步推进。
 3. **field_boss + 锚加权刷新**。
 4. **world_boss + 组队**（依赖 World Bus / cross_events / social_objects，与大世界 region 化演进同步）：撮合 + 异步补位 + 共享池分赃 + 黑吃黑。
