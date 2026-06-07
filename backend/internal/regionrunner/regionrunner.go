@@ -14,6 +14,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -26,12 +27,87 @@ import (
 	"qunxiang/backend/internal/unit"
 )
 
-// L1 觅食/休息生存循环参数（real-2，§8.2 动机栈 L1）：饿则觅食补口粮，否则休息（缓慢消耗）。
+// ambientAction 是离线自治可选的环境动作（real-4a 把动作空间从觅食/休息扩到含社交/反思，为 real-3 HOT-LLM 备好「值得用 LLM 决」的选择空间）。
+type ambientAction string
+
 const (
-	forageThreshold = 40 // hunger < 此值即觅食
-	forageGain      = 30 // 觅食补充的 hunger
-	restConsume     = 3  // 休息每次消耗的 hunger（缓慢变饿，驱动下次觅食）
+	actForage    ambientAction = "forage"    // 觅食（饿）→ hunger+
+	actRest      ambientAction = "rest"      // 休息（缓慢消耗）→ hunger-
+	actSocialize ambientAction = "socialize" // 社交（士气低→找人攀谈）→ morale+
+	actReflect   ambientAction = "reflect"   // 反思（心满意足→独自沉淀）→ morale 小+
 )
+
+// 动机栈 L1+L3 阈值/增益（§8.2）。morale ∈ [0,1]、hunger ∈ [0,100]。
+const (
+	forageThreshold = 40   // hunger < 此值即觅食
+	forageGain      = 30   // 觅食补充的 hunger
+	restConsume     = 3    // 休息每次消耗的 hunger（缓慢变饿，驱动下次觅食）
+	moraleLow       = 0.4  // morale < 此值倾向社交（找人攀谈舒展心情）
+	moraleHigh      = 0.8  // morale > 此值倾向反思（心满意足独自沉淀）
+	socializeGain   = 0.05 // 社交的 morale 增益
+	reflectGain     = 0.02 // 反思的 morale 增益（更小）
+)
+
+// 字段饱和边界——镜像 status.Mutator 的 clamp 上下界（morale clampFloat[0,1] / hunger clampInt[0,100]，见 mutator.go
+// FieldMorale/FieldHunger）。用于「饱和空写短路」：动作把已达界的字段继续往界外推时，写入会被 clamp 成 before==after 空写。
+const (
+	moraleMin = 0.0
+	moraleMax = 1.0
+	hungerMin = 0
+	hungerMax = 100
+)
+
+// ambientEffect 是一个动作的落地：改哪个字段、增量、reason-code，以及是否「主动响应需求」（决定 HOT 还是降温）。
+type ambientEffect struct {
+	field  status.Field
+	delta  float64
+	reason events.ReasonCode
+	active bool // 主动响应需求（觅食/社交）→ HOT 盯着；被动（休息/反思）→ 自然降温
+}
+
+var ambientEffects = map[ambientAction]ambientEffect{
+	actForage:    {status.FieldHunger, forageGain, events.ReasonAmbientForage, true},
+	actRest:      {status.FieldHunger, -restConsume, events.ReasonAmbientRest, false},
+	actSocialize: {status.FieldMorale, socializeGain, events.ReasonAmbientSocialize, true},
+	actReflect:   {status.FieldMorale, reflectGain, events.ReasonAmbientReflect, false},
+}
+
+// decideAmbientReflex 是零 LLM 的反射层动作选择（也是 real-3 HOT-LLM 失败/预算耗尽时的 fallback）：
+// 饿→觅食；不饿但士气低→社交；心满意足→反思；其余→休息。
+func decideAmbientReflex(record unit.Record) ambientAction {
+	switch {
+	case record.Status.Hunger < forageThreshold:
+		return actForage
+	case record.Status.Morale < moraleLow:
+		return actSocialize
+	case record.Status.Morale > moraleHigh:
+		return actReflect
+	default:
+		return actRest
+	}
+}
+
+// ambientSaturated 判断某动作是否「饱和空写」：字段已在 clamp 边界、效果方向继续往界外推 → 写入后 before==after。
+// 此时应跳过落地（不调 Mutator、不落事件、不计数、不升 HOT），否则满意单位（morale 已达上限仍选反思）会每个 COLD
+// 周期永久空写 AMBIENT_REFLECT，污染 32 槽记忆环、灌垃圾 events 行、reflected 遥测虚增（real-4a 评审 load-bearing）。
+// 用调用方手里已读的 record，零额外 DB 读；stale record 至多多/少跳一个 tick，无正确性影响。实践中只有 reflect 会真正命中
+// （其余动作的触发带都远离各自界），但写成通用形以免未来新增动作重蹈「触发带 ⊂ 效果方向」覆辙。
+func ambientSaturated(record unit.Record, eff ambientEffect) bool {
+	switch eff.field {
+	case status.FieldMorale:
+		if eff.delta > 0 {
+			return record.Status.Morale >= moraleMax
+		}
+		return record.Status.Morale <= moraleMin
+	case status.FieldHunger:
+		if eff.delta > 0 {
+			return record.Status.Hunger >= hungerMax
+		}
+		return record.Status.Hunger <= hungerMin
+	default:
+		return false
+	}
+}
 
 // Config 是 region-runner 的运行参数。零值字段由 New 兜底为安全默认。
 type Config struct {
@@ -74,7 +150,8 @@ func (c Config) withDefaults() Config {
 // stats 是进程内累计遥测（原子）。
 type stats struct {
 	ticks, enqueued, claimed, completed, reclaimed, failed, backpressured int64
-	foraged, rested, deferred, dropped, conflicted                        int64 // real-2/3 应用态：觅食/休息/让位战斗/丢弃(逝者或删档)/乐观并发冲突退避
+	foraged, rested, socialized, reflected                                int64 // real-2/4a 动作计数：觅食/休息/社交/反思
+	deferred, dropped, conflicted, settled                                int64 // 让位战斗/丢弃(逝者或删档)/乐观并发冲突退避/饱和空写短路
 }
 
 // Runner 是 region-runner 引擎实例。
@@ -254,40 +331,66 @@ func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob
 		return scheduler.TierHot, true
 	}
 
-	// L1 反射决策（零 LLM）：饿则觅食补口粮（HOT 盯到吃饱），否则日常消耗（缓慢变饿，驱动下次觅食，自然降温至 COLD）。
-	// 经 ApplyOptimistic 乐观并发写：若自读取以来该单位被战斗/HTTP 改过 → ErrConcurrentModification → 让位（不覆盖、
-	// 不计觅食/休息），COLD 重排稍后再来。这是 real-3-0 对「Mutator 读改写与并发写者丢更新」的硬化（§8.6 单位级串行化）。
-	if record.Status.Hunger < forageThreshold {
-		if _, err := r.mutator.ApplyOptimistic(ctx, status.Mutation{
-			UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: forageGain,
-			ReasonCode: events.ReasonAmbientForage,
-		}); err != nil {
-			if errors.Is(err, status.ErrConcurrentModification) {
-				atomic.AddInt64(&r.st.conflicted, 1)
-			} else {
-				r.log.Warn("region-runner forage mutate", "unit", job.UnitID, "error", err)
-			}
-			return scheduler.ClassifyTier(tick, lastActive), true
-		}
-		atomic.AddInt64(&r.st.foraged, 1)
+	// 选动作（real-4a：反射层在觅食/休息/社交/反思间按 hunger/morale 选；real-3 将把 HOT 单位换成 LLM 决，
+	// 失败/预算耗尽回退本反射）。再经 applyAction 落地。
+	action := decideAmbientReflex(record)
+	// 饱和空写短路：动作把已达 clamp 边界的字段继续往界外推（如满意单位 morale 已 1.0 仍选反思）→ 写入是 before==after 空写。
+	// 跳过它（不落地/不计数/不升 HOT），按既有活跃度自然降温——否则会每 COLD 周期永久空写污染记忆环/事件表/遥测（评审 load-bearing）。
+	if ambientSaturated(record, ambientEffects[action]) {
+		atomic.AddInt64(&r.st.settled, 1)
+		return scheduler.ClassifyTier(tick, lastActive), true
+	}
+	active, applied, err := r.applyAction(ctx, job.UnitID, action, tick)
+	if err != nil {
+		r.log.Warn("region-runner apply ambient action", "unit", job.UnitID, "action", string(action), "error", err)
+		return scheduler.ClassifyTier(tick, lastActive), true
+	}
+	if !applied {
+		// 乐观并发冲突：自读取以来被战斗/HTTP 改过 → 不覆盖、退避，COLD 稍后再来。
+		atomic.AddInt64(&r.st.conflicted, 1)
+		return scheduler.ClassifyTier(tick, lastActive), true
+	}
+	r.countAction(action)
+	// 主动响应需求（觅食/社交）→ 标记活跃 → HOT（继续盯着）；被动（休息/反思）→ 按既有活跃度自然降温至 COLD。
+	if active {
 		if err := r.units.TouchLastActiveTick(ctx, job.UnitID, tick); err != nil {
 			r.log.Warn("region-runner touch last active", "unit", job.UnitID, "error", err)
 		}
 		return scheduler.TierHot, true
 	}
+	return scheduler.ClassifyTier(tick, lastActive), true
+}
+
+// applyAction 经 Mutator 乐观写落地一个动作的效果。返回 (是否主动响应, 是否真写入(applied), 错误)。
+// applied=false（且 err=nil）= 乐观并发冲突（自读取以来被并发写者改过），调用方退避不覆盖（real-3-0 硬化）。
+func (r *Runner) applyAction(ctx context.Context, unitID string, action ambientAction, tick int64) (active bool, applied bool, err error) {
+	eff, ok := ambientEffects[action]
+	if !ok {
+		return false, false, fmt.Errorf("unknown ambient action %q", action)
+	}
 	if _, err := r.mutator.ApplyOptimistic(ctx, status.Mutation{
-		UnitID: job.UnitID, Turn: int(tick), Field: status.FieldHunger, Delta: -restConsume,
-		ReasonCode: events.ReasonAmbientRest,
+		UnitID: unitID, Turn: int(tick), Field: eff.field, Delta: eff.delta, ReasonCode: eff.reason,
 	}); err != nil {
 		if errors.Is(err, status.ErrConcurrentModification) {
-			atomic.AddInt64(&r.st.conflicted, 1)
-		} else {
-			r.log.Warn("region-runner rest mutate", "unit", job.UnitID, "error", err)
+			return eff.active, false, nil // 冲突：退避，非真错误
 		}
-	} else {
-		atomic.AddInt64(&r.st.rested, 1)
+		return eff.active, false, err
 	}
-	return scheduler.ClassifyTier(tick, lastActive), true
+	return eff.active, true, nil
+}
+
+// countAction 按动作累计遥测。
+func (r *Runner) countAction(action ambientAction) {
+	switch action {
+	case actForage:
+		atomic.AddInt64(&r.st.foraged, 1)
+	case actRest:
+		atomic.AddInt64(&r.st.rested, 1)
+	case actSocialize:
+		atomic.AddInt64(&r.st.socialized, 1)
+	case actReflect:
+		atomic.AddInt64(&r.st.reflected, 1)
+	}
 }
 
 // reclaim 跑一次 stale-running 回收，累计遥测。
@@ -400,8 +503,11 @@ func (r *Runner) Stats() map[string]any {
 		"backpressured": atomic.LoadInt64(&r.st.backpressured),
 		"foraged":       atomic.LoadInt64(&r.st.foraged),
 		"rested":        atomic.LoadInt64(&r.st.rested),
+		"socialized":    atomic.LoadInt64(&r.st.socialized),
+		"reflected":     atomic.LoadInt64(&r.st.reflected),
 		"deferred":      atomic.LoadInt64(&r.st.deferred),
 		"dropped":       atomic.LoadInt64(&r.st.dropped),
 		"conflicted":    atomic.LoadInt64(&r.st.conflicted),
+		"settled":       atomic.LoadInt64(&r.st.settled),
 	}
 }

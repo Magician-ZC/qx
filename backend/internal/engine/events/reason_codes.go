@@ -35,21 +35,23 @@ type ReasonCode string
 
 // 常量定义区：集中声明该文件使用的共享配置。
 const (
-	ReasonCombatHit       ReasonCode = "COMBAT_HIT"
-	ReasonCombatDown      ReasonCode = "COMBAT_DOWN"
-	ReasonSurvivalMarch   ReasonCode = "SURVIVAL_MARCH_EXHAUST"
-	ReasonSurvivalHunger  ReasonCode = "SURVIVAL_HUNGER"
-	ReasonAmbientForage   ReasonCode = "AMBIENT_FORAGE" // 大世界离线自治：饿了在野外觅食补口粮（region-runner L1，§8.2）
-	ReasonAmbientRest     ReasonCode = "AMBIENT_REST"   // 大世界离线自治：日常起居的缓慢口粮消耗（中性，区别于"补给不足"的 SURVIVAL_HUNGER）
-	ReasonEmotionTrauma   ReasonCode = "EMOTION_TRAUMA"
-	ReasonEmotionReward   ReasonCode = "EMOTION_REWARD"
-	ReasonEconomyPurchase ReasonCode = "ECONOMY_PURCHASE"
-	ReasonEconomyReward   ReasonCode = "ECONOMY_REWARD"
-	ReasonEconomyLoot     ReasonCode = "ECONOMY_LOOT"
-	ReasonRelationRescue  ReasonCode = "RELATION_RESCUED"
-	ReasonRelationBetray  ReasonCode = "RELATION_BETRAYAL"
-	ReasonCommandForced   ReasonCode = "COMMAND_FORCED_ORDER"
-	ReasonCommandAccepted ReasonCode = "COMMAND_ACCEPTED_ADVICE"
+	ReasonCombatHit        ReasonCode = "COMBAT_HIT"
+	ReasonCombatDown       ReasonCode = "COMBAT_DOWN"
+	ReasonSurvivalMarch    ReasonCode = "SURVIVAL_MARCH_EXHAUST"
+	ReasonSurvivalHunger   ReasonCode = "SURVIVAL_HUNGER"
+	ReasonAmbientForage    ReasonCode = "AMBIENT_FORAGE" // 大世界离线自治：饿了在野外觅食补口粮（region-runner L1，§8.2）
+	ReasonAmbientRest      ReasonCode = "AMBIENT_REST"   // 大世界离线自治：日常起居的缓慢口粮消耗（中性，区别于"补给不足"的 SURVIVAL_HUNGER）
+	ReasonEmotionTrauma    ReasonCode = "EMOTION_TRAUMA"
+	ReasonEmotionReward    ReasonCode = "EMOTION_REWARD"
+	ReasonAmbientSocialize ReasonCode = "AMBIENT_SOCIALIZE" // 大世界离线自治：与人攀谈交往，士气舒展（region-runner L3，§8.2）
+	ReasonAmbientReflect   ReasonCode = "AMBIENT_REFLECT"   // 大世界离线自治：独自思忖沉淀，心绪渐定（region-runner L3）
+	ReasonEconomyPurchase  ReasonCode = "ECONOMY_PURCHASE"
+	ReasonEconomyReward    ReasonCode = "ECONOMY_REWARD"
+	ReasonEconomyLoot      ReasonCode = "ECONOMY_LOOT"
+	ReasonRelationRescue   ReasonCode = "RELATION_RESCUED"
+	ReasonRelationBetray   ReasonCode = "RELATION_BETRAYAL"
+	ReasonCommandForced    ReasonCode = "COMMAND_FORCED_ORDER"
+	ReasonCommandAccepted  ReasonCode = "COMMAND_ACCEPTED_ADVICE"
 
 	// 命运流程事件（经 EmitProcessEvent，非状态变更，不经 Mutator）。
 	ReasonRelevanceMatch   ReasonCode = "RELEVANCE_MATCH"   // 世界事件命中某角色的锚
@@ -94,6 +96,8 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonSurvivalHunger, Category: CategorySurvival, DisplayName: "饥饿消耗", DefaultReasonText: "补给不足导致饥饿加深", StatDomains: []string{"hunger"}, ImportanceMin: 2, ImportanceMax: 4},
 		{Code: ReasonAmbientForage, Category: CategorySurvival, DisplayName: "野外觅食", DefaultReasonText: "她在战斗之外觅食，补充了口粮", StatDomains: []string{"hunger"}, ImportanceMin: 2, ImportanceMax: 4},
 		{Code: ReasonAmbientRest, Category: CategorySurvival, DisplayName: "日常消耗", DefaultReasonText: "她在战斗之外的日常起居里消耗了些口粮", StatDomains: []string{"hunger"}, ImportanceMin: 1, ImportanceMax: 2},
+		{Code: ReasonAmbientSocialize, Category: CategoryEmotion, DisplayName: "日常交往", DefaultReasonText: "她在战斗之外与人攀谈交往，心情舒展了些", StatDomains: []string{"morale"}, ImportanceMin: 2, ImportanceMax: 4},
+		{Code: ReasonAmbientReflect, Category: CategoryEmotion, DisplayName: "独自沉淀", DefaultReasonText: "她独自思忖沉淀，心绪渐定", StatDomains: []string{"morale"}, ImportanceMin: 1, ImportanceMax: 3},
 		{Code: ReasonEmotionTrauma, Category: CategoryEmotion, DisplayName: "创伤事件", DefaultReasonText: "目睹惨烈事件后情绪受挫", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 9},
 		{Code: ReasonEmotionReward, Category: CategoryEmotion, DisplayName: "荣誉奖励", DefaultReasonText: "获得奖励后士气提升", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 8},
 		{Code: ReasonEconomyPurchase, Category: CategoryEconomy, DisplayName: "物资购买", DefaultReasonText: "花费金币购入物资", StatDomains: []string{"wallet"}, ImportanceMin: 2, ImportanceMax: 5},
