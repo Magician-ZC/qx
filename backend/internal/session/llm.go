@@ -226,6 +226,11 @@ func (service *Service) generateUnitDecision(
 		result := ai.CompletionResult{Debug: ai.CompletionDebug{FallbackCause: err.Error()}}
 		return unitDecisionPayload{}, result, buildLLMInteraction(state, actor.ID, "decision", "", systemPrompt, userPrompt, result, err.Error()), err
 	}
+	// 归因上下文：暴露可引用的记忆 ID，并拿到绑定完整快照（人格/压力/记忆/关系）的校验闭包。
+	attrPromptBlock, validateAttribution := service.prepareAttribution(ctx, state, actor)
+	if attrPromptBlock != "" {
+		userPrompt = userPrompt + "\n" + attrPromptBlock
+	}
 	if llmBudgetGuardrailActive(state) {
 		decision := budgetGuardrailDecision(actor)
 		result := budgetGuardrailResult(state)
@@ -275,14 +280,15 @@ func (service *Service) generateUnitDecision(
 	}
 
 	// 归因校验（engine/decision，「意外但合理」的代码强制，设计宪法 §5）。
-	// 默认影子模式：仅计入 OOC 遥测，不阻断决策；开启强制后，无源戏剧性归因回退安全决策。
-	if verdict, has := service.checkAttribution(actor, choice); has {
+	// 默认影子模式：仅计入 OOC 遥测，不阻断决策；开启强制后，无源戏剧性归因优雅回退安全决策。
+	if ok, reason, present := validateAttribution(choice); present {
 		service.attrTotal.Add(1)
-		if !verdict.OK {
+		if !ok {
 			service.attrOOC.Add(1)
 			if service.attributionEnforced {
-				cause := fmt.Errorf("attribution rejected as OOC: %s", verdict.Reason)
-				return confusedUnitDecision(state, actor, byID, systemPrompt, userPrompt, result, cause)
+				fallback := oocFallbackDecision()
+				message := "attribution_ooc:" + reason
+				return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
 			}
 		}
 	}
@@ -1793,7 +1799,7 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "2. next_action 必填，最多 12 个字；speak 必须填写且不能为空，建议小于 %d 个字，要像你本人临场脱口而出。即使选择 hold/defend/observe/move/gather/build/upgrade 等非说话动作，也要写一句短促自语或对身边人的话；选择 say/dialogue 时 speak 应写实际台词。memory 必填，要记录具体事实。\n", llmSpeakPromptLimit)
 	fmt.Fprintln(&builder, "3. 禁止把 speak 留空、写空字符串或省略 speak 字段；如果一时无话可说，也要用角色口吻写一句短句，例如“先稳住”“我去看看”“别急”。")
 	fmt.Fprintln(&builder, "4. reasoning 必填，用一句话说明本次判断受哪些因素影响，例如方针、地形、饥饿、设施、记忆、关系或威胁。knowledge 可选；没学到新规律就留空。")
-	fmt.Fprintln(&builder, "5. attribution 可选：若要说明这次选择的根因，填 attribution.primary.kind 为 persona_trait(人格维：courage/loyalty/aggression/prudence/sociability/integrity/stability/ambition) 或 pressure(现实压力：hunger/threat/injury/fatigue/debt)，ref_id 用对应英文名，weight 0–1，narrative_zh 写一句不超过 40 字的因果说明；不确定就整体省略 attribution，绝不要编造前因。")
+	fmt.Fprintln(&builder, "5. attribution 可选但鼓励：说明这次选择的根因。primary.kind 只能用四类，且 ref_id 必须真实存在：persona_trait(人格维 courage/loyalty/aggression/prudence/sociability/integrity/stability/ambition)、pressure(现实压力 hunger/threat/injury/fatigue/debt)、memory(ref_id 必须取自下方“可引用的记忆 ID”列表，snippet_zh 用该记忆摘要的原文片段)、relation(ref_id 用相关目标的 unit_id)。weight 0–1；narrative_zh 写一句不超过 40 字的因果说明。明显出人意料的选择(surprise_level≥2)必须由 memory/relation 这类具体前因支撑，光凭性格不够。宁可整体省略 attribution，也绝不要编造不存在的前因或 ID。")
 
 	return builder.String()
 }

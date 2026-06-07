@@ -122,6 +122,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		service := session.NewServiceWithColdStore(deps.Store, deps.AI, deps.ColdStore)
 		service.SetAsyncExecution(true)
 		service.SetProgressReporter(broadcastSessionProgress)
+		// 开启归因强制：无源戏剧性自治选择优雅回退安全决策（设计宪法 §5）。
+		// 遥测见 Service.AttributionStats()；若线上 OOC 率过高可改回 false。
+		service.SetAttributionEnforcement(true)
 		return service
 	}
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {

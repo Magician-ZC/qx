@@ -44,8 +44,8 @@ type MemoryMeta struct {
 	Summary       string
 }
 
-// RelationAxes 是对某目标的关系四轴。
-type RelationAxes struct{ Trust, Affection, Fear, Loyalty float64 }
+// RelationAxes 是对某目标的关系四轴（与 session 关系系统一致：trust/fear/affection/rivalry）。
+type RelationAxes struct{ Trust, Affection, Fear, Rivalry float64 }
 
 // PressureFlags 是当前是否越过 L1 护栏阈值的压力位。
 type PressureFlags struct{ Hunger, Threat, Debt, Injury, Fatigue bool }
@@ -150,7 +150,7 @@ func causeSignificant(c CauseRef, snap Snapshot) bool {
 	case CauseRelation:
 		r := snap.Relations[c.RefID]
 		return absf(r.Trust) >= relAxisMin || absf(r.Affection) >= relAxisMin ||
-			absf(r.Fear) >= relAxisMin || absf(r.Loyalty) >= relAxisMin
+			absf(r.Fear) >= relAxisMin || absf(r.Rivalry) >= relAxisMin
 	case CausePressure:
 		return pressureActive(c.RefID, snap.Pressure)
 	case CauseOrderEcho:

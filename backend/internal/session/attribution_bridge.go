@@ -7,8 +7,20 @@ package session
 // LLM 无需暴露内部 ID 即可正确引用的前因；memory/relation/redline 的解析需另接记忆/关系/宪章上下文（后续）。
 
 import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/unit"
+)
+
+const (
+	attributionMemoryWindow  = 30 // 记忆回溯窗口（回合）
+	attributionMemoryLimit   = 6  // 暴露给 LLM 的可引用记忆 ID 上限
+	attributionRelationLimit = 8  // 纳入快照的关系条数上限
+	relationAxisScale        = 10.0
 )
 
 // causeRefPayload 是 attribution 中单条前因的线上结构（LLM 产出）。
@@ -89,13 +101,104 @@ func buildAttributionSnapshot(actor *unit.Record) decision.Snapshot {
 	}
 }
 
-// checkAttribution 校验决策附带的归因；第二返回值表示是否存在可校验归因。
+// checkAttribution 用「人格+压力」基础快照校验归因；第二返回值表示是否存在可校验归因。
+// 仅供单元测试与无 DB 场景使用；生产链路用 prepareAttribution（含记忆/关系上下文）。
 func (service *Service) checkAttribution(actor *unit.Record, choice unitDecisionChoicePayload) (decision.Verdict, bool) {
 	attr, ok := toEngineAttribution(choice.Attribution)
 	if !ok {
 		return decision.Verdict{}, false
 	}
 	return decision.ValidateAttribution(attr, buildAttributionSnapshot(actor)), true
+}
+
+// buildDecisionAttributionContext 构造「人格+压力+记忆+关系」完整快照，并返回可暴露给 LLM 的
+// 「可引用记忆 ID」prompt 块。记忆/关系来自实时存储，使 memory/relation 类前因得以解析。
+func (service *Service) buildDecisionAttributionContext(ctx context.Context, state State, actor *unit.Record) (decision.Snapshot, string) {
+	snap := buildAttributionSnapshot(actor)
+	if service == nil || service.db == nil || actor == nil {
+		return snap, ""
+	}
+
+	// 记忆：取近窗口结构化记忆，按 importance 排序取前 N，建可引用 ID 集合 + prompt 块。
+	turn := state.TurnState.Turn
+	if turn <= 0 {
+		turn = 1
+	}
+	startTurn := turn - attributionMemoryWindow
+	if startTurn < 1 {
+		startTurn = 1
+	}
+	if rows, err := service.loadRecentMemoriesForPrompt(ctx, actor.ID, startTurn, turn); err == nil && len(rows) > 0 {
+		sort.SliceStable(rows, func(i, j int) bool {
+			return rows[i].Metadata.Importance > rows[j].Metadata.Importance
+		})
+		var block strings.Builder
+		count := 0
+		for _, row := range rows {
+			if count >= attributionMemoryLimit {
+				break
+			}
+			salience := row.Metadata.BaseSalience
+			if salience < 0.5 {
+				// 被选入近窗的记忆视为仍鲜活，避免基础显著度过低误杀有效前因。
+				salience = 0.5
+			}
+			snap.Memories[row.ID] = decision.MemoryMeta{
+				Importance:    row.Metadata.Importance,
+				EmotionWeight: row.EmotionWeight,
+				Salience:      salience,
+				Summary:       row.Summary,
+			}
+			fmt.Fprintf(&block, "  %s：%s\n", row.ID, limitTextRunes(row.Summary, 24))
+			count++
+		}
+		if count > 0 {
+			promptBlock := "可引用的记忆 ID（attribution.primary.kind=memory 时，ref_id 用下列之一，snippet_zh 用对应摘要原文片段）：\n" + block.String()
+			snap = withRelations(ctx, service, actor.ID, snap)
+			return snap, promptBlock
+		}
+	}
+
+	return withRelations(ctx, service, actor.ID, snap), ""
+}
+
+// withRelations 把单位的对外关系四轴（归一到 [-1,1]）填入快照，使 relation 类前因可解析。
+func withRelations(ctx context.Context, service *Service, unitID string, snap decision.Snapshot) decision.Snapshot {
+	for _, row := range service.loadTopOutgoingRelations(ctx, unitID, attributionRelationLimit) {
+		snap.Relations[row.TargetUnitID] = decision.RelationAxes{
+			Trust:     row.Trust / relationAxisScale,
+			Affection: row.Affection / relationAxisScale,
+			Fear:      row.Fear / relationAxisScale,
+			Rivalry:   row.Rivalry / relationAxisScale,
+		}
+	}
+	return snap
+}
+
+// prepareAttribution 在决策前准备归因上下文，返回 prompt 块与一个绑定了完整快照的校验闭包。
+// 闭包让 llm.go 无需引入 engine/decision 即可校验：返回 (通过, 原因码, 是否存在归因)。
+func (service *Service) prepareAttribution(ctx context.Context, state State, actor *unit.Record) (string, func(unitDecisionChoicePayload) (bool, string, bool)) {
+	snap, block := service.buildDecisionAttributionContext(ctx, state, actor)
+	validate := func(choice unitDecisionChoicePayload) (bool, string, bool) {
+		attr, has := toEngineAttribution(choice.Attribution)
+		if !has {
+			return true, "", false
+		}
+		verdict := decision.ValidateAttribution(attr, snap)
+		return verdict.OK, verdict.Reason, true
+	}
+	return block, validate
+}
+
+// oocFallbackDecision 是归因判 OOC 且强制开启时的优雅回退：不落地原意图，继续按兵不动（非乱码困惑态）。
+func oocFallbackDecision() unitDecisionPayload {
+	return unitDecisionPayload{
+		Action:     DecisionActionHold,
+		NextAction: "我再想想",
+		Speak:      "我再想想。",
+		Memory:     "我一时没理清自己的心思，先稳住。",
+		Reasoning:  "归因未通过校验，谨慎起见先按兵不动。",
+	}
 }
 
 // SetAttributionEnforcement 开关「归因判 OOC 即回退安全决策」的强制模式（默认关闭，仅影子遥测）。
