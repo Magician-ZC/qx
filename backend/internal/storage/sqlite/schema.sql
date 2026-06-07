@@ -180,3 +180,28 @@ CREATE TABLE IF NOT EXISTS cross_events (
 CREATE INDEX IF NOT EXISTS idx_cross_events_world ON cross_events(world_id, world_tick, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_cross_events_actor ON cross_events(actor_unit_id);
 CREATE INDEX IF NOT EXISTS idx_cross_events_target ON cross_events(target_unit_id);
+
+-- 世界注册表（多世界模型的根，设计文档 docs/大世界沙盘设计方案.md §8）。
+-- tick 是该世界的权威时钟：「世界会等你，但不会假装暂停」——它单调推进，是 cross_events.world_tick 的来源。
+CREATE TABLE IF NOT EXISTS worlds (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  tick INTEGER NOT NULL DEFAULT 0,
+  max_population INTEGER NOT NULL DEFAULT 0,
+  region_seed TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_worlds_status ON worlds(status, created_at DESC);
+
+-- 角色→世界归属。刻意不设 units 外键：成员可能是跨分片角色，归属完整性由业务层负责。
+CREATE TABLE IF NOT EXISTS world_members (
+  world_id TEXT NOT NULL,
+  character_unit_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'inhabitant',
+  joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (world_id, character_unit_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_members_character ON world_members(character_unit_id);
