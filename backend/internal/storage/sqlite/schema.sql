@@ -298,3 +298,33 @@ CREATE TABLE IF NOT EXISTS raw_event_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_event_log_session ON raw_event_log(session_id, occurred_at);
+
+-- region-runner 调度地基（沙盘 §8.2 / §9，M7.3）。agent_wake_queue：每个单位「下次在哪个世界 tick 唤醒决策」，
+-- 一单位一条（PK=unit_id，重排即 upsert）；region-runner 按 (region_id, wake_at_tick<=当前) 拉到点者。
+-- agent_decision_jobs：到点单位生成的决策作业队列，worker 池按 status=pending 原子认领、跑完置 done/failed。
+-- 现阶段为 shadow/additive 地基，未接执行主循环。
+CREATE TABLE IF NOT EXISTS agent_wake_queue (
+  unit_id TEXT PRIMARY KEY,
+  world_id TEXT,
+  region_id TEXT,
+  wake_at_tick INTEGER NOT NULL DEFAULT 0,
+  tier TEXT NOT NULL DEFAULT 'hot',
+  enqueued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_wake_region_due ON agent_wake_queue(region_id, wake_at_tick);
+
+CREATE TABLE IF NOT EXISTS agent_decision_jobs (
+  id TEXT PRIMARY KEY,
+  unit_id TEXT NOT NULL,
+  world_id TEXT,
+  region_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  tick INTEGER NOT NULL DEFAULT 0,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  claimed_at TEXT,
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_decision_jobs(status, created_at);
