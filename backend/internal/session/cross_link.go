@@ -11,6 +11,7 @@ import (
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
@@ -20,15 +21,24 @@ const crossEventDefaultImportance = 6
 
 // RecordCrossInteraction 记录一次跨玩家交互：先用世界权威时钟发号（AdvanceTick），再把事件追加进世界总线。
 // 这是「谁先动手算谁的」的落地——tick 由世界时钟单调发放，保证全世界事件可全序仲裁。返回事件 ID。
+//
+// 发号 + 追加在**同一事务**内：既保证两步原子（不会发了号却没记事件），又为 MySQL 把 AdvanceTick 的
+// SELECT...FOR UPDATE 锁定在同一连接上（FOR UPDATE 行锁仅在事务内有效）。
 func (service *Service) RecordCrossInteraction(ctx context.Context, worldID string, actorID string, targetID string, kind worldbus.EventKind, importance int, payload any) (string, error) {
 	if service == nil || service.db == nil {
 		return "", fmt.Errorf("record cross interaction: missing db")
 	}
-	tick, err := world.AdvanceTick(ctx, service.db, worldID)
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin cross interaction tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+
+	tick, err := world.AdvanceTick(ctx, tx, worldID, dbdialect.For(service.db))
 	if err != nil {
 		return "", err
 	}
-	return worldbus.Append(ctx, service.db, worldbus.CrossEvent{
+	id, err := worldbus.Append(ctx, tx, worldbus.CrossEvent{
 		WorldID:    worldID,
 		ActorID:    actorID,
 		TargetID:   targetID,
@@ -37,6 +47,13 @@ func (service *Service) RecordCrossInteraction(ctx context.Context, worldID stri
 		WorldTick:  tick,
 		Payload:    payload,
 	})
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit cross interaction: %w", err)
+	}
+	return id, nil
 }
 
 // SurfaceCrossEventsForCharacter 拉取世界总线上牵涉该角色的跨玩家事件，逐条按相关性投进她的命运收件箱。

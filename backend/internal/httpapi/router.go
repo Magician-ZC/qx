@@ -23,6 +23,7 @@ import (
 	"qunxiang/backend/internal/engine/turns"
 	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/session"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
@@ -1254,7 +1255,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := world.Join(c.Request.Context(), deps.Store, c.Param("worldId"), body.CharacterID, body.Role); err != nil {
+		if err := world.Join(c.Request.Context(), deps.Store, c.Param("worldId"), body.CharacterID, body.Role, dbdialect.For(deps.Store)); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}

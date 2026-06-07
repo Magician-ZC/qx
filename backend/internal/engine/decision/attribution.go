@@ -14,10 +14,10 @@ type CauseKind string
 const (
 	CausePersonaTrait CauseKind = "persona_trait" // 8 维人格 | 6 维野心
 	CauseMemory       CauseKind = "memory"        // 记忆条目 ID
-	CauseRedline      CauseKind = "redline"        // 离线宪章红线条目 ID
-	CauseRelation     CauseKind = "relation"       // 目标 unitID + 关系四轴
-	CausePressure     CauseKind = "pressure"       // 现实压力位（饥饿/威胁/债务/受伤/疲劳）
-	CauseOrderEcho    CauseKind = "order_echo"     // 上一条玩家 directive/接管 event（回响用）
+	CauseRedline      CauseKind = "redline"       // 离线宪章红线条目 ID
+	CauseRelation     CauseKind = "relation"      // 目标 unitID + 关系四轴
+	CausePressure     CauseKind = "pressure"      // 现实压力位（饥饿/威胁/债务/受伤/疲劳）
+	CauseOrderEcho    CauseKind = "order_echo"    // 上一条玩家 directive/接管 event（回响用）
 )
 
 // CauseRef 是一条归因前因引用。
@@ -72,12 +72,12 @@ const (
 
 // OOC 判定原因码。
 const (
-	OOCNone              = ""
-	OOCNarrativeEmpty    = "NARRATIVE_EMPTY"
-	OOCCauseNotFound     = "CAUSE_NOT_FOUND"
-	OOCCauseTooWeak      = "CAUSE_TOO_WEAK"
+	OOCNone               = ""
+	OOCNarrativeEmpty     = "NARRATIVE_EMPTY"
+	OOCCauseNotFound      = "CAUSE_NOT_FOUND"
+	OOCCauseTooWeak       = "CAUSE_TOO_WEAK"
 	OOCSurpriseUngrounded = "SURPRISE_UNGROUNDED"
-	OOCSnippetFabricated = "SNIPPET_FABRICATED"
+	OOCSnippetFabricated  = "SNIPPET_FABRICATED"
 )
 
 // Verdict 是归因校验结论。

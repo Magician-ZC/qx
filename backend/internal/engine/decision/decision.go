@@ -76,8 +76,8 @@ type Decision struct {
 
 // Router 编排反射规则与升级闸门。零值 Router 即可使用（采用默认阈值与默认闸门）。
 type Router struct {
-	HPFleeRatio        float64             // HP/HPMax 低于此值触发反射撤退，默认 0.25
-	HungerEatThreshold int                 // Hunger 低于此值且有口粮时触发反射进食，默认 30
+	HPFleeRatio        float64              // HP/HPMax 低于此值触发反射撤退，默认 0.25
+	HungerEatThreshold int                  // Hunger 低于此值且有口粮时触发反射进食，默认 30
 	Gate               func(Situation) bool // 关键节点判定，默认 DefaultEscalationGate
 }
 
@@ -102,9 +102,9 @@ func DefaultEscalationGate(s Situation) bool {
 
 // Route 决定这一步意图的来源：反射 or 决断。
 //
-//	1) 安全反射(L1 生理护栏)：即使是关键节点也先保命，零 LLM。
-//	2) 关键节点：升级决断层(NeedsLLM=true)，并给一个安全兜底意图。
-//	3) 日常反射：继续既有目标或原地待命，零 LLM。
+//  1. 安全反射(L1 生理护栏)：即使是关键节点也先保命，零 LLM。
+//  2. 关键节点：升级决断层(NeedsLLM=true)，并给一个安全兜底意图。
+//  3. 日常反射：继续既有目标或原地待命，零 LLM。
 func (r Router) Route(s Situation) Decision {
 	// 1) 安全反射
 	if s.HPMax > 0 && float64(s.HP)/float64(s.HPMax) < r.fleeRatio() {

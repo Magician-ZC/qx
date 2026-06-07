@@ -14,6 +14,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 // ErrNotFound 表示按 ID 找不到世界。
@@ -123,11 +125,28 @@ func List(ctx context.Context, db DB, status Status, limit int) ([]World, error)
 	return out, rows.Err()
 }
 
-// AdvanceTick 原子推进世界时钟并返回新值（「谁先动手」排序键的发号器）。
-// 世界不存在时返回 ErrNotFound。
-func AdvanceTick(ctx context.Context, db DB, id string) (int, error) {
-	row := db.QueryRowContext(ctx, `
-		UPDATE worlds SET tick = tick + 1 WHERE id = ? RETURNING tick`, id)
+// AdvanceTick 原子推进世界时钟并返回新值（「谁先动手」排序键的发号器）。世界不存在时返回 ErrNotFound。
+//
+// 双驱动：SQLite 走 UPDATE...RETURNING（写串行化，*sql.DB 或 *sql.Tx 均可原子）；
+// MySQL 无 RETURNING，走 SELECT...FOR UPDATE + UPDATE，**必须在事务内调用**（FOR UPDATE 仅在事务里加行锁、
+// 保证并发发号不撞号）。生产侧两个调用点（RecordCrossInteraction、world boss strikeTx）都已包事务。
+func AdvanceTick(ctx context.Context, db DB, id string, dialect dbdialect.Dialect) (int, error) {
+	if dialect == dbdialect.DialectMySQL {
+		row := db.QueryRowContext(ctx, `SELECT tick FROM worlds WHERE id = ? FOR UPDATE`, id)
+		var tick int
+		if err := row.Scan(&tick); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, ErrNotFound
+			}
+			return 0, fmt.Errorf("world advance tick (lock): %w", err)
+		}
+		tick++
+		if _, err := db.ExecContext(ctx, `UPDATE worlds SET tick = ? WHERE id = ?`, tick, id); err != nil {
+			return 0, fmt.Errorf("world advance tick (update): %w", err)
+		}
+		return tick, nil
+	}
+	row := db.QueryRowContext(ctx, `UPDATE worlds SET tick = tick + 1 WHERE id = ? RETURNING tick`, id)
 	var tick int
 	if err := row.Scan(&tick); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -151,18 +170,22 @@ func Seal(ctx context.Context, db DB, id string) error {
 }
 
 // Join 把一个角色接入世界（幂等：重复接入不报错、不重复计数）。role 为空时取 inhabitant。
-func Join(ctx context.Context, db DB, worldID string, characterID string, role string) error {
+func Join(ctx context.Context, db DB, worldID string, characterID string, role string, dialect dbdialect.Dialect) error {
 	if worldID == "" || characterID == "" {
 		return fmt.Errorf("world join: empty world_id or character_id")
 	}
 	if role == "" {
 		role = "inhabitant"
 	}
-	if _, err := db.ExecContext(ctx, `
+	query := `
 		INSERT INTO world_members (world_id, character_unit_id, role)
 		VALUES (?, ?, ?)
-		ON CONFLICT(world_id, character_unit_id) DO NOTHING`,
-		worldID, characterID, role); err != nil {
+		ON CONFLICT(world_id, character_unit_id) DO NOTHING`
+	if dialect == dbdialect.DialectMySQL {
+		// 主键冲突即重复接入 → INSERT IGNORE 静默跳过（幂等）。
+		query = `INSERT IGNORE INTO world_members (world_id, character_unit_id, role) VALUES (?, ?, ?)`
+	}
+	if _, err := db.ExecContext(ctx, query, worldID, characterID, role); err != nil {
 		return fmt.Errorf("world join: %w", err)
 	}
 	return nil

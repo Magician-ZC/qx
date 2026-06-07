@@ -157,3 +157,51 @@ CREATE TABLE IF NOT EXISTS opening_candidate_cache (
   payload LONGTEXT NOT NULL,
   updated_at_unix BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS cross_events (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  actor_unit_id VARCHAR(191) NULL,
+  target_unit_id VARCHAR(191) NULL,
+  event_kind VARCHAR(64) NOT NULL,
+  region_id VARCHAR(191) NULL,
+  importance INT NOT NULL DEFAULT 0,
+  world_tick BIGINT NOT NULL DEFAULT 0,
+  payload_json LONGTEXT NOT NULL,
+  occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_cross_events_world (world_id, world_tick, occurred_at),
+  INDEX idx_cross_events_actor (actor_unit_id),
+  INDEX idx_cross_events_target (target_unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS worlds (
+  id VARCHAR(191) PRIMARY KEY,
+  name VARCHAR(191) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  tick BIGINT NOT NULL DEFAULT 0,
+  max_population INT NOT NULL DEFAULT 0,
+  region_seed VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_worlds_status (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS world_members (
+  world_id VARCHAR(191) NOT NULL,
+  character_unit_id VARCHAR(191) NOT NULL,
+  role VARCHAR(64) NOT NULL DEFAULT 'inhabitant',
+  joined_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (world_id, character_unit_id),
+  INDEX idx_world_members_character (character_unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS world_bosses (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  name VARCHAR(191) NOT NULL,
+  hp_max INT NOT NULL,
+  hp_remaining INT NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  region_id VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_world_bosses_world (world_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

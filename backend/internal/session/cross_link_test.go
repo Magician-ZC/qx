@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
@@ -78,8 +79,8 @@ func TestCrossInteractionEndToEnd(t *testing.T) {
 	if err := repo.Save(ctx, hero); err != nil {
 		t.Fatalf("存角色失败: %v", err)
 	}
-	_ = world.Join(ctx, service.db, worldID, hero.ID, "")
-	_ = world.Join(ctx, service.db, worldID, "savior_from_shard_5", "")
+	_ = world.Join(ctx, service.db, worldID, hero.ID, "", dbdialect.DialectSQLite)
+	_ = world.Join(ctx, service.db, worldID, "savior_from_shard_5", "", dbdialect.DialectSQLite)
 
 	// 别家角色救了她：经世界时钟发号写入总线。
 	id1, err := service.RecordCrossInteraction(ctx, worldID, "savior_from_shard_5", hero.ID, worldbus.KindRescue, 8, nil)

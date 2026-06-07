@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"qunxiang/backend/internal/storage/dbdialect"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 )
 
@@ -55,7 +56,7 @@ func TestGetNotFound(t *testing.T) {
 	if _, err := Get(ctx, db, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("不存在的世界应返回 ErrNotFound，得到 %v", err)
 	}
-	if _, err := AdvanceTick(ctx, db, "nope"); !errors.Is(err, ErrNotFound) {
+	if _, err := AdvanceTick(ctx, db, "nope", dbdialect.DialectSQLite); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("推进不存在世界的时钟应返回 ErrNotFound，得到 %v", err)
 	}
 }
@@ -64,7 +65,7 @@ func TestAdvanceTickMonotonic(t *testing.T) {
 	ctx, db := newWorldDB(t)
 	id, _ := Create(ctx, db, World{Name: "钟摆"})
 	for want := 1; want <= 3; want++ {
-		got, err := AdvanceTick(ctx, db, id)
+		got, err := AdvanceTick(ctx, db, id, dbdialect.DialectSQLite)
 		if err != nil {
 			t.Fatalf("推进时钟失败: %v", err)
 		}
@@ -83,13 +84,13 @@ func TestJoinIdempotentAndWorldOf(t *testing.T) {
 	id, _ := Create(ctx, db, World{Name: "聚落"})
 
 	// 跨分片角色（非本库 units）也能接入——无 FK。
-	if err := Join(ctx, db, id, "char_from_shard_2", "founder"); err != nil {
+	if err := Join(ctx, db, id, "char_from_shard_2", "founder", dbdialect.DialectSQLite); err != nil {
 		t.Fatalf("接入失败: %v", err)
 	}
-	if err := Join(ctx, db, id, "char_from_shard_2", "founder"); err != nil {
+	if err := Join(ctx, db, id, "char_from_shard_2", "founder", dbdialect.DialectSQLite); err != nil {
 		t.Fatalf("重复接入应幂等不报错: %v", err)
 	}
-	if err := Join(ctx, db, id, "another_char", ""); err != nil {
+	if err := Join(ctx, db, id, "another_char", "", dbdialect.DialectSQLite); err != nil {
 		t.Fatalf("接入第二人失败: %v", err)
 	}
 

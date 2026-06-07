@@ -73,7 +73,7 @@ func TestScoreNoisyOR(t *testing.T) {
 		t.Fatalf("多锚 noisy-OR 错误：得到 %f 期望 %f", Score([]Hit{rel, goal, redline}, 1.0), want)
 	}
 	// 两个中等信号共振过阈：c=0.25 each → 1-0.75² = 0.4375。
-	g1 := Hit{Anchor: Anchor{Kind: Geo, Weight: 1.0, HalfLifeDays: 0}}             // 1·0.25=0.25
+	g1 := Hit{Anchor: Anchor{Kind: Geo, Weight: 1.0, HalfLifeDays: 0}}            // 1·0.25=0.25
 	d1 := Hit{Anchor: Anchor{Kind: DebtGrudgeLove, Weight: 0.25 / (0.14 / 0.32)}} // 调成 c=0.25
 	r := Score([]Hit{g1, d1}, 1.0)
 	if !PassesGate(r) {

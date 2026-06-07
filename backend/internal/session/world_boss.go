@@ -30,6 +30,7 @@ import (
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
@@ -135,23 +136,47 @@ func (service *Service) strikeTx(ctx context.Context, worldID, bossID, attackerI
 		return 0, "", 0, fmt.Errorf("begin world boss strike tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op
+	dialect := dbdialect.For(service.db)
 
 	// 1) 原子扣血：仅对 active 的 Boss 生效，血不扣成负；返回扣后剩余血。
-	row := tx.QueryRowContext(ctx, `
-		UPDATE world_bosses SET hp_remaining = MAX(0, hp_remaining - ?)
-		WHERE id = ? AND world_id = ? AND status = 'active'
-		RETURNING hp_remaining, name, hp_max`, damage, bossID, worldID)
 	var hpRemaining, hpMax int
 	var bossName string
-	if err := row.Scan(&hpRemaining, &bossName, &hpMax); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if dialect == dbdialect.DialectMySQL {
+		// MySQL 无 RETURNING：事务内 SELECT...FOR UPDATE 锁行 + 检查 active + UPDATE（避免 RowsAffected 歧义）。
+		var status string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT hp_remaining, name, hp_max, status FROM world_bosses
+			WHERE id = ? AND world_id = ? FOR UPDATE`, bossID, worldID).Scan(&hpRemaining, &bossName, &hpMax, &status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, "", 0, ErrWorldBossInactive
+			}
+			return 0, "", 0, fmt.Errorf("lock world boss: %w", err)
+		}
+		if status != "active" {
 			return 0, "", 0, ErrWorldBossInactive
 		}
-		return 0, "", 0, fmt.Errorf("decrement world boss hp: %w", err)
+		hpRemaining -= damage
+		if hpRemaining < 0 {
+			hpRemaining = 0
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE world_bosses SET hp_remaining = ? WHERE id = ?`, hpRemaining, bossID); err != nil {
+			return 0, "", 0, fmt.Errorf("decrement world boss hp: %w", err)
+		}
+	} else {
+		row := tx.QueryRowContext(ctx, `
+			UPDATE world_bosses SET hp_remaining = MAX(0, hp_remaining - ?)
+			WHERE id = ? AND world_id = ? AND status = 'active'
+			RETURNING hp_remaining, name, hp_max`, damage, bossID, worldID)
+		if err := row.Scan(&hpRemaining, &bossName, &hpMax); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, "", 0, ErrWorldBossInactive
+			}
+			return 0, "", 0, fmt.Errorf("decrement world boss hp: %w", err)
+		}
 	}
 
 	// 2) 同事务内把这一击记进世界总线（世界时钟发号 + append-only 账本）。
-	tick, err := world.AdvanceTick(ctx, tx, worldID)
+	tick, err := world.AdvanceTick(ctx, tx, worldID, dialect)
 	if err != nil {
 		return 0, "", 0, fmt.Errorf("advance world tick: %w", err)
 	}
