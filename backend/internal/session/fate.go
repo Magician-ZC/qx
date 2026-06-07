@@ -86,14 +86,26 @@ func (service *Service) buildRelevanceAnchors(ctx context.Context, unitID string
 
 // eventRelevance 计算一条世界事件对某角色（其锚集）的相关性。
 func eventRelevance(anchors []relevance.Anchor, ev FateEvent) float64 {
+	score, _ := eventRelevanceWithAnchor(anchors, ev)
+	return score
+}
+
+// eventRelevanceWithAnchor 返回相关性分，以及命中里权重最高的锚类别（用于翻译矩阵选「凭什么牵动她」的引子）。
+func eventRelevanceWithAnchor(anchors []relevance.Anchor, ev FateEvent) (float64, string) {
 	hits := make([]relevance.Hit, 0, len(anchors))
+	topKind := ""
+	topWeight := -1.0
 	for _, a := range anchors {
 		// 任何锚（关系/债仇爱/血脉…）只要其 Ref 命中事件的 actor/target/region，就算命中。
 		if a.Ref != "" && (a.Ref == ev.ActorID || a.Ref == ev.TargetID) {
 			hits = append(hits, relevance.Hit{Anchor: a})
+			if a.Weight > topWeight {
+				topWeight = a.Weight
+				topKind = string(a.Kind)
+			}
 		}
 	}
-	return relevance.Score(hits, 1.0)
+	return relevance.Score(hits, 1.0), topKind
 }
 
 // SurfaceFateEvent 把一条世界事件按相关性路由进某角色的命运层。
@@ -103,8 +115,9 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		return FateRouting{}, fmt.Errorf("surface fate event: missing dependencies")
 	}
 	var rel float64
+	anchorKind := ""
 	if ev.ActorID == owner.ID || ev.TargetID == owner.ID {
-		// 直接发生在她身上 → 命运分由重要度/情绪强度决定（她自己的事一定相关）。
+		// 直接发生在她身上 → 命运分由重要度/情绪强度决定（她自己的事一定相关，无外部锚）。
 		rel = float64(ev.Importance) / 10.0
 		if e := absFloat(ev.EmotionWeight); e > rel {
 			rel = e
@@ -113,8 +126,8 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 			rel = 1
 		}
 	} else {
-		// 发生在别人身上 → 经她的关系锚翻译相关性。
-		rel = eventRelevance(service.buildRelevanceAnchors(ctx, owner.ID), ev)
+		// 发生在别人身上 → 经她的锚翻译相关性，并记下命中里最重的锚类别（翻译矩阵用）。
+		rel, anchorKind = eventRelevanceWithAnchor(service.buildRelevanceAnchors(ctx, owner.ID), ev)
 	}
 	route := relevance.RouteFor(rel)
 	out := FateRouting{Route: route, Relevance: rel}
@@ -122,7 +135,7 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		return out, nil
 	}
 
-	out.Card = fateCard(ev, route)
+	out.Card = fateCard(ev, route, anchorKind)
 	code := events.ReasonInboxHighlight
 	payload := map[string]any{
 		"narrative":     out.Card,
@@ -310,9 +323,11 @@ func absFloat(v float64) float64 {
 }
 
 // fateCard 把世界事件渲染成祖魂语气的命运卡（engine/narration，确定性、无 LLM、按事件打散变体）。
-func fateCard(ev FateEvent, route relevance.FateRoute) string {
-	return narration.Beat(
+// anchorKind 非空时走翻译矩阵：在祖魂语气外再加一句「凭什么这牵动她」（因她在乎的人/她的目标/她划的红线…）。
+func fateCard(ev FateEvent, route relevance.FateRoute, anchorKind string) string {
+	return narration.BeatWithAnchor(
 		string(ev.ReasonCode),
+		anchorKind,
 		ev.EmotionWeight,
 		route == relevance.RoutePending,
 		ev.Summary,

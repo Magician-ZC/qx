@@ -55,6 +55,56 @@ var pendingFrames = []string{
 
 const fallbackSummary = "她在乎的人那边，出了点事。"
 
+// anchorFrames 是「为什么这关乎她」的引子模板，按命中的锚类别（relevance.AnchorKind 的字符串值）取材。
+// 这就是设计宪法 §4.1 / 耦合 §1.2 的 (reason_code × anchor_kind) 翻译矩阵的 anchor_kind 维：
+// reason_code 决定语气基调（行），anchor_kind 决定「凭什么牵动她」（列）。
+var anchorFrames = map[string][]string{
+	"relation": {
+		"这事牵动着她在乎的人",
+		"她挂心的那个人，也在其中",
+	},
+	"goal": {
+		"这撞上了她心心念念的那桩事",
+		"她一直想做的那件事，被搅动了",
+	},
+	"redline": {
+		"这触到了她当年划下的那条线",
+		"她最不能容忍的事，又冒了头",
+	},
+	"debt_grudge_love": {
+		"她欠的那份情、记的那份怨，被掀了起来",
+		"那笔没算清的债怨情，又翻涌上来",
+	},
+	"geo": {
+		"脚下这片她熟悉的土地，出了事",
+		"她生长的那方水土，起了波澜",
+	},
+	"legacy": {
+		"这关乎她血脉里传下来的东西",
+		"祖上传下的那件物事，被惊动了",
+	},
+}
+
+// BeatWithAnchor 在 Beat 的基础上，按命中的锚类别加一句「为什么这关乎她」的引子。
+// anchorKind 为空（如她自己的事，无外部锚）时退化为 Beat。
+func BeatWithAnchor(reasonCode string, anchorKind string, valence float64, pending bool, summary string, seed uint64) string {
+	frames, ok := anchorFrames[anchorKind]
+	if !ok || len(frames) == 0 {
+		return Beat(reasonCode, valence, pending, summary, seed)
+	}
+	if summary == "" {
+		summary = fallbackSummary
+	}
+	if seed == 0 {
+		seed = hashSeed(anchorKind + "\x00" + reasonCode + "\x00" + summary)
+	}
+	body := frames[seed%uint64(len(frames))] + "——" + Beat(reasonCode, valence, false, summary, seed)
+	if pending {
+		return sprintf1(pendingFrames[seed%uint64(len(pendingFrames))], body)
+	}
+	return body
+}
+
 // Beat 把一条事实摘要渲染成祖魂语气的命运卡。
 //
 //	reasonCode  事件 reason-code（如 EMOTION_TRAUMA / ECONOMY_LOOT / RELEVANCE_MATCH），决定基调倾向。

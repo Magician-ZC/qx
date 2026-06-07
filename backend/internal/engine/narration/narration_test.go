@@ -75,6 +75,34 @@ func TestExplicitSeedCoversBank(t *testing.T) {
 	}
 }
 
+func TestBeatWithAnchorFramesByKind(t *testing.T) {
+	const summary = "她的旧友在北境打了场胜仗"
+	goal := BeatWithAnchor("ECONOMY_REWARD", "goal", 0.4, false, summary, 0)
+	if !strings.Contains(goal, summary) {
+		t.Fatalf("应仍含事实摘要：%q", goal)
+	}
+	if !strings.Contains(goal, "——") {
+		t.Fatalf("应在祖魂语气前加一句锚引子（含——）：%q", goal)
+	}
+	if goal == Beat("ECONOMY_REWARD", 0.4, false, summary, 0) {
+		t.Fatalf("有锚时应不同于无锚的 Beat")
+	}
+	// 空锚类别 → 退化为 Beat。
+	if BeatWithAnchor("X", "", 0, false, "Y", 0) != Beat("X", 0, false, "Y", 0) {
+		t.Fatalf("空锚应退化为 Beat")
+	}
+	// 未知锚类别 → 退化为 Beat。
+	if BeatWithAnchor("X", "weird_kind", 0, false, "Y", 0) != Beat("X", 0, false, "Y", 0) {
+		t.Fatalf("未知锚应退化为 Beat")
+	}
+	// 待决策外层仍套上。
+	pend := BeatWithAnchor("PENDING_DECISION", "debt_grudge_love", -0.5, true, summary, 0)
+	plain := BeatWithAnchor("PENDING_DECISION", "debt_grudge_love", -0.5, false, summary, 0)
+	if len(pend) <= len(plain) {
+		t.Fatalf("待决策应再套 pending 外层")
+	}
+}
+
 // TestRenderSamples 打印若干渲染样例（go test -v 可见），便于人工核对祖魂语气是否自然。
 func TestRenderSamples(t *testing.T) {
 	samples := []struct {
