@@ -265,3 +265,17 @@ CREATE TABLE IF NOT EXISTS decision_traces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_traces_session ON decision_traces(session_id, occurred_at);
+
+-- LLM 交互旁路表（拆 state_json 第二片，沙盘 §11.2）。影子双写：Save 时把当回合 state.LLMInteractions
+-- 在 blob 压缩（裁剪条数 + 抹除旧 prompt）之前持久化到本表，留全量、含完整 prompt 的可查历史。
+-- 执行循环每个 actor 行动后即 Save，故 INSERT OR IGNORE 跨 Save 累积出全量；blob 仍裁剪仍为权威读源——
+-- 本表零风险，仅旁路留痕，后续验证后再移出 blob。隐私擦除/保留期清理须同步清本表（见 privacy.go）。
+CREATE TABLE IF NOT EXISTS llm_interactions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  unit_id TEXT,
+  interaction_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_interactions_session ON llm_interactions(session_id, occurred_at);

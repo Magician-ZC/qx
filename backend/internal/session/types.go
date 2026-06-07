@@ -481,6 +481,7 @@ type PrivacyEraseResult struct {
 	SessionID                 string `json:"session_id"`
 	DialogueEntriesErased     int    `json:"dialogue_entries_erased"`
 	LLMInteractionsRedacted   int    `json:"llm_interactions_redacted"`
+	DecisionTracesErased      int64  `json:"decision_traces_erased"`
 	AuditLogsErased           int    `json:"audit_logs_erased"`
 	RawEventsErased           int    `json:"raw_events_erased"`
 	ReportsErased             int    `json:"reports_erased"`
@@ -492,14 +493,16 @@ type PrivacyEraseResult struct {
 
 // PrivacyPurgeResult 结构体用于承载该模块的核心数据。
 type PrivacyPurgeResult struct {
-	RetentionDays      int   `json:"retention_days"`
-	CutoffUnix         int64 `json:"cutoff_unix"`
-	SessionsDeleted    int64 `json:"sessions_deleted"`
-	UnitsDeleted       int64 `json:"units_deleted"`
-	EventsDeleted      int64 `json:"events_deleted"`
-	HallEntriesDeleted int64 `json:"hall_entries_deleted"`
-	PhaseSnapsDeleted  int64 `json:"phase_snapshots_deleted"`
-	MemoriesFTSDeleted int64 `json:"memories_fts_deleted"`
+	RetentionDays          int   `json:"retention_days"`
+	CutoffUnix             int64 `json:"cutoff_unix"`
+	SessionsDeleted        int64 `json:"sessions_deleted"`
+	UnitsDeleted           int64 `json:"units_deleted"`
+	EventsDeleted          int64 `json:"events_deleted"`
+	HallEntriesDeleted     int64 `json:"hall_entries_deleted"`
+	PhaseSnapsDeleted      int64 `json:"phase_snapshots_deleted"`
+	MemoriesFTSDeleted     int64 `json:"memories_fts_deleted"`
+	LLMInteractionsDeleted int64 `json:"llm_interactions_deleted"`
+	DecisionTracesDeleted  int64 `json:"decision_traces_deleted"`
 }
 
 // SessionMetrics 结构体用于承载该模块的核心数据。

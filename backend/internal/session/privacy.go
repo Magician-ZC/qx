@@ -26,6 +26,13 @@ func (service *Service) EraseSessionPrivateData(
 	sessionID string,
 	options PrivacyEraseOptions,
 ) (Snapshot, PrivacyEraseResult, error) {
+	// 隐私红线 + 并发安全：擦除绝不能与后台异步执行的逐 actor Save 交错——否则擦除清空（blob/旁路表/相位快照）后，
+	// 下一拍后台 Save 会把刚生成的完整 prompt 重新写回，使「不可逆擦除」失效。每个 HTTP 请求新建 Service 共享同一 *sql.DB，
+	// per-instance 的 sessionSaveMu 跨请求实例不互斥，进程级 asyncExecutionRegistry 才是唯一有效护栏——故执行在飞时直接拒绝、要求重试。
+	if isAsyncExecutionRunning(strings.TrimSpace(sessionID)) {
+		return Snapshot{}, PrivacyEraseResult{}, fmt.Errorf("erase session %s: 本回合执行进行中，请待执行结束后重试擦除", strings.TrimSpace(sessionID))
+	}
+
 	state, units, err := service.loadSession(ctx, sessionID)
 	if err != nil {
 		return Snapshot{}, PrivacyEraseResult{}, err
@@ -82,6 +89,12 @@ func (service *Service) EraseSessionPrivateData(
 		state.Logs = []LogEntry{}
 		state.RawEventLog = []RawEventEntry{}
 	}
+	// decision_traces（拆 state_json 第一片，cutover 后已是含 LLM 自由文本 Reasoning/Speak/Memory/Knowledge 的权威读源）
+	// 既是 LLM 派生、又是决策审计链——擦除 LLM 细节或审计链路时一并清空内存，否则 Save 会把它回写表、下次 load 由 hydrate 读回，
+	// 与刚补齐的 llm_interactions 擦除形成不对称缺口。表行本身在 Save 之后硬删（见下）。
+	if options.EraseLLMDetails || options.EraseAuditTrail {
+		state.DecisionTraces = nil
+	}
 	if options.EraseReports {
 		result.ReportsErased = len(state.ModerationReports)
 		state.ModerationReports = []ModerationReport{}
@@ -106,6 +119,24 @@ func (service *Service) EraseSessionPrivateData(
 
 	if err := service.sessions.Save(ctx, &state); err != nil {
 		return Snapshot{}, PrivacyEraseResult{}, err
+	}
+	// 隐私红线：LLM 交互旁路表（拆 state_json 第二片）含完整 prompt，擦除 LLM 细节时必须同步清本表，
+	// 否则即不可逆擦除漏洞。须在 Save 之后——Save 会按 id 幂等回写（INSERT OR IGNORE 保留旧的完整行），
+	// 故这里硬删整会话的旁路行，把 Save 回写的完整行一并抹掉；失败即整体擦除失败、绝不静默放过。
+	if options.EraseLLMDetails {
+		if _, err := service.db.ExecContext(ctx, `DELETE FROM llm_interactions WHERE session_id = ?`, state.ID); err != nil {
+			return Snapshot{}, PrivacyEraseResult{}, fmt.Errorf("erase llm interactions side table: %w", err)
+		}
+	}
+	// 对称清理 decision_traces 旁路表（权威读源，含 LLM 自由文本）。须在 Save 之后——Save 会把内存（已清空）幂等回写，
+	// 但此前各 Save 累积的历史行仍在表里，这里硬删整会话；失败即整体擦除失败，绝不静默残留。
+	if options.EraseLLMDetails || options.EraseAuditTrail {
+		execResult, execErr := service.db.ExecContext(ctx, `DELETE FROM decision_traces WHERE session_id = ?`, state.ID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "erase decision traces side table"); rowsErr != nil {
+			return Snapshot{}, PrivacyEraseResult{}, rowsErr
+		} else {
+			result.DecisionTracesErased = deleted
+		}
 	}
 	if _, err := service.db.ExecContext(ctx, `DELETE FROM session_phase_snapshots WHERE session_id = ?`, state.ID); err != nil {
 		return Snapshot{}, PrivacyEraseResult{}, fmt.Errorf("delete phase snapshots for privacy erase: %w", err)
@@ -195,6 +226,21 @@ func (service *Service) PurgeExpiredSessionData(
 			return PrivacyPurgeResult{}, rowsErr
 		} else {
 			result.EventsDeleted += deleted
+		}
+
+		// 拆 state_json 的两张旁路表（沙盘 §11.2）：会话被清理时其旁路留痕也须一并删，否则永久孤儿、违保留期。
+		// llm_interactions 含完整 prompt（本片新增）；decision_traces 是上一片遗漏未接入清理的既有泄漏，这里补上。
+		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM llm_interactions WHERE session_id = ?`, sessionID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session llm interactions"); rowsErr != nil {
+			return PrivacyPurgeResult{}, rowsErr
+		} else {
+			result.LLMInteractionsDeleted += deleted
+		}
+		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM decision_traces WHERE session_id = ?`, sessionID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session decision traces"); rowsErr != nil {
+			return PrivacyPurgeResult{}, rowsErr
+		} else {
+			result.DecisionTracesDeleted += deleted
 		}
 
 		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM hall_of_fame_entries WHERE source_session_id = ?`, sessionID)

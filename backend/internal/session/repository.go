@@ -26,6 +26,11 @@ func NewRepository(db *sql.DB) *Repository {
 
 // Save 持久化会话状态（插入或覆盖更新）。
 func (repository *Repository) Save(ctx context.Context, state *State) error {
+	// 拆 state_json 第二片（沙盘 §11.2，影子双写）：把当回合 LLM 交互在 compactStateForStorage **抹除旧 prompt 之前**
+	// best-effort 写入旁路表（含完整 prompt）。执行循环每个 actor 行动后即 Save，故 INSERT OR IGNORE 跨 Save 累积出全量。
+	// 吞错——blob 仍裁剪仍为权威读源，写表失败仅旁路缺一条，零风险（读路径切换是后续过评审的步骤）。
+	_ = persistLLMInteractions(ctx, repository.db, dbdialect.IsMySQL(repository.db), state.ID, state.LLMInteractions)
+
 	compactStateForStorage(state)
 
 	now := time.Now().UTC()
