@@ -105,6 +105,10 @@ type ProcessEvent struct {
 	Code          ReasonCode
 	Category      Category
 	Payload       any // 序列化进 payload_json
+	// 世界作用域双键（沙盘 §8.7，可空=未接入多世界；接入后用于 region 分片/跨世界检索）。
+	WorldID  string
+	RegionID string
+	Tick     int
 }
 
 // EmitProcessEvent 把一条命运流程事件直接写入 events 表（append-only 留痕），不改任何状态字段。
@@ -133,8 +137,8 @@ func EmitProcessEvent(ctx context.Context, execer interface {
 		ctx,
 		`
 		INSERT INTO events (
-			id, session_id, actor_unit_id, target_unit_id, event_type, reason_code, payload_json, occurred_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			id, session_id, actor_unit_id, target_unit_id, event_type, reason_code, payload_json, occurred_at, world_id, region_id, tick
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 		id,
 		event.SessionID,
@@ -144,10 +148,21 @@ func EmitProcessEvent(ctx context.Context, execer interface {
 		string(event.Code),
 		string(encoded),
 		time.Now().UTC().Format(time.RFC3339Nano),
+		nullableText(event.WorldID),
+		nullableText(event.RegionID),
+		event.Tick,
 	); err != nil {
 		return "", fmt.Errorf("insert process event: %w", err)
 	}
 	return id, nil
+}
+
+// nullableText 把空字符串映射为 SQL NULL（world_id/region_id 可空）。
+func nullableText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // Lookup 按原因码查找定义。

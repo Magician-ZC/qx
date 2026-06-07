@@ -15,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"qunxiang/backend/internal/storage/dbdialect"
+	"qunxiang/backend/internal/storage/dbmigrate"
 )
 
 //go:embed schema.sql
@@ -45,6 +46,12 @@ func Open(path string) (*sql.DB, error) {
 	}
 
 	if err := applySchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	// 大世界双键迁移：给 events 幂等补 world_id/region_id/tick（加列不改义，沙盘 §8.7）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "events", dbmigrate.EventScopeColumns); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

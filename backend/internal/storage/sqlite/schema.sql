@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS events (
   reason_code TEXT NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}',
   occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  world_id TEXT,
+  region_id TEXT,
+  tick INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(actor_unit_id) REFERENCES units(id) ON DELETE SET NULL,
   FOREIGN KEY(target_unit_id) REFERENCES units(id) ON DELETE SET NULL
 );

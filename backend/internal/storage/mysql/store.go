@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"qunxiang/backend/internal/storage/dbdialect"
+	"qunxiang/backend/internal/storage/dbmigrate"
 )
 
 //go:embed schema.sql
@@ -44,6 +45,11 @@ func Open(dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping mysql database: %w", err)
 	}
 	if err := applySchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// 大世界双键迁移：给 events 幂等补 world_id/region_id/tick（加列不改义，沙盘 §8.7）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "events", dbmigrate.EventScopeColumns); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
