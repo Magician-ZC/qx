@@ -1,0 +1,328 @@
+/* 文件说明：命运开盒 UI 样式——温润的墨色宣纸感，克制、有宿命气，与旧战棋客户端的冷色调区分。 */
+
+.fate-shell {
+  min-height: 100vh;
+  background: radial-gradient(120% 120% at 50% 0%, #f5ecdc 0%, #ece0c9 55%, #e3d4b6 100%);
+  color: #3a2c1b;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 16px 64px;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.fate-root {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.fate-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-bottom: 1px solid rgba(90, 66, 38, 0.25);
+  padding-bottom: 12px;
+}
+.fate-brand {
+  font-size: 22px;
+  letter-spacing: 0.3em;
+  color: #6b4a22;
+}
+.fate-sub {
+  font-size: 12px;
+  color: #8a7556;
+}
+
+.fate-slot-title {
+  font-size: 13px;
+  color: #8a6a3c;
+  letter-spacing: 0.15em;
+  margin-bottom: 8px;
+}
+
+/* 状态卡 */
+.fate-status {
+  background: rgba(255, 250, 240, 0.7);
+  border: 1px solid rgba(120, 90, 50, 0.25);
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 4px 18px rgba(120, 90, 50, 0.08);
+}
+.fate-status-name {
+  font-size: 24px;
+  color: #4a3417;
+}
+.fate-status-lineage {
+  font-size: 12px;
+  color: #97825f;
+  margin-top: 2px;
+}
+.fate-status-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 8px;
+}
+.fate-bar {
+  display: grid;
+  grid-template-columns: 40px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.fate-bar-track {
+  height: 8px;
+  background: rgba(120, 90, 50, 0.16);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.fate-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.fate-bar-hp .fate-bar-fill {
+  background: linear-gradient(90deg, #b4543a, #d98c5f);
+}
+.fate-bar-hunger .fate-bar-fill {
+  background: linear-gradient(90deg, #8a7b3a, #c4b15a);
+}
+.fate-bar-morale .fate-bar-fill {
+  background: linear-gradient(90deg, #6a7b9a, #9ab0c8);
+}
+.fate-bar-value {
+  text-align: right;
+  color: #7a6038;
+}
+.fate-bio {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #5a4628;
+  margin: 8px 0 0;
+}
+
+/* 待决策（最显眼） */
+.fate-pending {
+  background: linear-gradient(180deg, #fff6e6, #f6e6c8);
+  border: 1px solid rgba(160, 110, 50, 0.4);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 6px 22px rgba(150, 100, 40, 0.16);
+}
+.fate-pending-text {
+  font-size: 16px;
+  line-height: 1.8;
+  color: #4a3417;
+  margin: 6px 0 14px;
+}
+.fate-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.fate-actions button {
+  flex: 1;
+  min-width: 96px;
+  padding: 10px 8px;
+  border: 1px solid rgba(140, 95, 45, 0.45);
+  border-radius: 8px;
+  background: rgba(255, 252, 245, 0.9);
+  color: #5a3f1c;
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.fate-actions button:hover:not(:disabled) {
+  background: #f0dcb8;
+}
+.fate-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.fate-more {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #97825f;
+}
+
+/* 卡片 */
+.fate-card {
+  background: rgba(255, 250, 240, 0.6);
+  border-left: 3px solid rgba(150, 110, 60, 0.5);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #4f3a1d;
+  margin-bottom: 8px;
+}
+.fate-card-echo {
+  border-left-color: #9a6a3a;
+  background: rgba(245, 232, 210, 0.7);
+  font-style: italic;
+}
+.fate-empty {
+  font-size: 13px;
+  color: #9a8a68;
+  padding: 8px 0;
+}
+
+/* 托梦输入 */
+.fate-intervene {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.fate-intervene input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid rgba(140, 100, 50, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.9);
+  font-family: inherit;
+  font-size: 14px;
+  color: #4a3417;
+}
+.fate-intervene button {
+  padding: 10px 18px;
+  border: none;
+  border-radius: 8px;
+  background: #7a5226;
+  color: #fdf6e8;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.fate-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(58, 42, 22, 0.92);
+  color: #f5ecdc;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  animation: fate-toast-life 3.2s forwards;
+}
+@keyframes fate-toast-life {
+  0% { opacity: 0; transform: translate(-50%, 10px); }
+  12% { opacity: 1; transform: translate(-50%, 0); }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* onboarding */
+.fate-onboarding {
+  justify-content: center;
+}
+.fate-create,
+.fate-preview {
+  width: 100%;
+  max-width: 440px;
+  background: rgba(255, 250, 240, 0.78);
+  border: 1px solid rgba(120, 90, 50, 0.25);
+  border-radius: 16px;
+  padding: 28px 26px;
+  box-shadow: 0 8px 30px rgba(120, 90, 50, 0.12);
+}
+.fate-create h1 {
+  font-size: 24px;
+  letter-spacing: 0.2em;
+  color: #6b4a22;
+  margin: 0 0 8px;
+}
+.fate-create-lead,
+.fate-preview-hint {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #7a6038;
+  margin: 0 0 18px;
+}
+.fate-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #6a4e26;
+  margin-bottom: 14px;
+}
+.fate-create input,
+.fate-create select {
+  padding: 10px 12px;
+  border: 1px solid rgba(140, 100, 50, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.95);
+  font-family: inherit;
+  font-size: 14px;
+  color: #4a3417;
+}
+.fate-create-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  background: #7a5226;
+  color: #fdf6e8;
+  font-family: inherit;
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.fate-create-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.fate-error {
+  color: #b4543a;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.fate-preview {
+  text-align: center;
+}
+.fate-preview-title {
+  font-size: 13px;
+  letter-spacing: 0.2em;
+  color: #97825f;
+}
+.fate-preview-name {
+  font-size: 30px;
+  color: #4a3417;
+  margin: 10px 0 14px;
+}
+.fate-preview-bio {
+  font-size: 15px;
+  line-height: 1.9;
+  color: #5a4628;
+}
+.fate-preview button,
+.fate-restart {
+  margin-top: 18px;
+  padding: 12px 22px;
+  border: none;
+  border-radius: 10px;
+  background: #7a5226;
+  color: #fdf6e8;
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+.fate-restart {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  padding: 8px 14px;
+  font-size: 12px;
+  background: rgba(122, 82, 38, 0.85);
+}

@@ -27,6 +27,16 @@ type SessionStreamHandlers = {
   onSnapshot?: (snapshot: SessionSnapshot, meta: Record<string, unknown>) => void;
   onLog?: (entry: SessionLog) => void;
   onError?: (error: unknown) => void;
+  onFateInbox?: (payload: Record<string, unknown>) => void;
+  onFateEcho?: (payload: Record<string, unknown>) => void;
+};
+
+// FateCard 是命运四槽界面的一张卡（高光/待决策/回响）。
+export type FateCard = {
+  kind: "highlight" | "pending" | "echo";
+  decision_id?: string;
+  narrative: string;
+  occurred_at?: string;
 };
 
 export class APIError extends Error {
@@ -294,6 +304,14 @@ export function subscribeSessionStream(sessionID: string, handlers: SessionStrea
       }
       if (type === "session_log") {
         handlers.onLog?.(payload as SessionLog);
+        return;
+      }
+      if (type === "fate_inbox") {
+        handlers.onFateInbox?.(payload);
+        return;
+      }
+      if (type === "fate_echo") {
+        handlers.onFateEcho?.(payload);
       }
     };
 
@@ -327,6 +345,58 @@ export function subscribeSessionStream(sessionID: string, handlers: SessionStrea
     }
     socket?.close();
   };
+}
+
+// ---- 命运开盒（角色命运 UI）接口 ----
+
+// getFateFeed 取某角色命运四槽首屏卡片（高光/待决策/回响）。
+export async function getFateFeed(unitID: string): Promise<FateCard[]> {
+  const data = await request<{ feed?: FateCard[] }>(`/api/fate/feed/${encodeURIComponent(unitID)}`);
+  return data.feed ?? [];
+}
+
+// resolveFateDecision 处理一条待决策（玩家拿主意）。
+export async function resolveFateDecision(
+  decisionID: string,
+  sessionID: string,
+  unitID: string,
+  resolveType: string,
+): Promise<void> {
+  await request<{ ok?: boolean }>(`/api/fate/decisions/${encodeURIComponent(decisionID)}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionID, unit_id: unitID, resolve_type: resolveType }),
+  });
+}
+
+// recordPlayerIntervention 记录一次玩家直接接管（可被回响引用）。
+export async function recordPlayerIntervention(
+  sessionID: string,
+  unitID: string,
+  summary: string,
+): Promise<string> {
+  const data = await request<{ event_id?: string }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/intervene`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ summary }),
+    },
+  );
+  return data.event_id ?? "";
+}
+
+// getUnitStatus 读单个角色（命运四槽的状态卡用）。
+export async function getUnitStatus(unitID: string): Promise<Record<string, unknown> | null> {
+  const data = await request<{ unit?: Record<string, unknown> }>(`/api/units/${encodeURIComponent(unitID)}`);
+  return data.unit ?? null;
+}
+
+// bootstrapCharacter 快速创建一个角色（捏人 onboarding 用）。
+export async function bootstrapCharacter(name: string, sessionID: string, factionID = "player"): Promise<Record<string, unknown> | null> {
+  const qs = `name=${encodeURIComponent(name)}&session_id=${encodeURIComponent(sessionID)}&faction_id=${encodeURIComponent(factionID)}`;
+  const data = await request<{ unit?: Record<string, unknown> }>(`/api/units/bootstrap?${qs}`, { method: "POST" });
+  return data.unit ?? null;
 }
 
 // setPlayerDirective 向后端提交玩家方针（兼容旧接口）。
