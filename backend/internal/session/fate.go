@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/engine/narration"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/unit"
 )
@@ -279,14 +280,13 @@ func absFloat(v float64) float64 {
 	return v
 }
 
-// fateCard 把世界事件渲染成祖魂语气的命运卡（模板，无 LLM）。
+// fateCard 把世界事件渲染成祖魂语气的命运卡（engine/narration，确定性、无 LLM、按事件打散变体）。
 func fateCard(ev FateEvent, route relevance.FateRoute) string {
-	summary := ev.Summary
-	if summary == "" {
-		summary = "她在乎的人那边，出了点事。"
-	}
-	if route == relevance.RoutePending {
-		return "有件关乎她的事，在等你拿个主意——" + summary
-	}
-	return summary
+	return narration.Beat(
+		string(ev.ReasonCode),
+		ev.EmotionWeight,
+		route == relevance.RoutePending,
+		ev.Summary,
+		0, // 种子按 reason-code+摘要派生，保证编年史不重复
+	)
 }
