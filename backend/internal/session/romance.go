@@ -409,6 +409,8 @@ func (service *Service) resolveDuePregnancies(ctx context.Context, state *State)
 		} else {
 			state.WildUnitIDs = append(state.WildUnitIDs, child.ID)
 		}
+		// 中途出生的玩家子嗣也要进大世界离线调度（M7.3-real-4b，开关关时 no-op；仅玩家阵营）。
+		service.seedAmbientForNewUnit(ctx, state, child)
 		left.Social.ChildUnitIDs = append(left.Social.ChildUnitIDs, child.ID)
 		right.Social.ChildUnitIDs = append(right.Social.ChildUnitIDs, child.ID)
 		left.Social.LastRomanceTurn = state.TurnState.Turn
@@ -1052,6 +1054,8 @@ func (service *Service) maybeConvertWildling(ctx context.Context, state *State, 
 		state.EnemyUnitIDs = append(state.EnemyUnitIDs, wild.ID)
 	}
 	_ = service.units.Save(ctx, *wild)
+	// 归化入伙的玩家阵营野民也要进大世界离线调度（M7.3-real-4b，开关关时 no-op；仅玩家阵营）。
+	service.seedAmbientForNewUnit(ctx, state, *wild)
 	message := strings.TrimSpace(consent.Summary)
 	if message == "" {
 		message = fmt.Sprintf("%s 被 %s 感化，加入 %s。", wild.DisplayName(), contact.DisplayName(), contact.FactionID)

@@ -55,8 +55,9 @@ func main() {
 	// 大世界 region-runner（M7.3-real-1，默认关闭、纯影子）：按真实时钟低频唤醒离线单位决策。
 	// QUNXIANG_REGION_RUNNER_ENABLED=true 才启动；QUNXIANG_REGION_TICK_SECONDS 设逻辑 tick 的秒长（默认 30）。
 	// Apply=false 时纯 shadow（只记日志，real-1）；QUNXIANG_REGION_RUNNER_APPLY=true 才真应用 L1 决策（real-2 灰度）。
+	regionRunnerEnabled := envBool("QUNXIANG_REGION_RUNNER_ENABLED")
 	regionRunner := regionrunner.New(db, regionrunner.Config{
-		Enabled:     envBool("QUNXIANG_REGION_RUNNER_ENABLED"),
+		Enabled:     regionRunnerEnabled,
 		Apply:       envBool("QUNXIANG_REGION_RUNNER_APPLY"),
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
@@ -102,6 +103,8 @@ func main() {
 		ColdStore:    coldStore,
 		Accounts:     accountService,
 		RegionRunner: regionRunner,
+		// region-runner 启用时，建局/组队才把玩家单位 seed 进离线调度（M7.3-real-4b，默认关→零成本）。
+		RegionRunnerEnabled: regionRunnerEnabled,
 	})
 
 	server := &http.Server{

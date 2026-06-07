@@ -97,6 +97,10 @@ type Service struct {
 
 	// 归因校验强制开关（每实例配置）；累计计数为进程级全局，见 attribution_bridge.go。
 	attributionEnforced bool
+
+	// 离线自治调度开关（M7.3-real-4b，由 main/router 按 QUNXIANG_REGION_RUNNER_ENABLED 注入，默认关）：
+	// 关时建局/组队不写 units 作用域列、不入唤醒队列，使大世界 region-runner 这一 flag-gated 能力对默认链路零成本。
+	ambientSchedulingEnabled bool
 }
 
 // NewServiceWithColdStore 初始化会话服务，统一挂接状态仓库、单位仓库和状态变更器。
@@ -392,6 +396,10 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	appendLog(&state, "weather", fmt.Sprintf("本回合天气：%s。%s", state.Weather.DisplayName, state.Weather.Note), "", "")
 	ensureFactionRelations(&state)
 
+	// 把玩家单位 seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op）。best-effort：绝不因调度登记失败拖垮建局。
+	// draft 模式此处 PlayerUnitIDs 尚空（单位在 ApplyOpeningDraft 才落库），故对 draft 自然 no-op、由组队完成时再 seed。
+	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
+
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}
@@ -522,6 +530,8 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 	state.SetupDeadlineAt = time.Time{}
 	appendLog(&state, "setup", fmt.Sprintf("开局组队完成：玩家选择了 %d 名单位。第 1 回合部署阶段开始。", len(state.PlayerUnitIDs)), "", "")
 	ensureFactionRelations(&state)
+	// 组队完成、玩家单位刚落库 → seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op；best-effort）。
+	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}

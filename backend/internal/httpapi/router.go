@@ -32,14 +32,15 @@ import (
 
 // Dependencies 聚合 Router 初始化所需的外部依赖。
 type Dependencies struct {
-	Config       config.Config
-	Logger       *slog.Logger
-	Hub          *ws.Hub
-	Store        *sql.DB
-	AI           *ai.Service
-	ColdStore    *sql.DB
-	Accounts     *account.Service
-	RegionRunner RegionRunnerStats // 可空：大世界 region-runner 遥测（/healthz 暴露）
+	Config              config.Config
+	Logger              *slog.Logger
+	Hub                 *ws.Hub
+	Store               *sql.DB
+	AI                  *ai.Service
+	ColdStore           *sql.DB
+	Accounts            *account.Service
+	RegionRunner        RegionRunnerStats // 可空：大世界 region-runner 遥测（/healthz 暴露）
+	RegionRunnerEnabled bool              // region-runner 是否启用：决定建局/组队是否把单位 seed 进离线调度（M7.3-real-4b）
 }
 
 // RegionRunnerStats 是 region-runner 暴露遥测的最小接口（避免 httpapi 依赖 regionrunner 包）。
@@ -134,6 +135,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		// 开启归因强制：无源戏剧性自治选择优雅回退安全决策（设计宪法 §5）。
 		// 遥测见 Service.AttributionStats()；若线上 OOC 率过高可改回 false。
 		service.SetAttributionEnforcement(true)
+		// region-runner 启用时，建局/组队把玩家单位 seed 进离线调度（默认关→零成本，见 ambient_scheduling.go）。
+		service.SetAmbientSchedulingEnabled(deps.RegionRunnerEnabled)
 		return service
 	}
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
