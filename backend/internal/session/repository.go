@@ -34,7 +34,15 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 	}
 	state.UpdatedAt = now
 
+	// 拆 state_json（沙盘 §11.2）：决策轨迹外移到 decision_traces 表。持久性不变量——
+	// **先确认写进表、成功才从 blob 摘除**；写表失败则保留在 blob（瘦身放弃，但绝不丢轨迹，下次 load 自愈）。
+	traces := state.DecisionTraces
+	stripTraces := persistDecisionTraces(ctx, repository.db, dbdialect.IsMySQL(repository.db), state.ID, traces) == nil
+	if stripTraces {
+		state.DecisionTraces = nil
+	}
 	encodedState, err := json.Marshal(state)
+	state.DecisionTraces = traces
 	if err != nil {
 		return fmt.Errorf("marshal session state: %w", err)
 	}

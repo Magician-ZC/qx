@@ -3198,6 +3198,8 @@ func (service *Service) loadSession(ctx context.Context, sessionID string) (Stat
 	if err != nil {
 		return State{}, nil, err
 	}
+	// 拆 state_json：决策轨迹的权威读源已切到旁路表——回填旧局残留 + 从表 hydrate（须在任何 Save 之前，免旧局轨迹被瘦身丢掉）。
+	service.hydrateDecisionTraces(ctx, &state)
 	oldBudgets := state.TurnState.Budgets
 	state.TurnState.Budgets = turns.NormalizeBudgets(state.TurnState.Budgets)
 	if state.TurnState.Phase == turns.PhaseDeployment && oldBudgets.Deployment != state.TurnState.Budgets.Deployment {
