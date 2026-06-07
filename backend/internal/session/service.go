@@ -2592,6 +2592,8 @@ func (service *Service) applyAttack(
 			if err := service.resolveKillLoot(ctx, state, attacker, target); err != nil {
 				return err
 			}
+			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
+			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
 		}
 
 		appendLog(
