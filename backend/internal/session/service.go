@@ -711,6 +711,7 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		if err := service.refreshSessionMemoryDecay(ctx, &state, units); err != nil {
 			return Snapshot{}, err
 		}
+		service.refreshThreats(ctx, &state, units) // 野外威胁刷新（surface-only，best-effort）
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		appendSessionMetricsLog(&state)
 		units = nil
@@ -2616,6 +2617,8 @@ func (service *Service) applyAttack(
 			}
 			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
 			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
+			// 接入世界后：这一击作为跨玩家事件写进不可篡改的世界总线（best-effort，gate 在 WorldID）。
+			service.recordWorldizedKill(ctx, state, attacker, target)
 		}
 
 		appendLog(

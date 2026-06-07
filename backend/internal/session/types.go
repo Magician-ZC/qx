@@ -523,6 +523,7 @@ type PregnancyState struct {
 // State 是服务端权威状态，包含完整可回放信息（含内部审计字段）。
 type State struct {
 	ID                   string             `json:"id"`
+	WorldID              string             `json:"world_id,omitempty"` // 本局所属世界（空=未接入多世界；接入后实战交互自动写世界总线）
 	Mode                 string             `json:"mode"`
 	RandomSeed           int64              `json:"random_seed"`
 	PlayerFactionID      string             `json:"player_faction_id"`
