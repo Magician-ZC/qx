@@ -74,8 +74,8 @@ func applySchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("read mysql schema: %w", err)
 	}
 	for _, statement := range strings.Split(string(bytes), ";") {
-		statement = strings.TrimSpace(statement)
-		if statement == "" || strings.HasPrefix(statement, "--") {
+		statement = stripSQLLineComments(statement)
+		if statement == "" {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -83,4 +83,20 @@ func applySchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// stripSQLLineComments 逐行剥掉整行 `--` 注释后返回 trim 的语句。
+// 修正原「整块 TrimSpace 后以 -- 开头即跳过」的缺陷：按 ; 切分后，「注释行 + CREATE TABLE」会成为同一块、块首是注释，
+// 被整块跳过 → 该表在 MySQL 下从未建表（曾致 agent_wake_queue 缺失、region-runner 队列在 MySQL 部署失效，real-5 发现）。
+// 逐行剥离后纯注释块自然变空被跳过，而「注释 + 语句」块保留语句正常执行。仅剥整行注释，不动行内 SQL（schema DDL 无字符串内 --）。
+func stripSQLLineComments(statement string) string {
+	lines := strings.Split(statement, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
