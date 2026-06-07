@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"qunxiang/backend/internal/analytics"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/narration"
 	"qunxiang/backend/internal/engine/relevance"
@@ -133,6 +134,14 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	}); err != nil {
 		return out, err
 	}
+	// 漏斗埋点（best-effort）：待决策入箱是北极星「D2 收件箱处理率」的分母。
+	if route == relevance.RoutePending {
+		_ = analytics.Emit(ctx, service.db, analytics.Event{
+			Stage: analytics.StageRetention, Name: analytics.EventDecisionPending,
+			SessionID: sessionID, UnitID: owner.ID,
+			Props: map[string]any{"decision_id": out.DecisionID, "relevance": rel},
+		})
+	}
 	return out, nil
 }
 
@@ -188,6 +197,14 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 		Category:    events.CategoryFate,
 		Payload:     map[string]any{"decision_id": decisionID, "resolve_type": resolveType},
 	})
+	if err == nil {
+		// 漏斗埋点（best-effort）：处理一条待决策 = 北极星留存动作。
+		_ = analytics.Emit(ctx, service.db, analytics.Event{
+			Stage: analytics.StageRetention, Name: analytics.EventDecisionResolved,
+			SessionID: sessionID, UnitID: unitID,
+			Props: map[string]any{"decision_id": decisionID, "resolve_type": resolveType},
+		})
+	}
 	return err
 }
 

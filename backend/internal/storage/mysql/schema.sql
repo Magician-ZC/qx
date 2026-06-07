@@ -205,3 +205,15 @@ CREATE TABLE IF NOT EXISTS world_bosses (
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_world_bosses_world (world_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS product_events (
+  id VARCHAR(191) PRIMARY KEY,
+  stage VARCHAR(32) NOT NULL,
+  event_name VARCHAR(64) NOT NULL,
+  session_id VARCHAR(191) NULL,
+  unit_id VARCHAR(191) NULL,
+  properties_json LONGTEXT NOT NULL,
+  occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_product_events_name (event_name, occurred_at),
+  INDEX idx_product_events_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

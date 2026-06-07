@@ -25,7 +25,8 @@ const (
 	CategoryEconomy  Category = "economy_material"
 	CategoryRelation Category = "relation_change"
 	CategoryCommand  Category = "command_response"
-	CategoryFate     Category = "fate_event" // 命运流程事件（相关性命中/待决策入队等，非状态变更）
+	CategoryFate     Category = "fate_event"    // 命运流程事件（相关性命中/待决策入队等，非状态变更）
+	CategoryPlayer   Category = "player_action" // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
 )
 
 // ReasonCode 类型定义用于统一该模块的数据表达。
@@ -52,6 +53,9 @@ const (
 	ReasonInboxHighlight   ReasonCode = "INBOX_HIGHLIGHT"   // 进高光卡（可一瞥）
 	ReasonPendingDecision  ReasonCode = "PENDING_DECISION"  // 升级待决策，入命运收件箱
 	ReasonDecisionResolved ReasonCode = "DECISION_RESOLVED" // 待决策被处理（玩家或过期兜底）
+
+	// 玩家动作事件（经 EmitProcessEvent，可被归因校验器的 order_echo 引用——回响 Echo 的锚点）。
+	ReasonPlayerIntervention ReasonCode = "PLAYER_INTERVENTION" // 玩家直接接管/嘱咐了一次（验证 §5.2 埋点 + M3 回响锚）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -85,6 +89,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonInboxHighlight, Category: CategoryFate, DisplayName: "高光时刻", DefaultReasonText: "她经历了一段值得一看的事", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonPendingDecision, Category: CategoryFate, DisplayName: "待决策", DefaultReasonText: "一件关乎她命运的事在等你拿主意", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
 		{Code: ReasonDecisionResolved, Category: CategoryFate, DisplayName: "决断已下", DefaultReasonText: "一件待决策的事有了着落", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonPlayerIntervention, Category: CategoryPlayer, DisplayName: "玩家接管", DefaultReasonText: "你直接为她拿了一次主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
 	}
 }
 

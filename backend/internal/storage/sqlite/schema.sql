@@ -221,3 +221,17 @@ CREATE TABLE IF NOT EXISTS world_bosses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_world_bosses_world ON world_bosses(world_id, status);
+
+-- 产品分析埋点（AARRR 漏斗，append-only，无 FK，与游戏状态解耦；设计 docs/验证实验设计.md §5.2）。
+CREATE TABLE IF NOT EXISTS product_events (
+  id TEXT PRIMARY KEY,
+  stage TEXT NOT NULL,
+  event_name TEXT NOT NULL,
+  session_id TEXT,
+  unit_id TEXT,
+  properties_json TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_events_name ON product_events(event_name, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_product_events_session ON product_events(session_id);
