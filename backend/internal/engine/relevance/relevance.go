@@ -19,9 +19,10 @@ const (
 	Legacy         AnchorKind = "legacy"           // 传家物/血脉
 )
 
-// FactorWeights 是各锚类别的相关性因子权重（设计宪法 §4.1 默认值，[待测试/可调]）。
-// 注意：这是「加权求和」而非「加权平均」——多根锚被同一事件点亮时相关性可叠加越过阈值，
-// 单根锚的贡献以其权重为上限，故重大命运 beat 往往需要多锚共振或较高 weight。
+// FactorWeights 表达各锚类别的「相对重要度排序」（沿用设计宪法 §4.1 的相对大小，[待测试/可调]）。
+// 仅用其相对比例：内部归一化为 RelativeImportance（最重要的类别=1.0），避免「加权和为 1 → 单锚被
+// 自身权重封顶、永远过不了 0.35 阈」的标定缺陷。多锚通过 noisy-OR 组合，故单根强锚也能过阈、
+// 多锚共振次可加、相关性恒在 [0,1]。
 var FactorWeights = map[AnchorKind]float64{
 	Relation:       0.32,
 	Redline:        0.28,
@@ -55,9 +56,33 @@ type Hit struct {
 	AgeDays float64
 }
 
-// FactorWeight 返回某锚类别的因子权重。
+// FactorWeight 返回某锚类别的原始因子权重（相对重要度的来源）。
 func FactorWeight(kind AnchorKind) float64 {
 	return FactorWeights[kind]
+}
+
+// maxFactorWeight 返回当前最重要类别的权重（用于归一化为相对重要度）。
+func maxFactorWeight() float64 {
+	m := 0.0
+	for _, w := range FactorWeights {
+		if w > m {
+			m = w
+		}
+	}
+	if m <= 0 {
+		return 1
+	}
+	return m
+}
+
+// RelativeImportance 把因子权重归一化为 [0,1]（最重要类别=1.0），保留相对排序但不缩水单锚量级。
+func RelativeImportance(kind AnchorKind) float64 {
+	return FactorWeights[kind] / maxFactorWeight()
+}
+
+// contribution 是单根被点亮的锚对相关性的贡献，夹在 [0,1]。
+func contribution(h Hit, hopFidelity float64) float64 {
+	return clamp01(clamp01(h.Anchor.Weight) * RelativeImportance(h.Anchor.Kind) * TimeDecay(h.AgeDays, h.Anchor.HalfLifeDays) * hopFidelity)
 }
 
 // TimeDecay 按半衰期做时间衰减：2^(-age/halfLife)。半衰期 ≤0 或 age ≤0 时返回 1。
@@ -76,17 +101,19 @@ func HopFidelity(hop int) float64 {
 	return math.Pow(HopDecay, float64(hop))
 }
 
-// Score 把一组「被事件点亮的锚」聚合为相关性分。
-// 公式：Σ_hits weight·factorWeight(kind)·timeDecay(age,halfLife)·hopFidelity。
+// Score 把一组「被事件点亮的锚」聚合为相关性分 ∈ [0,1]。
+// 组合用 noisy-OR：relevance = 1 − Π_hits (1 − contribution)，其中
+// contribution = clamp01(weight · relativeImportance(kind) · timeDecay(age,halfLife) · hopFidelity)。
+// 性质：单根强锚即可过阈；多锚共振次可加(不重复计数)；恒在 [0,1]；对任一 weight 单调不减。
 func Score(hits []Hit, hopFidelity float64) float64 {
 	if hopFidelity <= 0 {
 		hopFidelity = 1
 	}
-	total := 0.0
+	inverse := 1.0
 	for _, h := range hits {
-		total += clamp01(h.Anchor.Weight) * FactorWeight(h.Anchor.Kind) * TimeDecay(h.AgeDays, h.Anchor.HalfLifeDays) * hopFidelity
+		inverse *= 1 - contribution(h, hopFidelity)
 	}
-	return total
+	return 1 - inverse
 }
 
 // PassesGate 判断相关性是否过阈、可进前台候选。
