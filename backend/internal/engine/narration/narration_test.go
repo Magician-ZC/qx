@@ -22,8 +22,8 @@ func TestValenceDrivesTone(t *testing.T) {
 		valence float64
 		want    tone
 	}{
-		{"INBOX_HIGHLIGHT", 0.4, toneWarm},      // 效价为正 → 暖
-		{"INBOX_HIGHLIGHT", -0.4, toneGrave},    // 效价为负 → 沉
+		{"INBOX_HIGHLIGHT", 0.4, toneWarm},       // 效价为正 → 暖
+		{"INBOX_HIGHLIGHT", -0.4, toneGrave},     // 效价为负 → 沉
 		{"INBOX_HIGHLIGHT", 0.0, toneConnective}, // 中性效价 → 按 reason-code 归牵连
 		{"ECONOMY_LOOT", 0.0, toneWarm},
 		{"COMBAT_DOWN", 0.0, toneGrave},
