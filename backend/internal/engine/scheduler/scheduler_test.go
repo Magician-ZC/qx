@@ -7,13 +7,13 @@ func TestClassifyTier(t *testing.T) {
 		current, lastActive int64
 		want                Tier
 	}{
-		{100, 100, TierHot},  // idle 0
-		{100, 98, TierHot},   // idle 2 < 3
-		{100, 97, TierWarm},  // idle 3
-		{100, 80, TierWarm},  // idle 20 < 24
-		{100, 76, TierCold},  // idle 24
-		{100, 0, TierCold},   // idle 100
-		{100, 110, TierHot},  // idle -10（时钟回拨）→ HOT 兜底
+		{100, 100, TierHot}, // idle 0
+		{100, 98, TierHot},  // idle 2 < 3
+		{100, 97, TierWarm}, // idle 3
+		{100, 80, TierWarm}, // idle 20 < 24
+		{100, 76, TierCold}, // idle 24
+		{100, 0, TierCold},  // idle 100
+		{100, 110, TierHot}, // idle -10（时钟回拨）→ HOT 兜底
 	}
 	for _, c := range cases {
 		if got := ClassifyTier(c.current, c.lastActive); got != c.want {

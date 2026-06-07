@@ -8,18 +8,18 @@
 // SELECT…FOR UPDATE + UPDATE 包在内部事务里（FOR UPDATE 仅事务内加行锁）。
 //
 // ⚠️ M7.3-real 接入执行主循环前**必须补齐**的三项（经评审登记，现阶段表空故无现网影响，但接入即生效）：
-//   1. 保留期清理：两表已加 session_id 列、PurgeExpiredSessionData 按 session_id 删（real-0 已接，与其余旁路表口径一致）。
-//      **enqueue 调用方必须把 WakeEntry/DecisionJob.SessionID 填成 ==sessionID**，否则 purge 漏删留孤儿。
-//      仍待补（real-1+）：单位死亡时 RemoveWake + 失效其在途 job。（EraseSessionPrivateData 刻意不清——队列无 PII 且会话存续。）
-//   2. stale-running 回收：worker 认领后崩溃/退出会让 job 永久卡 running，单调抬高 CountJobsByStatus(running)
-//      背压计数、最终顶过 DefaultMaxInFlight 使 region-runner 饿死。接入时须补 claimed_at 超时 reclaim（置回 pending +
-//      attempt 自增）+ attempt 上限（超限置 failed 不再 reclaim）。attempt 列已 plumb 但本片未自增。
-//   3. 多世界作用域：ListDueWakes / 作业认领目前按 region_id 等值、未带 world_id。阶段-0 region_id==session_id 全局唯一
-//      故无碰撞；多世界落地后须按 (world_id, region_id) 限定，避免跨世界同名 region 互相串唤醒。作业认领刻意全局（共享
-//      worker 池 §9 全局在途上限），若需 region 亲和性再加 world/region 过滤。
-//   4. **RegionID 必填不变量**：DistinctWakeRegions 带 `region_id IS NOT NULL`、ListDueWakes 按 region_id 等值匹配，
-//      故空 RegionID 入队的 wake（存为 NULL）**永不会被 region-runner 发现 → 单位永久饿死**。real-4 seed 接入时
-//      EnqueueWake 的 RegionID 必填（MVP ==sessionID）；切勿以空 region 入队。
+//  1. 保留期清理：两表已加 session_id 列、PurgeExpiredSessionData 按 session_id 删（real-0 已接，与其余旁路表口径一致）。
+//     **enqueue 调用方必须把 WakeEntry/DecisionJob.SessionID 填成 ==sessionID**，否则 purge 漏删留孤儿。
+//     仍待补（real-1+）：单位死亡时 RemoveWake + 失效其在途 job。（EraseSessionPrivateData 刻意不清——队列无 PII 且会话存续。）
+//  2. stale-running 回收：worker 认领后崩溃/退出会让 job 永久卡 running，单调抬高 CountJobsByStatus(running)
+//     背压计数、最终顶过 DefaultMaxInFlight 使 region-runner 饿死。接入时须补 claimed_at 超时 reclaim（置回 pending +
+//     attempt 自增）+ attempt 上限（超限置 failed 不再 reclaim）。attempt 列已 plumb 但本片未自增。
+//  3. 多世界作用域：ListDueWakes / 作业认领目前按 region_id 等值、未带 world_id。阶段-0 region_id==session_id 全局唯一
+//     故无碰撞；多世界落地后须按 (world_id, region_id) 限定，避免跨世界同名 region 互相串唤醒。作业认领刻意全局（共享
+//     worker 池 §9 全局在途上限），若需 region 亲和性再加 world/region 过滤。
+//  4. **RegionID 必填不变量**：DistinctWakeRegions 带 `region_id IS NOT NULL`、ListDueWakes 按 region_id 等值匹配，
+//     故空 RegionID 入队的 wake（存为 NULL）**永不会被 region-runner 发现 → 单位永久饿死**。real-4 seed 接入时
+//     EnqueueWake 的 RegionID 必填（MVP ==sessionID）；切勿以空 region 入队。
 package agentqueue
 
 import (
