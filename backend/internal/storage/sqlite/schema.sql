@@ -235,3 +235,18 @@ CREATE TABLE IF NOT EXISTS product_events (
 
 CREATE INDEX IF NOT EXISTS idx_product_events_name ON product_events(event_name, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_product_events_session ON product_events(session_id);
+
+-- 相关性锚（每角色「她在乎什么」的持久集合：关系/红线/目标/债仇爱/所在地/血脉；设计 耦合 §1.1）。
+-- 在关系/目标/红线变更时 upsert 权重，喂 engine/relevance.Score。非关系锚（目标/红线/传家物）只有这张表能存。
+CREATE TABLE IF NOT EXISTS relevance_anchors (
+  character_unit_id TEXT NOT NULL,
+  anchor_kind TEXT NOT NULL,
+  anchor_ref TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 0,
+  label TEXT NOT NULL DEFAULT '',
+  half_life_days REAL NOT NULL DEFAULT 14,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (character_unit_id, anchor_kind, anchor_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_relevance_anchors_char ON relevance_anchors(character_unit_id);

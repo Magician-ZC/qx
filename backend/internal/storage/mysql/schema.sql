@@ -217,3 +217,15 @@ CREATE TABLE IF NOT EXISTS product_events (
   INDEX idx_product_events_name (event_name, occurred_at),
   INDEX idx_product_events_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS relevance_anchors (
+  character_unit_id VARCHAR(191) NOT NULL,
+  anchor_kind VARCHAR(32) NOT NULL,
+  anchor_ref VARCHAR(191) NOT NULL,
+  weight DOUBLE NOT NULL DEFAULT 0,
+  label VARCHAR(255) NOT NULL DEFAULT '',
+  half_life_days DOUBLE NOT NULL DEFAULT 14,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (character_unit_id, anchor_kind, anchor_ref),
+  INDEX idx_relevance_anchors_char (character_unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

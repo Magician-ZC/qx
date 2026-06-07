@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/villageseed"
@@ -57,7 +58,7 @@ func (service *Service) SeedVillage(ctx context.Context, sessionID string, facti
 		out = append(out, SeededVillager{UnitID: rec.ID, Member: m, WorldID: worldID})
 	}
 
-	// 织出生关系网（四轴按种子的关系类型一次性落到位）。
+	// 织出生关系网（四轴按种子的关系类型一次性落到位），并把强关系沉淀为持久「债仇爱」锚。
 	for _, b := range v.Bonds {
 		if b.From < 0 || b.From >= len(records) || b.To < 0 || b.To >= len(records) {
 			continue
@@ -69,6 +70,16 @@ func (service *Service) SeedVillage(ctx context.Context, sessionID string, facti
 		}, "出生关系网·"+b.Kind); err != nil {
 			return out, fmt.Errorf("seed bond %d->%d: %w", b.From, b.To, err)
 		}
+		// 强烈的爱/仇沉淀为持久 debt_grudge_love 锚（即使关系行后续变动，这份「在乎」也留痕）。
+		intensity := absFloat(b.Affection) + absFloat(b.Rivalry) + absFloat(b.Fear)
+		if intensity >= 8 {
+			_ = service.UpsertAnchor(ctx, src.ID, relevance.DebtGrudgeLove, tgt.ID, clampFloat(intensity/24.0, 0, 1), b.Kind+"："+tgt.Identity.Name, relationAnchorHalfLife)
+		}
+	}
+
+	// 每人的人生目标沉淀为持久 goal 锚（M3/事件标注目标后即可命中；现在先建好）。
+	for i, m := range v.Members {
+		_ = service.UpsertAnchor(ctx, records[i].ID, relevance.Goal, "goal:"+records[i].ID, clampFloat(0.5+m.Traits.Ambition*0.5, 0, 1), m.LifeGoal, 0)
 	}
 	return out, nil
 }

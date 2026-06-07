@@ -55,7 +55,18 @@ func (service *Service) buildRelevanceAnchors(ctx context.Context, unitID string
 	if service == nil || service.db == nil {
 		return anchors
 	}
+	// 1) 持久锚（目标/红线/债仇爱/血脉——非关系锚，只有 relevance_anchors 表能存）。
+	seen := map[string]bool{}
+	for _, a := range service.loadPersistentAnchors(ctx, unitID) {
+		anchors = append(anchors, a)
+		seen[string(a.Kind)+"|"+a.Ref] = true
+	}
+	// 2) 实时关系锚（由 relations 表派生；同 (kind,ref) 已有持久锚则不重复）。
 	for _, r := range service.loadTopOutgoingRelations(ctx, unitID, 16) {
+		key := string(relevance.Relation) + "|" + r.TargetUnitID
+		if seen[key] {
+			continue
+		}
 		weight := relationIntensity(r.Trust, r.Fear, r.Affection, r.Rivalry) / relationIntensityNorm
 		if weight <= 0 {
 			continue
@@ -77,7 +88,8 @@ func (service *Service) buildRelevanceAnchors(ctx context.Context, unitID string
 func eventRelevance(anchors []relevance.Anchor, ev FateEvent) float64 {
 	hits := make([]relevance.Hit, 0, len(anchors))
 	for _, a := range anchors {
-		if a.Kind == relevance.Relation && (a.Ref == ev.ActorID || a.Ref == ev.TargetID) {
+		// 任何锚（关系/债仇爱/血脉…）只要其 Ref 命中事件的 actor/target/region，就算命中。
+		if a.Ref != "" && (a.Ref == ev.ActorID || a.Ref == ev.TargetID) {
 			hits = append(hits, relevance.Hit{Anchor: a})
 		}
 	}
