@@ -17,11 +17,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 go run ./cmd/server          # 启动 HTTP + WebSocket 服务，默认监听 :8080
 go build ./...               # 编译全部包
+go test ./...                # 运行测试（目前仅 internal/engine/... 有用例，其余包暂无）
 go vet ./...                 # 标准静态检查（注意：当前存在 trade.go:68 unreachable code 的历史告警）
 go run ./cmd/statuslint ./...  # 运行自定义状态字段静态分析器（详见下方“关键不变量”）
 ```
 
-- **目前仓库没有任何 `*_test.go` 文件**，`go test ./...` 不会执行任何用例。新增逻辑时如要写测试，测试文件被 `statuslint` 白名单豁免（可直接改状态字段）。
+- **测试现状**：测试集中在 `internal/engine/`（`decision` 决策层路由、`arbitration` 零和仲裁、`status` 批量状态写入），是仓库第一套测试；`session` 等其余包暂无 `*_test.go`。测试文件被 `statuslint` 白名单豁免（可直接改状态字段）。`status` 包的批写测试会用 `internal/storage/sqlite` 起一个临时 SQLite（modernc 纯 Go，无需 CGO）。
 - `statuslint` 是**独立**分析器，`go build` / `go vet` **不会**自动运行它，必须单独执行。它当前会报告 3 处历史违例（`session/hunger.go:176-177`、`session/romance.go:999`）并以非零码退出——这是既有状态，不是你引入的。
 
 ### 前端（在 `frontend/` 目录下）
@@ -75,6 +76,15 @@ npm run preview   # 预览生产构建
 
 - 三类指令（`types.go`）：**Doctrine**（阵营全局策略）、**Task**（单位组任务）、**Order**（执行期即时单令，消耗指令力）。指令力默认 3/3，每部署回合 +2，order/严格 task 各扣 1。
 - 单人模式下，敌方阵营的全局策略也由 LLM 生成（`generateEnemyGlobalDirective`），失败时走启发式 fallback。
+
+### 引擎核心包（`internal/engine/`，含大世界升级的新构件）
+
+`turns`（回合状态机）、`events`（reason-code 目录）、`status`（Mutator）是原有核心。以下三个是为「大世界沙盘」演进新增的、**纯逻辑可测试**构件，体现「决策用 LLM、结算用代码」原则（设计见 `docs/游戏开发方案GDD.md` §7、`docs/大世界沙盘设计方案.md` §1.5/§11.3）：
+
+- `engine/decision`：**决策层路由** `Router.Route(Situation) Decision`——安全反射(L1 护栏)优先 → 关键节点才升级 LLM → 日常零 LLM。把「<2% 上 LLM」从降级模式扶正为常态。
+- `engine/arbitration`：**零和仲裁原语** `Resolve(Contest) Outcome`——胜负仅由 `Score` + 确定性掷骰（FNV+splitmix64+A-Res 加权抽样），**与行动频率/入队顺序无关**，胜率∝Score。这是反 P2W 的机制保证。
+- `status.Mutator.ApplyBatch`：**批量状态写入**——把「每决策 ~15 次 DB 往返」收敛为「按单位读一次/写一次 + 单事务批量插事件」，与逐次 `Apply` 语义等价。
+- 这些包都有测试（`go test ./internal/engine/...`）。它们是新增能力，尚未全面接入 `session` 执行主链路（属渐进式升级，整合见 GDD §7.3 的引擎升级技术规格）。
 
 ### AI/LLM 子系统（`internal/ai/`）
 

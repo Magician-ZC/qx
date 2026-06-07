@@ -179,6 +179,161 @@ func (mutator *Mutator) Apply(ctx context.Context, mutation Mutation) (Result, e
 	}, nil
 }
 
+// ApplyBatch 批量应用一组状态变更，是 Apply 的高吞吐版本（引擎升级，详见设计方案 §11.2）。
+// 现状：Apply 每次 mutation 做 3 次 DB 往返（GetByID + Save + INSERT events），一个决策常
+// 触发 5–8 个 mutation → 约 15 次往返。ApplyBatch 把往返收敛为：按单位分组「读一次/写一次」
+// + 所有事件在「单个事务」内批量插入，大幅降低 DB 压力。语义与逐次 Apply 等价（顺序一致）。
+//
+// 注意：单位状态的写入(Save)在事务之外按单位串行完成（与 Apply 一致，避免与 SQLite 单连接
+// 的事务持有冲突）；仅事件插入走单事务。返回结果按入参 mutations 的原始顺序对齐。
+func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([]Result, error) {
+	if len(mutations) == 0 {
+		return nil, nil
+	}
+
+	// 预校验所有原因码，任一未知则整批拒绝（与 Apply 的严格语义一致）。
+	definitions := make([]events.ReasonCodeDefinition, len(mutations))
+	for i := range mutations {
+		definition, ok := events.Lookup(mutations[i].ReasonCode)
+		if !ok {
+			return nil, fmt.Errorf("unknown reason code %s", mutations[i].ReasonCode)
+		}
+		definitions[i] = definition
+	}
+
+	// 按单位分组，保留首次出现顺序。
+	order := make([]string, 0)
+	grouped := make(map[string][]int)
+	for i := range mutations {
+		id := mutations[i].UnitID
+		if _, ok := grouped[id]; !ok {
+			order = append(order, id)
+		}
+		grouped[id] = append(grouped[id], i)
+	}
+
+	results := make([]Result, len(mutations))
+	type pendingEvent struct {
+		eventID   string
+		sessionID string
+		actorID   string
+		targetID  string
+		category  events.Category
+		code      events.ReasonCode
+		payload   string
+	}
+	pending := make([]pendingEvent, 0, len(mutations))
+
+	// 逐单位：读一次 → 顺序应用该单位的全部 mutation → 写一次。
+	for _, unitID := range order {
+		record, err := mutator.units.GetByID(ctx, unitID)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, idx := range grouped[unitID] {
+			mutation := mutations[idx]
+			definition := definitions[idx]
+
+			before := statusValue(record.Status, mutation.Field)
+			after := applyDelta(before, mutation.Delta, mutation.Field)
+			setStatusValue(&record.Status, mutation.Field, after)
+
+			eventID := uuid.NewString()
+			if mutation.ReasonText == "" {
+				mutation.ReasonText = definition.DefaultReasonText
+			}
+			if mutation.Importance == 0 {
+				mutation.Importance = (definition.ImportanceMin + definition.ImportanceMax) / 2
+			}
+
+			record.Memory.RecentEventIDs = append(record.Memory.RecentEventIDs, eventID)
+			if len(record.Memory.RecentEventIDs) > 32 {
+				record.Memory.RecentEventIDs = record.Memory.RecentEventIDs[len(record.Memory.RecentEventIDs)-32:]
+			}
+
+			payload := EventPayload{
+				UnitID:       mutation.UnitID,
+				Turn:         mutation.Turn,
+				Field:        mutation.Field,
+				Delta:        mutation.Delta,
+				Before:       before,
+				After:        after,
+				ReasonCode:   mutation.ReasonCode,
+				ReasonText:   mutation.ReasonText,
+				Actors:       mutation.Actors,
+				Location:     mutation.Location,
+				Importance:   mutation.Importance,
+				EmotionalTag: mutation.EmotionalTag,
+				Category:     definition.Category,
+			}
+			encodedPayload, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("marshal event payload: %w", err)
+			}
+
+			actorID := mutation.UnitID
+			if len(mutation.Actors) > 0 {
+				actorID = mutation.Actors[0]
+			}
+
+			results[idx] = Result{EventID: eventID, Payload: payload}
+			pending = append(pending, pendingEvent{
+				eventID:   eventID,
+				sessionID: record.SessionID,
+				actorID:   actorID,
+				targetID:  record.ID,
+				category:  definition.Category,
+				code:      definition.Code,
+				payload:   string(encodedPayload),
+			})
+		}
+
+		if err := mutator.units.Save(ctx, record); err != nil {
+			return nil, err
+		}
+		// 该单位的最终记录回填到它的每一条结果上。
+		for _, idx := range grouped[unitID] {
+			results[idx].Record = record
+		}
+	}
+
+	// 所有事件在单个事务内批量插入（一次提交/一次 fsync）。
+	tx, err := mutator.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin batch event transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const insertEvent = `
+		INSERT INTO events (
+			id,
+			session_id,
+			actor_unit_id,
+			target_unit_id,
+			event_type,
+			reason_code,
+			payload_json,
+			occurred_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, ev := range pending {
+		if _, err := tx.ExecContext(
+			ctx, insertEvent,
+			ev.eventID, ev.sessionID, ev.actorID, ev.targetID,
+			string(ev.category), string(ev.code), ev.payload, now,
+		); err != nil {
+			return nil, fmt.Errorf("insert batch event: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit batch event transaction: %w", err)
+	}
+
+	return results, nil
+}
+
 // statusValue 读取状态字段的当前值（统一为 float64 便于计算）。
 func statusValue(status unit.Status, field Field) float64 {
 	switch field {
