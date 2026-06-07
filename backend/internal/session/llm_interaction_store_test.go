@@ -48,7 +48,7 @@ func TestPersistLLMInteractionsIdempotentAndSkips(t *testing.T) {
 	}
 }
 
-func TestSaveShadowWritesFullPromptBeforeCompaction(t *testing.T) {
+func TestLLMInteractionCutoverRoundTrip(t *testing.T) {
 	service, ctx := newCutoverService(t)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -66,21 +66,22 @@ func TestSaveShadowWritesFullPromptBeforeCompaction(t *testing.T) {
 		})
 	}
 	oldestID := state.LLMInteractions[0].ID
+	newestID := state.LLMInteractions[total-1].ID
 
 	if err := service.sessions.Save(ctx, state); err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 
-	// blob 行为不变：最旧条目的 prompt 在 blob 里应已被压缩抹空（验证我们没有改变 blob 语义）。
+	// cutover：blob 不应再 marshal 任何 LLM 交互（读源已切表）。
 	var blob string
 	if err := service.db.QueryRowContext(ctx, `SELECT state_json FROM single_player_sessions WHERE id = 's1'`).Scan(&blob); err != nil {
 		t.Fatalf("读 blob 失败: %v", err)
 	}
-	if strings.Count(blob, "SYS-长长的系统提示词") != maxFullLLMHistory {
-		t.Fatalf("blob 应只保留最近 %d 条完整 prompt（压缩语义不变），实际含 %d 条", maxFullLLMHistory, strings.Count(blob, "SYS-长长的系统提示词"))
+	if strings.Contains(blob, "SYS-长长的系统提示词") || strings.Contains(blob, newestID) {
+		t.Fatalf("cutover 后 blob 不应再含 LLM 交互（已摘除），却含 prompt/ID")
 	}
 
-	// 旁路表：每条都应有完整 prompt，包括被 blob 压缩抹空的最旧那条。
+	// 旁路表：每条都应有完整 prompt（含将被工作集压缩抹空的最旧那条）。
 	list, err := service.ListLLMInteractions(ctx, "s1", 100)
 	if err != nil {
 		t.Fatalf("读旁路表失败: %v", err)
@@ -88,14 +89,118 @@ func TestSaveShadowWritesFullPromptBeforeCompaction(t *testing.T) {
 	if len(list) != total {
 		t.Fatalf("旁路表应留全部 %d 条，得到 %d", total, len(list))
 	}
-	var oldest *LLMInteraction
-	for i := range list {
-		if list[i].ID == oldestID {
-			oldest = &list[i]
+
+	// load 应从表 hydrate 回工作集，并保持「零行为变化」：恰最近 maxFullLLMHistory 条留完整 prompt、更旧的被抹空。
+	loaded, _, err := service.loadSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if len(loaded.LLMInteractions) != total {
+		t.Fatalf("工作集应 hydrate 出全部 %d 条（total<maxLLMHistory），得到 %d", total, len(loaded.LLMInteractions))
+	}
+	fullCount := 0
+	var oldestLoaded, newestLoaded *LLMInteraction
+	for i := range loaded.LLMInteractions {
+		if loaded.LLMInteractions[i].SystemPrompt != "" {
+			fullCount++
+		}
+		switch loaded.LLMInteractions[i].ID {
+		case oldestID:
+			oldestLoaded = &loaded.LLMInteractions[i]
+		case newestID:
+			newestLoaded = &loaded.LLMInteractions[i]
 		}
 	}
-	if oldest == nil || oldest.SystemPrompt != "SYS-长长的系统提示词" || oldest.UserPrompt != "USR-长长的用户提示词" {
-		t.Fatalf("被 blob 压缩抹空的最旧交互，旁路表里仍应有完整 prompt：%+v", oldest)
+	if fullCount != maxFullLLMHistory {
+		t.Fatalf("hydrate 后工作集应恰 %d 条留完整 prompt（与切表前一致），得到 %d", maxFullLLMHistory, fullCount)
+	}
+	if oldestLoaded == nil || oldestLoaded.SystemPrompt != "" {
+		t.Fatalf("最旧交互在工作集里 prompt 应被压缩抹空：%+v", oldestLoaded)
+	}
+	if newestLoaded == nil || newestLoaded.SystemPrompt != "SYS-长长的系统提示词" {
+		t.Fatalf("最新交互在工作集里应留完整 prompt：%+v", newestLoaded)
+	}
+}
+
+func TestLLMInteractionLegacyBackfill(t *testing.T) {
+	service, ctx := newCutoverService(t)
+	// 现网旧局：blob 里直接带 LLM 交互、表为空（切换前存的）。首次 load 应回填进表并 hydrate。
+	legacy := &State{ID: "s2", LLMInteractions: []LLMInteraction{
+		{ID: "old1", UnitID: "u", Kind: "decision", SystemPrompt: "旧系统", UserPrompt: "旧用户",
+			OccurredAt: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	enc, _ := json.Marshal(legacy)
+	nowTS := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := service.db.ExecContext(ctx, `INSERT INTO single_player_sessions (id, state_json, created_at, updated_at) VALUES ('s2', ?, ?, ?)`, string(enc), nowTS, nowTS); err != nil {
+		t.Fatalf("注入旧局失败: %v", err)
+	}
+
+	loaded, _, err := service.loadSession(ctx, "s2")
+	if err != nil {
+		t.Fatalf("加载旧局失败: %v", err)
+	}
+	if len(loaded.LLMInteractions) != 1 || loaded.LLMInteractions[0].ID != "old1" {
+		t.Fatalf("旧局交互应被回填+hydrate，得到 %+v", loaded.LLMInteractions)
+	}
+	// 表里现在应有这条（已回填，含完整 prompt）。
+	list, _ := service.ListLLMInteractions(ctx, "s2", 10)
+	if len(list) != 1 || list[0].ID != "old1" || list[0].SystemPrompt != "旧系统" {
+		t.Fatalf("旧交互应已回填进表（含完整 prompt），得到 %+v", list)
+	}
+}
+
+func TestLLMInteractionHydrateMergeKeepsBlobResidue(t *testing.T) {
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// 表里只有 i1；blob 里有 i1 + i2（i2 模拟影子写失败/旧局残留，只在 blob）。hydrate 须并入 i2、绝不丢，并回填进表。
+	if err := persistLLMInteractions(ctx, service.db, false, "s1", []LLMInteraction{{ID: "i1", UnitID: "u", OccurredAt: base}}); err != nil {
+		t.Fatalf("写表失败: %v", err)
+	}
+	state := &State{ID: "s1", LLMInteractions: []LLMInteraction{
+		{ID: "i1", UnitID: "u", OccurredAt: base},
+		{ID: "i2", UnitID: "u", SystemPrompt: "残留", OccurredAt: base.Add(time.Second)},
+	}}
+	service.hydrateLLMInteractions(ctx, state)
+	ids := map[string]bool{}
+	for _, it := range state.LLMInteractions {
+		ids[it.ID] = true
+	}
+	if !ids["i1"] || !ids["i2"] {
+		t.Fatalf("blob 残留 i2 应被并入、绝不丢，得到 %+v", state.LLMInteractions)
+	}
+	list, _ := service.ListLLMInteractions(ctx, "s1", 10)
+	found := false
+	for _, it := range list {
+		if it.ID == "i2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("blob 残留 i2 应被回填进表")
+	}
+}
+
+func TestGetAuditBundleHydratesLLMAfterCutover(t *testing.T) {
+	service, ctx := newCutoverService(t)
+	// cutover 后 blob 不再带 LLM 交互，审计包必须经 loadSession hydrate 才能拿到，否则恒空（回归）。
+	state := &State{ID: "s1", LLMInteractions: []LLMInteraction{
+		{ID: "i1", UnitID: "u", Kind: "decision", SystemPrompt: "系统", UserPrompt: "用户", OccurredAt: time.Now().UTC()},
+	}}
+	if err := service.sessions.Save(ctx, state); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	// 确认 blob 确实已摘除（裸 Get 读不到）。
+	if got, err := service.sessions.Get(ctx, "s1"); err != nil || len(got.LLMInteractions) != 0 {
+		t.Fatalf("前置：cutover 后裸 Get 应读不到 LLM 交互，得到 %d 条 (err=%v)", len(got.LLMInteractions), err)
+	}
+
+	bundle, err := service.GetAuditBundle(ctx, "s1", 50)
+	if err != nil {
+		t.Fatalf("取审计包失败: %v", err)
+	}
+	if len(bundle.LLMInteractions) != 1 || bundle.LLMInteractions[0].ID != "i1" {
+		t.Fatalf("审计包应经 hydrate 拿到 LLM 交互，得到 %+v", bundle.LLMInteractions)
 	}
 }
 

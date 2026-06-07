@@ -1061,6 +1061,9 @@ func (service *Service) saveSessionMergingExternalEvents(ctx context.Context, st
 	if persisted, err := service.sessions.Get(ctx, state.ID); err == nil {
 		mergeMissingDirectives(state, persisted.DirectiveHistory)
 		mergeMissingLogs(state, persisted.Logs)
+		// 注意：拆 state_json 后 LLM 交互已切旁路表、Save 会从 blob 摘除，故裸 Get 的 persisted.LLMInteractions 恒空、
+		// 此 merge 对 LLM 已成 no-op——但不丢数据：外部写入方各自的 Save 已 persist 进表，下次 loadSession 由 hydrate 兜底自愈。
+		// mergeMissingRawEvents 仍有效（RawEventLog 尚未切表、仍在 blob）；待第三片切表后这条同样退化为 no-op。
 		mergeMissingLLMInteractions(state, persisted.LLMInteractions)
 		mergeMissingRawEvents(state, persisted.RawEventLog)
 		refreshGlobalDirectiveFromHistory(state)
@@ -1088,6 +1091,27 @@ func compactStateForStorage(state *State) {
 	if len(state.DecisionTraces) > maxDecisionHistory {
 		state.DecisionTraces = state.DecisionTraces[len(state.DecisionTraces)-maxDecisionHistory:]
 	}
+	compactLLMInteractions(state)
+	if len(state.RawEventLog) > maxRawEventHistory {
+		state.RawEventLog = state.RawEventLog[len(state.RawEventLog)-maxRawEventHistory:]
+	}
+	for index := range state.RawEventLog {
+		entry := &state.RawEventLog[index]
+		if entry.Source == "llm" || entry.Source == "decision" {
+			entry.PayloadJSON = ""
+		} else {
+			entry.PayloadJSON = limitTextRunes(entry.PayloadJSON, 1200)
+		}
+	}
+}
+
+// compactLLMInteractions 把 LLM 交互的内存工作集收敛为「最近 maxLLMHistory 条、其中仅最近 maxFullLLMHistory 条留完整
+// prompt」。它既是 Save 前的 blob 瘦身，也是 cutover 后 hydrate 的收敛器——hydrate 从旁路表读全量后调它，保证切表后
+// 内存/快照视图与切表前逐字节一致（旁路表仍保有全量完整 prompt 供 ListLLMInteractions 审计，但工作集不膨胀）。幂等。
+func compactLLMInteractions(state *State) {
+	if state == nil {
+		return
+	}
 	if len(state.LLMInteractions) > maxLLMHistory {
 		state.LLMInteractions = state.LLMInteractions[len(state.LLMInteractions)-maxLLMHistory:]
 	}
@@ -1109,17 +1133,6 @@ func compactStateForStorage(state *State) {
 		interaction.UserPrompt = limitTextRunes(interaction.UserPrompt, maxStoredPromptRunes)
 		interaction.ParsedOutput = limitTextRunes(interaction.ParsedOutput, maxStoredOutputRunes)
 		interaction.RawOutput = limitTextRunes(interaction.RawOutput, maxStoredOutputRunes)
-	}
-	if len(state.RawEventLog) > maxRawEventHistory {
-		state.RawEventLog = state.RawEventLog[len(state.RawEventLog)-maxRawEventHistory:]
-	}
-	for index := range state.RawEventLog {
-		entry := &state.RawEventLog[index]
-		if entry.Source == "llm" || entry.Source == "decision" {
-			entry.PayloadJSON = ""
-		} else {
-			entry.PayloadJSON = limitTextRunes(entry.PayloadJSON, 1200)
-		}
 	}
 }
 
@@ -3198,8 +3211,9 @@ func (service *Service) loadSession(ctx context.Context, sessionID string) (Stat
 	if err != nil {
 		return State{}, nil, err
 	}
-	// 拆 state_json：决策轨迹的权威读源已切到旁路表——回填旧局残留 + 从表 hydrate（须在任何 Save 之前，免旧局轨迹被瘦身丢掉）。
+	// 拆 state_json：决策轨迹 + LLM 交互的权威读源已切到旁路表——回填旧局残留 + 从表 hydrate（须在任何 Save 之前，免旧局数据被瘦身丢掉）。
 	service.hydrateDecisionTraces(ctx, &state)
+	service.hydrateLLMInteractions(ctx, &state)
 	oldBudgets := state.TurnState.Budgets
 	state.TurnState.Budgets = turns.NormalizeBudgets(state.TurnState.Budgets)
 	if state.TurnState.Phase == turns.PhaseDeployment && oldBudgets.Deployment != state.TurnState.Budgets.Deployment {

@@ -26,10 +26,12 @@ func NewRepository(db *sql.DB) *Repository {
 
 // Save 持久化会话状态（插入或覆盖更新）。
 func (repository *Repository) Save(ctx context.Context, state *State) error {
-	// 拆 state_json 第二片（沙盘 §11.2，影子双写）：把当回合 LLM 交互在 compactStateForStorage **抹除旧 prompt 之前**
-	// best-effort 写入旁路表（含完整 prompt）。执行循环每个 actor 行动后即 Save，故 INSERT OR IGNORE 跨 Save 累积出全量。
-	// 吞错——blob 仍裁剪仍为权威读源，写表失败仅旁路缺一条，零风险（读路径切换是后续过评审的步骤）。
-	_ = persistLLMInteractions(ctx, repository.db, dbdialect.IsMySQL(repository.db), state.ID, state.LLMInteractions)
+	// 拆 state_json 第二片（沙盘 §11.2，读路径已切表）：把当回合 LLM 交互在 compactStateForStorage **抹除旧 prompt 之前**
+	// 写入旁路表（含完整 prompt）。执行循环每个 actor 行动后即 Save，故 INSERT OR IGNORE 跨 Save 累积出全量。
+	// 持久性不变量（与 decision_traces 同纪律）：**先确认写进表、成功才从 blob 摘除**；写表失败则保留在 blob（瘦身放弃，
+	// 但绝不丢交互，下次 load 由 hydrateLLMInteractions 自愈回填）。注意须取压缩**前**的完整集做摘除判定与还原。
+	fullLLM := state.LLMInteractions
+	stripLLM := persistLLMInteractions(ctx, repository.db, dbdialect.IsMySQL(repository.db), state.ID, fullLLM) == nil
 
 	compactStateForStorage(state)
 
@@ -46,8 +48,15 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 	if stripTraces {
 		state.DecisionTraces = nil
 	}
+	// LLM 交互摘除：compactStateForStorage 已把 state.LLMInteractions 原地压缩，此处保存压缩后引用以便 marshal 后还原
+	// （维持切换前「Save 后 state.LLMInteractions = 压缩态」的语义），确认写表成功才从 blob 摘除。
+	compactedLLM := state.LLMInteractions
+	if stripLLM {
+		state.LLMInteractions = nil
+	}
 	encodedState, err := json.Marshal(state)
 	state.DecisionTraces = traces
+	state.LLMInteractions = compactedLLM
 	if err != nil {
 		return fmt.Errorf("marshal session state: %w", err)
 	}

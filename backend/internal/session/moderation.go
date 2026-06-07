@@ -93,7 +93,9 @@ func (service *Service) SubmitModerationReport(
 // 它会按统一的 limit 裁剪举报、对话、LLM 交互、普通日志与原始事件，
 // 供前端审计面板或外部监管流程一次性拉取。
 func (service *Service) GetAuditBundle(ctx context.Context, sessionID string, limit int) (AuditBundle, error) {
-	state, err := service.sessions.Get(ctx, sessionID)
+	// 必须走 loadSession 而非裸 sessions.Get：拆 state_json 后 LLMInteractions（及后续 RawEventLog）已从 blob 摘除、
+	// 读源切到旁路表，唯有 loadSession 会 hydrate 回内存工作集。裸 Get 只 unmarshal blob，审计的 llm_interactions 会恒空。
+	state, _, err := service.loadSession(ctx, sessionID)
 	if err != nil {
 		return AuditBundle{}, err
 	}
