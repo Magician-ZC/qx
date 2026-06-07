@@ -257,6 +257,22 @@ func (service *Service) PurgeExpiredSessionData(
 			result.RawEventsDeleted += deleted
 		}
 
+		// region-runner 调度队列（M7.3，沙盘 §8.2）：会话整体清理时其唤醒/作业留痕也须删，否则永久孤儿、违保留期。
+		// 按 **session_id** 删（与其余旁路表口径一致、与 region 取值解耦——enqueue 须填 session_id==sessionID，见 agentqueue）。
+		//（隐私擦除 EraseSessionPrivateData **不**清这两表——它们无 PII 且擦除后会话存续、其单位仍需被调度；仅整会话过期清理才删。）
+		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM agent_wake_queue WHERE session_id = ?`, sessionID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session wake queue"); rowsErr != nil {
+			return PrivacyPurgeResult{}, rowsErr
+		} else {
+			result.WakeQueueDeleted += deleted
+		}
+		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM agent_decision_jobs WHERE session_id = ?`, sessionID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session decision jobs"); rowsErr != nil {
+			return PrivacyPurgeResult{}, rowsErr
+		} else {
+			result.DecisionJobsDeleted += deleted
+		}
+
 		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM hall_of_fame_entries WHERE source_session_id = ?`, sessionID)
 		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete hall entries"); rowsErr != nil {
 			return PrivacyPurgeResult{}, rowsErr

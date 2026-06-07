@@ -504,6 +504,8 @@ type PrivacyPurgeResult struct {
 	LLMInteractionsDeleted int64 `json:"llm_interactions_deleted"`
 	DecisionTracesDeleted  int64 `json:"decision_traces_deleted"`
 	RawEventsDeleted       int64 `json:"raw_events_deleted"`
+	WakeQueueDeleted       int64 `json:"wake_queue_deleted"`
+	DecisionJobsDeleted    int64 `json:"decision_jobs_deleted"`
 }
 
 // SessionMetrics 结构体用于承载该模块的核心数据。

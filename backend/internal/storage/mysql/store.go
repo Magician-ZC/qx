@@ -58,6 +58,13 @@ func Open(dsn string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// region-runner 调度队列迁移：给两表幂等补 session_id（保留期清理键，M7.3-real-0）。
+	for _, table := range []string{"agent_wake_queue", "agent_decision_jobs"} {
+		if err := dbmigrate.EnsureColumns(ctx, db, table, dbmigrate.AgentQueueSessionColumn); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	return db, nil
 }
 

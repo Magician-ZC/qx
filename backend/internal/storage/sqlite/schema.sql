@@ -305,6 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_event_log_session ON raw_event_log(session_id
 -- 现阶段为 shadow/additive 地基，未接执行主循环。
 CREATE TABLE IF NOT EXISTS agent_wake_queue (
   unit_id TEXT PRIMARY KEY,
+  session_id TEXT,
   world_id TEXT,
   region_id TEXT,
   wake_at_tick INTEGER NOT NULL DEFAULT 0,
@@ -317,6 +318,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_wake_region_due ON agent_wake_queue(region_
 CREATE TABLE IF NOT EXISTS agent_decision_jobs (
   id TEXT PRIMARY KEY,
   unit_id TEXT NOT NULL,
+  session_id TEXT,
   world_id TEXT,
   region_id TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -328,3 +330,4 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_decision_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_claimed ON agent_decision_jobs(status, claimed_at);

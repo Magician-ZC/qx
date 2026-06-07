@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 )
@@ -41,7 +42,7 @@ func TestWakeQueueUpsertAndDue(t *testing.T) {
 	}
 
 	// tick=10 在 r1 到点的：u1(12,不到点 no)、u2(8,到点 yes)。u1 已被重排到 12 故不到点。
-	due, err := ListDueWakes(ctx, db, "r1", 10, 100)
+	due, err := ListDueWakes(ctx, db, "", "r1", 10, 100)
 	if err != nil {
 		t.Fatalf("list due: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestWakeQueueUpsertAndDue(t *testing.T) {
 	}
 
 	// tick=12：u1(12) 与 u2(8) 都到点，按 wake_at_tick 升序 u2 先。r2 的 u3 不混入。
-	due, _ = ListDueWakes(ctx, db, "r1", 12, 100)
+	due, _ = ListDueWakes(ctx, db, "", "r1", 12, 100)
 	if len(due) != 2 || due[0].UnitID != "u2" || due[1].UnitID != "u1" {
 		t.Fatalf("tick12 r1 应 [u2,u1] 升序，得到 %+v", due)
 	}
@@ -59,7 +60,7 @@ func TestWakeQueueUpsertAndDue(t *testing.T) {
 	if err := RemoveWake(ctx, db, "u2"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	due, _ = ListDueWakes(ctx, db, "r1", 12, 100)
+	due, _ = ListDueWakes(ctx, db, "", "r1", 12, 100)
 	if len(due) != 1 || due[0].UnitID != "u1" {
 		t.Fatalf("删 u2 后应仅 u1，得到 %+v", due)
 	}
@@ -204,5 +205,75 @@ func TestConcurrentClaimNoDoubleClaim(t *testing.T) {
 	}
 	if remaining, _ := CountJobsByStatus(ctx, db, StatusPending); remaining != 0 {
 		t.Fatalf("应无剩余 pending，得到 %d", remaining)
+	}
+}
+
+func TestListDueWakesWorldFilter(t *testing.T) {
+	db, ctx := newQueueDB(t)
+	// 同 region 名、不同世界——world_id 维度须能区隔，避免跨世界串唤醒。
+	if err := EnqueueWake(ctx, db, WakeEntry{UnitID: "a", WorldID: "w1", RegionID: "r1", WakeAtTick: 1}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := EnqueueWake(ctx, db, WakeEntry{UnitID: "b", WorldID: "w2", RegionID: "r1", WakeAtTick: 1}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// 带 world 过滤：只拿到本世界的。
+	if due, _ := ListDueWakes(ctx, db, "w1", "r1", 5, 100); len(due) != 1 || due[0].UnitID != "a" {
+		t.Fatalf("world=w1 应仅 a，得到 %+v", due)
+	}
+	if due, _ := ListDueWakes(ctx, db, "w2", "r1", 5, 100); len(due) != 1 || due[0].UnitID != "b" {
+		t.Fatalf("world=w2 应仅 b，得到 %+v", due)
+	}
+	// 不带 world 过滤（MVP）：region 内两条都拿到。
+	if due, _ := ListDueWakes(ctx, db, "", "r1", 5, 100); len(due) != 2 {
+		t.Fatalf("无 world 过滤应拿到 2 条，得到 %d", len(due))
+	}
+}
+
+func TestReclaimStaleJobs(t *testing.T) {
+	db, ctx := newQueueDB(t)
+
+	// 入队 + 认领一条 → running, claimed_at=now。
+	id, _ := EnqueueJob(ctx, db, DecisionJob{UnitID: "u1", RegionID: "r1"})
+	if _, err := ClaimNextJob(ctx, db); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// 把它 backdate 成 2 小时前认领（模拟 worker 崩溃）。
+	if _, err := db.ExecContext(ctx, `UPDATE agent_decision_jobs SET claimed_at = ? WHERE id = ?`, formatTS(time.Now().Add(-2*time.Hour)), id); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// 回收：cutoff = now-1h，该 job(claimed 2h 前) stale，attempt 0 < 3 → 置回 pending + attempt=1。
+	reclaimed, failed, err := ReclaimStaleJobs(ctx, db, time.Hour, 3)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed != 1 || failed != 0 {
+		t.Fatalf("应回收 1、失败 0，得到 reclaimed=%d failed=%d", reclaimed, failed)
+	}
+	if n, _ := CountJobsByStatus(ctx, db, StatusPending); n != 1 {
+		t.Fatalf("回收后应 1 pending，得到 %d", n)
+	}
+	var attempt int
+	_ = db.QueryRowContext(ctx, `SELECT attempt FROM agent_decision_jobs WHERE id = ?`, id).Scan(&attempt)
+	if attempt != 1 {
+		t.Fatalf("回收应 attempt+1=1，得到 %d", attempt)
+	}
+
+	// 新鲜认领的不被回收（claimed_at=now > cutoff）。
+	if _, err := ClaimNextJob(ctx, db); err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	if r, f, _ := ReclaimStaleJobs(ctx, db, time.Hour, 3); r != 0 || f != 0 {
+		t.Fatalf("新鲜认领不应被回收，得到 r=%d f=%d", r, f)
+	}
+
+	// 达重试上限：backdate + attempt=3 → 应置 failed 不再回收。
+	_, _ = db.ExecContext(ctx, `UPDATE agent_decision_jobs SET claimed_at = ?, attempt = 3 WHERE id = ?`, formatTS(time.Now().Add(-2*time.Hour)), id)
+	if r, f, _ := ReclaimStaleJobs(ctx, db, time.Hour, 3); r != 0 || f != 1 {
+		t.Fatalf("达上限应 failed=1 不回收，得到 r=%d f=%d", r, f)
+	}
+	if n, _ := CountJobsByStatus(ctx, db, StatusFailed); n != 1 {
+		t.Fatalf("应 1 failed，得到 %d", n)
 	}
 }

@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS raw_event_log (
 -- region-runner 调度地基（沙盘 §8.2 / §9，M7.3）：唤醒队列 + 决策作业队列（worker 池原子认领）。shadow/additive。
 CREATE TABLE IF NOT EXISTS agent_wake_queue (
   unit_id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NULL,
   world_id VARCHAR(191) NULL,
   region_id VARCHAR(191) NULL,
   wake_at_tick BIGINT NOT NULL DEFAULT 0,
@@ -279,6 +280,7 @@ CREATE TABLE IF NOT EXISTS agent_wake_queue (
 CREATE TABLE IF NOT EXISTS agent_decision_jobs (
   id VARCHAR(191) PRIMARY KEY,
   unit_id VARCHAR(191) NOT NULL,
+  session_id VARCHAR(191) NULL,
   world_id VARCHAR(191) NULL,
   region_id VARCHAR(191) NULL,
   status VARCHAR(16) NOT NULL DEFAULT 'pending',
@@ -287,5 +289,6 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   claimed_at VARCHAR(64) NULL,
   completed_at VARCHAR(64) NULL,
-  INDEX idx_agent_jobs_status (status, created_at)
+  INDEX idx_agent_jobs_status (status, created_at),
+  INDEX idx_agent_jobs_claimed (status, claimed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
