@@ -25,6 +25,7 @@ import (
 	"qunxiang/backend/internal/session"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
+	"qunxiang/backend/internal/worldbus"
 	"qunxiang/backend/internal/ws"
 )
 
@@ -1209,6 +1210,77 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"encounter": result})
+	})
+
+	// ---- 多世界 / 跨玩家世界总线 ----
+	// 注册一个持久世界。
+	router.POST("/api/worlds", func(c *gin.Context) {
+		var body struct {
+			Name          string `json:"name"`
+			MaxPopulation int    `json:"max_population"`
+			RegionSeed    string `json:"region_seed"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := world.Create(c.Request.Context(), deps.Store, world.World{
+			Name: body.Name, MaxPopulation: body.MaxPopulation, RegionSeed: body.RegionSeed,
+		})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"world_id": id})
+	})
+
+	// 列出活跃世界。
+	router.GET("/api/worlds", func(c *gin.Context) {
+		worlds, err := world.List(c.Request.Context(), deps.Store, world.StatusActive, 0)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"worlds": worlds})
+	})
+
+	// 把一个角色接入世界（幂等）。
+	router.POST("/api/worlds/:worldId/join", func(c *gin.Context) {
+		var body struct {
+			CharacterID string `json:"character_id"`
+			Role        string `json:"role"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := world.Join(c.Request.Context(), deps.Store, c.Param("worldId"), body.CharacterID, body.Role); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// 记录一次跨玩家交互：世界时钟发号 → 写入不可篡改的世界总线。真实动作。
+	router.POST("/api/worlds/:worldId/interactions", func(c *gin.Context) {
+		var body struct {
+			ActorID    string `json:"actor_id"`
+			TargetID   string `json:"target_id"`
+			Kind       string `json:"kind"`
+			Importance int    `json:"importance"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := newSessionService().RecordCrossInteraction(
+			c.Request.Context(), c.Param("worldId"), body.ActorID, body.TargetID,
+			worldbus.EventKind(body.Kind), body.Importance, nil)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"event_id": id})
 	})
 
 	// C-15: client only sends input, server remains the authoritative state owner.

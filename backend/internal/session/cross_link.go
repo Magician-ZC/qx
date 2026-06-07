@@ -12,10 +12,32 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
 )
 
 const crossEventDefaultImportance = 6
+
+// RecordCrossInteraction 记录一次跨玩家交互：先用世界权威时钟发号（AdvanceTick），再把事件追加进世界总线。
+// 这是「谁先动手算谁的」的落地——tick 由世界时钟单调发放，保证全世界事件可全序仲裁。返回事件 ID。
+func (service *Service) RecordCrossInteraction(ctx context.Context, worldID string, actorID string, targetID string, kind worldbus.EventKind, importance int, payload any) (string, error) {
+	if service == nil || service.db == nil {
+		return "", fmt.Errorf("record cross interaction: missing db")
+	}
+	tick, err := world.AdvanceTick(ctx, service.db, worldID)
+	if err != nil {
+		return "", err
+	}
+	return worldbus.Append(ctx, service.db, worldbus.CrossEvent{
+		WorldID:    worldID,
+		ActorID:    actorID,
+		TargetID:   targetID,
+		Kind:       kind,
+		Importance: importance,
+		WorldTick:  tick,
+		Payload:    payload,
+	})
+}
 
 // SurfaceCrossEventsForCharacter 拉取世界总线上牵涉该角色的跨玩家事件，逐条按相关性投进她的命运收件箱。
 // 返回被实际惊动（进高光卡/待决策）的条数。limit<=0 时取默认。

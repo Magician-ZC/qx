@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
 )
 
@@ -62,6 +63,50 @@ func TestSurfaceCrossEventsForCharacter(t *testing.T) {
 		if item.Narrative == "" || contains(item.Narrative, "shard") {
 			t.Fatalf("命运卡应是祖魂语气、不泄露跨分片原始 ID：%q", item.Narrative)
 		}
+	}
+}
+
+func TestCrossInteractionEndToEnd(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	worldID, err := world.Create(ctx, service.db, world.World{Name: "无尽之环"})
+	if err != nil {
+		t.Fatalf("建世界失败: %v", err)
+	}
+	hero := unit.BootstrapRecord(41, "s1", "player", "她")
+	if err := repo.Save(ctx, hero); err != nil {
+		t.Fatalf("存角色失败: %v", err)
+	}
+	_ = world.Join(ctx, service.db, worldID, hero.ID, "")
+	_ = world.Join(ctx, service.db, worldID, "savior_from_shard_5", "")
+
+	// 别家角色救了她：经世界时钟发号写入总线。
+	id1, err := service.RecordCrossInteraction(ctx, worldID, "savior_from_shard_5", hero.ID, worldbus.KindRescue, 8, nil)
+	if err != nil {
+		t.Fatalf("记录跨玩家交互失败: %v", err)
+	}
+	id2, err := service.RecordCrossInteraction(ctx, worldID, "savior_from_shard_5", hero.ID, worldbus.KindGift, 8, nil)
+	if err != nil {
+		t.Fatalf("记录第二次交互失败: %v", err)
+	}
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("应生成两个不同事件 ID：%q %q", id1, id2)
+	}
+
+	// 世界时钟应已推进到 2（发了两次号）。
+	w, _ := world.Get(ctx, service.db, worldID)
+	if w.Tick != 2 {
+		t.Fatalf("两次交互后世界时钟应为 2，得到 %d", w.Tick)
+	}
+
+	// 她拉取后，两条都应进她的命运收件箱。
+	surfaced, err := service.SurfaceCrossEventsForCharacter(ctx, "s1", worldID, &hero, 0)
+	if err != nil {
+		t.Fatalf("桥接失败: %v", err)
+	}
+	if surfaced != 2 {
+		t.Fatalf("两条牵涉她的交互都应被惊动，得到 %d", surfaced)
 	}
 }
 
