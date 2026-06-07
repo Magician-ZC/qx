@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/google/uuid"
+
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
@@ -58,6 +60,52 @@ const (
 	eliteFleeHP     = 25   // HP 低于此值反射撤退（HP 上限 100，≈0.25）
 	eliteMissChance = 0.08 // 确定性掷骰命中判定
 )
+
+// TriggerEliteEncounter 为某角色生成一头与其战力相称的精英怪并跑通完整遭遇（供 API 触发）。
+// 这是真实动作：会真的改动该角色的 HP/士气/钱包并落进命运收件箱。
+func (service *Service) TriggerEliteEncounter(ctx context.Context, sessionID string, unitID string) (EliteEncounterResult, error) {
+	if service == nil || service.units == nil {
+		return EliteEncounterResult{}, fmt.Errorf("trigger elite encounter: missing dependencies")
+	}
+	actor, err := service.units.GetByID(ctx, unitID)
+	if err != nil {
+		return EliteEncounterResult{}, err
+	}
+	state := State{ID: sessionID}
+	return service.ResolveEliteEncounter(ctx, &state, &actor, scaledElite(actor))
+}
+
+// scaledElite 生成一头与角色战力相称、通常可一战的精英怪。
+func scaledElite(actor unit.Record) Threat {
+	atk := actor.Status.Attack
+	if atk < 4 {
+		atk = 4
+	}
+	def := atk / 3
+	if def < 1 {
+		def = 1
+	}
+	hp := atk * 3
+	if hp < 20 {
+		hp = 20
+	}
+	eliteAtk := actor.Status.Defense
+	if eliteAtk < 3 {
+		eliteAtk = 3
+	}
+	return Threat{
+		ID:       "elite_" + uuid.NewString(),
+		Name:     "山魈",
+		Tier:     ThreatTierElite,
+		RegionID: "",
+		Power:    atk * 4,
+		Attack:   eliteAtk,
+		Defense:  def,
+		HPPool:   hp,
+		Severity: 40,
+		Loot:     []encounter.LootItem{{ID: "gold", Rarity: encounter.Common, Quantity: 15}},
+	}
+}
 
 // candidateDefeatLayer 各档威胁失败时的候选后果层（再经分级闸按角色降级）。
 func candidateDefeatLayer(tier ThreatTier) int {

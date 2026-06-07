@@ -1172,6 +1172,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	// 触发一次单人精英怪遭遇（撞见→combat_roll 多回合→分赃/惩罚→命运收件箱）。真实动作。
+	router.POST("/api/sessions/:id/units/:unitId/elite-encounter", func(c *gin.Context) {
+		result, err := newSessionService().TriggerEliteEncounter(c.Request.Context(), c.Param("id"), c.Param("unitId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"encounter": result})
+	})
+
 	// C-15: client only sends input, server remains the authoritative state owner.
 	router.GET("/ws", hub.Handle)
 
