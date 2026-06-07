@@ -1142,6 +1142,36 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		})
 	})
 
+	// 命运收件箱：读未决待决策 / 处理一条待决策（祖魂语气的命运层，设计宪法 §4.6）。
+	router.GET("/api/fate/inbox/:unitId", func(c *gin.Context) {
+		items, err := newSessionService().OpenFateInbox(c.Request.Context(), c.Param("unitId"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"inbox": items})
+	})
+	router.POST("/api/fate/decisions/:decisionId/resolve", func(c *gin.Context) {
+		var request struct {
+			SessionID   string `json:"session_id"`
+			UnitID      string `json:"unit_id"`
+			ResolveType string `json:"resolve_type"`
+		}
+		if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.UnitID) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unit_id is required"})
+			return
+		}
+		resolveType := strings.TrimSpace(request.ResolveType)
+		if resolveType == "" {
+			resolveType = "acknowledge"
+		}
+		if err := newSessionService().ResolveFateDecision(c.Request.Context(), request.SessionID, request.UnitID, c.Param("decisionId"), resolveType); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// C-15: client only sends input, server remains the authoritative state owner.
 	router.GET("/ws", hub.Handle)
 

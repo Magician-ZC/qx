@@ -61,6 +61,44 @@ func TestSurfaceFateEvent_FriendPendingAndResolve(t *testing.T) {
 	}
 }
 
+func TestWorldizeDeath_SurfacesToMourners(t *testing.T) {
+	db, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	mourner := unit.BootstrapRecord(2, "s1", "player", "阿采")
+	fallen := unit.BootstrapRecord(4, "s1", "player", "老吴")
+	stranger := unit.BootstrapRecord(6, "s1", "player", "路人")
+	for _, r := range []unit.Record{mourner, fallen, stranger} {
+		if err := repo.Save(ctx, r); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	}
+	// 阿采深爱老吴；路人与老吴无关系。
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO relations (source_unit_id, target_unit_id, trust, fear, affection, rivalry) VALUES (?, ?, ?, ?, ?, ?)`,
+		mourner.ID, fallen.ID, 8.0, 0.0, 9.0, 0.0,
+	); err != nil {
+		t.Fatalf("insert relation: %v", err)
+	}
+
+	surfaced, err := service.WorldizeDeath(ctx, "s1", fallen)
+	if err != nil {
+		t.Fatalf("worldize death: %v", err)
+	}
+	if surfaced != 1 {
+		t.Fatalf("应只惊动 1 个在乎她的人，得到 %d", surfaced)
+	}
+	// 阿采的收件箱应收到老吴之死。
+	inbox, _ := service.OpenFateInbox(ctx, mourner.ID)
+	if len(inbox) != 1 || !contains(inbox[0].Narrative, "老吴") {
+		t.Fatalf("哀悼者收件箱应有老吴之死，得到 %+v", inbox)
+	}
+	// 路人无感。
+	if box, _ := service.OpenFateInbox(ctx, stranger.ID); len(box) != 0 {
+		t.Fatalf("无关者不应被惊动")
+	}
+}
+
 func TestSurfaceFateEvent_StrangerAutonomous(t *testing.T) {
 	db, repo, service := newThreatTestService(t)
 	ctx := context.Background()

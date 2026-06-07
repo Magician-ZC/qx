@@ -217,6 +217,61 @@ func (service *Service) resolvedDecisionIDs(ctx context.Context, unitID string) 
 	return resolved, rows.Err()
 }
 
+// WorldizeDeath 把一个角色之死，按相关性路由进「在乎她的每个人」的命运收件箱（双向耦合）。
+// 返回被实际惊动（进高光卡/待决策）的人数。这正是「她的密友死了→我的命运」的机制落地。
+func (service *Service) WorldizeDeath(ctx context.Context, sessionID string, deceased unit.Record) (int, error) {
+	if service == nil || service.db == nil {
+		return 0, fmt.Errorf("worldize death: missing db")
+	}
+	rows, err := service.db.QueryContext(
+		ctx,
+		`SELECT source_unit_id FROM relations
+		 WHERE target_unit_id = ?
+		 ORDER BY (ABS(trust) + ABS(fear) + ABS(affection) + ABS(rivalry)) DESC
+		 LIMIT 64`,
+		deceased.ID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("query mourners: %w", err)
+	}
+	mourners := make([]string, 0)
+	for rows.Next() {
+		var source string
+		if err := rows.Scan(&source); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan mourner: %w", err)
+		}
+		if source != "" && source != deceased.ID {
+			mourners = append(mourners, source)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	summary := deceased.DisplayName() + " 倒下了，再也没能起来。"
+	surfaced := 0
+	for _, source := range mourners {
+		owner := unit.Record{ID: source}
+		routing, err := service.SurfaceFateEvent(ctx, sessionID, &owner, FateEvent{
+			ActorID:       deceased.ID,
+			TargetID:      deceased.ID,
+			ReasonCode:    events.ReasonCombatDown,
+			Importance:    8,
+			EmotionWeight: -0.6,
+			Summary:       summary,
+		})
+		if err != nil {
+			return surfaced, err
+		}
+		if routing.Route != relevance.RouteAutonomous {
+			surfaced++
+		}
+	}
+	return surfaced, nil
+}
+
 func absFloat(v float64) float64 {
 	if v < 0 {
 		return -v
