@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/unit"
@@ -22,6 +23,17 @@ const (
 	attributionRelationLimit = 8  // 纳入快照的关系条数上限
 	relationAxisScale        = 10.0
 )
+
+// 进程级归因遥测计数（跨所有会话/请求累计；每请求新建的 Service 不会重置它们）。
+var (
+	attributionTotal atomic.Int64
+	attributionOOC   atomic.Int64
+)
+
+// AttributionStats 返回进程级累计：归因校验总数与判定为 OOC 的数量。
+func AttributionStats() (total int64, ooc int64) {
+	return attributionTotal.Load(), attributionOOC.Load()
+}
 
 // causeRefPayload 是 attribution 中单条前因的线上结构（LLM 产出）。
 type causeRefPayload struct {
@@ -206,9 +218,9 @@ func (service *Service) SetAttributionEnforcement(enabled bool) {
 	service.attributionEnforced = enabled
 }
 
-// AttributionStats 返回归因校验的累计计数：总校验数与判定为 OOC 的数量。
+// AttributionStats 返回进程级归因校验计数（委托给包级 AttributionStats）。
 func (service *Service) AttributionStats() (total int64, ooc int64) {
-	return service.attrTotal.Load(), service.attrOOC.Load()
+	return AttributionStats()
 }
 
 // attributionDecisionSchema 返回决策 schema 中可选 attribution 字段的子 schema（全字段可空、无必填，LLM 可整体省略）。

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,10 +94,8 @@ type Service struct {
 	memoryRecallMu    sync.Mutex
 	memoryRecallTurn  map[string]int
 
-	// 归因校验（engine/decision）接入：默认影子模式，仅遥测；开启强制后 OOC 决策回退安全决策。
+	// 归因校验强制开关（每实例配置）；累计计数为进程级全局，见 attribution_bridge.go。
 	attributionEnforced bool
-	attrTotal           atomic.Int64
-	attrOOC             atomic.Int64
 }
 
 // NewServiceWithColdStore 初始化会话服务，统一挂接状态仓库、单位仓库和状态变更器。

@@ -159,6 +159,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if deps.AI != nil {
 			aiStatus = deps.AI.Status()
 		}
+		attrTotal, attrOOC := session.AttributionStats()
+		attrOOCRate := 0.0
+		if attrTotal > 0 {
+			attrOOCRate = float64(attrOOC) / float64(attrTotal)
+		}
+
 		status := gin.H{
 			"status":                     "ok",
 			"service":                    "qunxiang-backend",
@@ -171,6 +177,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"ai":                         aiStatus,
 			"accounts":                   deps.Accounts != nil,
 			"cold_storage":               deps.ColdStore != nil,
+			"attribution": gin.H{
+				"enforced": true,
+				"total":    attrTotal,
+				"ooc":      attrOOC,
+				"ooc_rate": attrOOCRate,
+			},
 		}
 
 		if err := deps.Store.PingContext(c.Request.Context()); err != nil {
