@@ -205,7 +205,7 @@ func (service *Service) generateUnitDecision(
 	remainingAP int,
 	defiant bool,
 ) (unitDecisionPayload, ai.CompletionResult, LLMInteraction, error) {
-	systemPrompt := unitDecisionSystemPrompt(actor)
+	systemPrompt := unitDecisionSystemPrompt()
 	candidates := buildDecisionCandidates(state, byID, actor, targetIDs, remainingAP)
 	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, *actor, 10)
 	relationSummary := service.relationSummaryForPrompt(ctx, byID, *actor, 4)
@@ -1646,16 +1646,14 @@ func summarizeDecision(_ map[string]*unit.Record, decision unitDecisionPayload) 
 }
 
 // unitDecisionSystemPrompt 生成执行阶段决策的 system prompt。
-func unitDecisionSystemPrompt(actor *unit.Record) string {
-	identity := "未知单位"
-	if actor != nil {
-		identity = fmt.Sprintf("名称=%s；ID=%s；姓名=%s；昵称=%s；阵营=%s", actor.DisplayName(), actor.ID, actor.Identity.Name, actor.Identity.Nickname, actor.FactionID)
-	}
-	return fmt.Sprintf(
-		"你是战术游戏《群像》中的一个 AI 单位。你的身份是：%s。你必须清楚区分“点名给你的任务”和“点名给别人的任务”，不要把别人的结婚、生育、交易或战斗任务当成自己的任务。%s只能返回 JSON，且不要解释规则外内容。任何无效动作都会被判失败。",
-		identity,
-		sharedAIDecisionPrinciplesPrompt(),
-	)
+//
+// 前缀缓存关键（设计 沙盘 §11.2 最高 ROI 成本项）：本函数返回的内容**对所有单位的所有决策调用字节恒等**——
+// 不再把单位身份插进 system prompt（身份移到 user prompt）。这样 OpenAI/DeepSeek 等供应商的前缀缓存能命中
+// 整段约 2800 token 的静态规则，把计费输入 token 大幅压下来。改动身份会破坏缓存，务必只放静态内容。
+func unitDecisionSystemPrompt() string {
+	return "你是战术游戏《群像》中的一个 AI 单位。你必须清楚区分“点名给你的任务”和“点名给别人的任务”，不要把别人的结婚、生育、交易或战斗任务当成自己的任务。" +
+		sharedAIDecisionPrinciplesPrompt() +
+		"只能返回 JSON，且不要解释规则外内容。任何无效动作都会被判失败。你的具体身份、当前状态与可选动作都在用户消息里给出。"
 }
 
 func sharedAIDecisionPrinciplesPrompt() string {
@@ -1702,6 +1700,8 @@ func buildDecisionPrompt(
 	reachableMoves := reachableMoveOptions(state.Map, byID, actor)
 
 	fmt.Fprintln(&builder, "单位决策提示词版本: action_params_v4")
+	// 身份放在 user prompt（而非 system prompt），以保住 system prompt 的前缀缓存命中。
+	fmt.Fprintf(&builder, "你的身份: 名称=%s；ID=%s；姓名=%s；昵称=%s；阵营=%s\n", actor.DisplayName(), actor.ID, actor.Identity.Name, actor.Identity.Nickname, actor.FactionID)
 	fmt.Fprintf(&builder, "当前回合: %d\n", state.TurnState.Turn)
 	fmt.Fprintf(&builder, "当前阶段: %s\n", state.TurnState.Phase)
 	fmt.Fprintf(&builder, "你本次可用 AP: %d\n", remainingAP)
