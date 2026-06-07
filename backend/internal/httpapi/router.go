@@ -1196,6 +1196,23 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"encounter": result})
 	})
 
+	// 玩家直接接管/嘱咐某角色一次（落成可被回响 order_echo 引用的真实事件）。真实动作。
+	router.POST("/api/sessions/:id/units/:unitId/intervene", func(c *gin.Context) {
+		var body struct {
+			Summary string `json:"summary"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := newSessionService().RecordPlayerIntervention(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Summary)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"event_id": id})
+	})
+
 	// 触发一次组队野外Boss遭遇（多回合消耗战→按贡献分赃含 epic 仲裁/失败各自分级惩罚→各自命运收件箱）。真实动作。
 	router.POST("/api/sessions/:id/field-boss", func(c *gin.Context) {
 		var body struct {

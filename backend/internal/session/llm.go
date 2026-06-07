@@ -293,6 +293,18 @@ func (service *Service) generateUnitDecision(
 		}
 	}
 
+	// 回响 Echo：若这次选择被归因到一条真实玩家动作，生成「因为你上次…，这一回…」回响卡进收件箱（best-effort）。
+	// SurfaceEcho 会再次核验 ref 真实存在，绝不编造前因（宪法 §6.2）。
+	if ref, narrative, has := echoRefFromAttribution(choice.Attribution); has {
+		if narrative == "" {
+			narrative = strings.TrimSpace(choice.Speak)
+		}
+		if narrative == "" {
+			narrative = "她做了和你上次引导不太一样的选择"
+		}
+		_, _ = service.SurfaceEcho(ctx, state.ID, actor.ID, ref, narrative, 0)
+	}
+
 	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
 }
 

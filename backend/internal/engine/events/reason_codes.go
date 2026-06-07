@@ -56,6 +56,9 @@ const (
 
 	// 玩家动作事件（经 EmitProcessEvent，可被归因校验器的 order_echo 引用——回响 Echo 的锚点）。
 	ReasonPlayerIntervention ReasonCode = "PLAYER_INTERVENTION" // 玩家直接接管/嘱咐了一次（验证 §5.2 埋点 + M3 回响锚）
+
+	// 回响：本次自治选择被归因到一条真实的过往玩家动作（「因为你上次…，所以这次…」，宪法 §6.2）。
+	ReasonEchoLink ReasonCode = "ECHO_LINK"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -90,6 +93,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonPendingDecision, Category: CategoryFate, DisplayName: "待决策", DefaultReasonText: "一件关乎她命运的事在等你拿主意", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
 		{Code: ReasonDecisionResolved, Category: CategoryFate, DisplayName: "决断已下", DefaultReasonText: "一件待决策的事有了着落", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonPlayerIntervention, Category: CategoryPlayer, DisplayName: "玩家接管", DefaultReasonText: "你直接为她拿了一次主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
+		{Code: ReasonEchoLink, Category: CategoryPlayer, DisplayName: "回响", DefaultReasonText: "因为你上次的选择，这次她做了不一样的事", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
 	}
 }
 

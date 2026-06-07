@@ -182,6 +182,7 @@ func (service *Service) buildDecisionAttributionContext(ctx context.Context, sta
 	if startTurn < 1 {
 		startTurn = 1
 	}
+	promptBlock := ""
 	if rows, err := service.loadRecentMemoriesForPrompt(ctx, actor.ID, startTurn, turn); err == nil && len(rows) > 0 {
 		sort.SliceStable(rows, func(i, j int) bool {
 			return rows[i].Metadata.Importance > rows[j].Metadata.Importance
@@ -207,13 +208,24 @@ func (service *Service) buildDecisionAttributionContext(ctx context.Context, sta
 			count++
 		}
 		if count > 0 {
-			promptBlock := "可引用的记忆 ID（attribution.primary.kind=memory 时，ref_id 用下列之一，snippet_zh 用对应摘要原文片段）：\n" + block.String()
-			snap = withRelations(ctx, service, actor.ID, snap)
-			return snap, promptBlock
+			promptBlock = "可引用的记忆 ID（attribution.primary.kind=memory 时，ref_id 用下列之一，snippet_zh 用对应摘要原文片段）：\n" + block.String()
 		}
 	}
 
-	return withRelations(ctx, service, actor.ID, snap), ""
+	// 玩家动作：把近期「你接管/嘱咐/为她拿主意」的真实事件 ID 暴露给归因，让 order_echo 能合法引用（回响 Echo）。
+	if actions := service.loadRecentPlayerActions(ctx, actor.ID, attributionMemoryLimit); len(actions) > 0 {
+		var block strings.Builder
+		for _, a := range actions {
+			snap.PlayerActionEventIDs[a.EventID] = struct{}{}
+			fmt.Fprintf(&block, "  %s：%s\n", a.EventID, limitTextRunes(a.Summary, 28))
+		}
+		if promptBlock != "" {
+			promptBlock += "\n"
+		}
+		promptBlock += "可引用的玩家动作 event ID（attribution.primary.kind=order_echo 时，ref_id 必须用下列之一指向真实的过往玩家选择，否则不要用 order_echo）：\n" + block.String()
+	}
+
+	return withRelations(ctx, service, actor.ID, snap), promptBlock
 }
 
 // withRelations 把单位的对外关系四轴（归一到 [-1,1]）填入快照，使 relation 类前因可解析。
