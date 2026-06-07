@@ -160,6 +160,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			aiStatus = deps.AI.Status()
 		}
 		attrTotal, attrOOC := session.AttributionStats()
+		attrDegraded := session.AttributionDegraded()
 		attrOOCRate := 0.0
 		if attrTotal > 0 {
 			attrOOCRate = float64(attrOOC) / float64(attrTotal)
@@ -179,6 +180,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"cold_storage":               deps.ColdStore != nil,
 			"attribution": gin.H{
 				"enforced": true,
+				"degraded": attrDegraded,
+				"active":   !attrDegraded,
 				"total":    attrTotal,
 				"ooc":      attrOOC,
 				"ooc_rate": attrOOCRate,

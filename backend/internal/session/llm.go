@@ -282,14 +282,11 @@ func (service *Service) generateUnitDecision(
 	// 归因校验（engine/decision，「意外但合理」的代码强制，设计宪法 §5）。
 	// 默认影子模式：仅计入 OOC 遥测，不阻断决策；开启强制后，无源戏剧性归因优雅回退安全决策。
 	if ok, reason, present := validateAttribution(choice); present {
-		attributionTotal.Add(1)
-		if !ok {
-			attributionOOC.Add(1)
-			if service.attributionEnforced {
-				fallback := oocFallbackDecision()
-				message := "attribution_ooc:" + reason
-				return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
-			}
+		recordAttributionResult(ok)
+		if !ok && service.enforcementActive() {
+			fallback := oocFallbackDecision()
+			message := "attribution_ooc:" + reason
+			return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
 		}
 	}
 

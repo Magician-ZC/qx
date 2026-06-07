@@ -93,6 +93,60 @@ func TestCheckAttribution(t *testing.T) {
 	}
 }
 
+func TestAttributionAutoDegrade(t *testing.T) {
+	attributionTotal.Store(0)
+	attributionOOC.Store(0)
+	attributionDegraded.Store(false)
+	t.Cleanup(func() {
+		attributionTotal.Store(0)
+		attributionOOC.Store(0)
+		attributionDegraded.Store(false)
+	})
+
+	// 全 OOC 但样本未达 minSample → 不降级。
+	for i := 0; i < oocDegradeMinSample-1; i++ {
+		recordAttributionResult(false)
+	}
+	if AttributionDegraded() {
+		t.Fatalf("样本未达 %d 时不应降级", oocDegradeMinSample)
+	}
+
+	// 越过最小样本且 OOC 率超阈 → 自动降级（闩锁）。
+	recordAttributionResult(false)
+	recordAttributionResult(false)
+	if !AttributionDegraded() {
+		t.Fatalf("OOC 率超阈应自动降级")
+	}
+
+	// 降级后强制被抑制。
+	enforced := &Service{attributionEnforced: true}
+	if enforced.enforcementActive() {
+		t.Fatalf("已降级时强制应被抑制")
+	}
+
+	// 可重新武装。
+	ResetAttributionDegrade()
+	if AttributionDegraded() || !enforced.enforcementActive() {
+		t.Fatalf("ResetAttributionDegrade 后应恢复强制")
+	}
+}
+
+func TestEnforcementActive(t *testing.T) {
+	attributionDegraded.Store(false)
+	t.Cleanup(func() { attributionDegraded.Store(false) })
+
+	if (&Service{attributionEnforced: false}).enforcementActive() {
+		t.Fatalf("未开启强制应非 active")
+	}
+	if !(&Service{attributionEnforced: true}).enforcementActive() {
+		t.Fatalf("开启强制且未降级应 active")
+	}
+	attributionDegraded.Store(true)
+	if (&Service{attributionEnforced: true}).enforcementActive() {
+		t.Fatalf("全局降级时应非 active")
+	}
+}
+
 func TestAttributionEnforcementToggle(t *testing.T) {
 	service := &Service{}
 	if service.attributionEnforced {
