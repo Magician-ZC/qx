@@ -54,9 +54,18 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 	if stripLLM {
 		state.LLMInteractions = nil
 	}
+	// 拆 state_json 第三片：原始事件日志外移到 raw_event_log 表。与 LLM 不同——RawEventLog 无字段级脱敏要捕获，
+	// 故在 compactStateForStorage **之后**持久化压缩态：appendRawEvent 已把 payload 限/裁、数组已裁到 maxRawEventHistory，
+	// 压缩对它幂等（仅 limitTextRunes 的边界空格非幂等），post-compact 持久化使表与 blob 逐字节一致、hydrate 才能 cap-only。
+	stripRaw := persistRawEvents(ctx, repository.db, dbdialect.IsMySQL(repository.db), state.ID, state.RawEventLog) == nil
+	compactedRaw := state.RawEventLog
+	if stripRaw {
+		state.RawEventLog = nil
+	}
 	encodedState, err := json.Marshal(state)
 	state.DecisionTraces = traces
 	state.LLMInteractions = compactedLLM
+	state.RawEventLog = compactedRaw
 	if err != nil {
 		return fmt.Errorf("marshal session state: %w", err)
 	}

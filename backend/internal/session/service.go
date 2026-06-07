@@ -1061,9 +1061,9 @@ func (service *Service) saveSessionMergingExternalEvents(ctx context.Context, st
 	if persisted, err := service.sessions.Get(ctx, state.ID); err == nil {
 		mergeMissingDirectives(state, persisted.DirectiveHistory)
 		mergeMissingLogs(state, persisted.Logs)
-		// 注意：拆 state_json 后 LLM 交互已切旁路表、Save 会从 blob 摘除，故裸 Get 的 persisted.LLMInteractions 恒空、
-		// 此 merge 对 LLM 已成 no-op——但不丢数据：外部写入方各自的 Save 已 persist 进表，下次 loadSession 由 hydrate 兜底自愈。
-		// mergeMissingRawEvents 仍有效（RawEventLog 尚未切表、仍在 blob）；待第三片切表后这条同样退化为 no-op。
+		// 注意：拆 state_json 后 LLM 交互与原始事件日志均已切旁路表、Save 会从 blob 摘除，故裸 Get 的 persisted.LLMInteractions /
+		// persisted.RawEventLog 恒空、这两条 merge 已成 no-op——但不丢数据：外部写入方各自的 Save 已 persist 进表，
+		// 下次 loadSession 由 hydrate 兜底自愈。保留调用仅为向后兼容尚未切表的现网旧 blob 残留（hydrate 也会回填）。
 		mergeMissingLLMInteractions(state, persisted.LLMInteractions)
 		mergeMissingRawEvents(state, persisted.RawEventLog)
 		refreshGlobalDirectiveFromHistory(state)
@@ -3211,9 +3211,10 @@ func (service *Service) loadSession(ctx context.Context, sessionID string) (Stat
 	if err != nil {
 		return State{}, nil, err
 	}
-	// 拆 state_json：决策轨迹 + LLM 交互的权威读源已切到旁路表——回填旧局残留 + 从表 hydrate（须在任何 Save 之前，免旧局数据被瘦身丢掉）。
+	// 拆 state_json：决策轨迹 + LLM 交互 + 原始事件日志的权威读源已切到旁路表——回填旧局残留 + 从表 hydrate（须在任何 Save 之前，免旧局数据被瘦身丢掉）。
 	service.hydrateDecisionTraces(ctx, &state)
 	service.hydrateLLMInteractions(ctx, &state)
+	service.hydrateRawEvents(ctx, &state)
 	oldBudgets := state.TurnState.Budgets
 	state.TurnState.Budgets = turns.NormalizeBudgets(state.TurnState.Budgets)
 	if state.TurnState.Phase == turns.PhaseDeployment && oldBudgets.Deployment != state.TurnState.Budgets.Deployment {

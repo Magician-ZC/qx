@@ -138,6 +138,14 @@ func (service *Service) EraseSessionPrivateData(
 			result.DecisionTracesErased = deleted
 		}
 	}
+	// 对称清理 raw_event_log 旁路表（拆 state_json 第三片，审计链路读源）。擦除审计链路时一并硬删整会话；须在 Save 之后。
+	// 计数仍用上面的内存工作集条数（result.RawEventsErased）——表里跨 Save 累积的行数（可远超 maxRawEventHistory）口径不同，不混入。
+	if options.EraseAuditTrail {
+		execResult, execErr := service.db.ExecContext(ctx, `DELETE FROM raw_event_log WHERE session_id = ?`, state.ID)
+		if _, rowsErr := execRowsAffected(execResult, execErr, "erase raw event log side table"); rowsErr != nil {
+			return Snapshot{}, PrivacyEraseResult{}, rowsErr
+		}
+	}
 	if _, err := service.db.ExecContext(ctx, `DELETE FROM session_phase_snapshots WHERE session_id = ?`, state.ID); err != nil {
 		return Snapshot{}, PrivacyEraseResult{}, fmt.Errorf("delete phase snapshots for privacy erase: %w", err)
 	}
@@ -228,8 +236,8 @@ func (service *Service) PurgeExpiredSessionData(
 			result.EventsDeleted += deleted
 		}
 
-		// 拆 state_json 的两张旁路表（沙盘 §11.2）：会话被清理时其旁路留痕也须一并删，否则永久孤儿、违保留期。
-		// llm_interactions 含完整 prompt（本片新增）；decision_traces 是上一片遗漏未接入清理的既有泄漏，这里补上。
+		// 拆 state_json 的三张旁路表（沙盘 §11.2）：会话被清理时其旁路留痕也须一并删，否则永久孤儿、违保留期。
+		// llm_interactions 含完整 prompt、raw_event_log 含事件载荷、decision_traces 含决策自由文本。
 		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM llm_interactions WHERE session_id = ?`, sessionID)
 		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session llm interactions"); rowsErr != nil {
 			return PrivacyPurgeResult{}, rowsErr
@@ -241,6 +249,12 @@ func (service *Service) PurgeExpiredSessionData(
 			return PrivacyPurgeResult{}, rowsErr
 		} else {
 			result.DecisionTracesDeleted += deleted
+		}
+		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM raw_event_log WHERE session_id = ?`, sessionID)
+		if deleted, rowsErr := execRowsAffected(execResult, execErr, "delete session raw event log"); rowsErr != nil {
+			return PrivacyPurgeResult{}, rowsErr
+		} else {
+			result.RawEventsDeleted += deleted
 		}
 
 		execResult, execErr = service.db.ExecContext(ctx, `DELETE FROM hall_of_fame_entries WHERE source_session_id = ?`, sessionID)

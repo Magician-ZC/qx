@@ -250,3 +250,12 @@ CREATE TABLE IF NOT EXISTS llm_interactions (
   occurred_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_llm_interactions_session (session_id, occurred_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS raw_event_log (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  unit_id VARCHAR(191) NULL,
+  event_json LONGTEXT NOT NULL,
+  occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_raw_event_log_session (session_id, occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

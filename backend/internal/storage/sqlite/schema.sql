@@ -279,3 +279,16 @@ CREATE TABLE IF NOT EXISTS llm_interactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_interactions_session ON llm_interactions(session_id, occurred_at);
+
+-- 原始事件日志旁路表（拆 state_json 第三片，沙盘 §11.2）。读路径已 cutover：Save 把 state.RawEventLog 持久化到本表、
+-- 确认写表成功才从 blob 摘除；load 时 hydrateRawEvents 从表读回。RawEventLog 在 appendRawEvent 即限/裁 payload，
+-- 故本表与 blob 同口径（无 LLM 的有损压缩问题），仅 cap maxRawEventHistory。隐私擦除/保留期清理须同步清本表。
+CREATE TABLE IF NOT EXISTS raw_event_log (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  unit_id TEXT,
+  event_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_event_log_session ON raw_event_log(session_id, occurred_at);
