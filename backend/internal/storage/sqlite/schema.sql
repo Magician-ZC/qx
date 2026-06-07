@@ -160,3 +160,23 @@ CREATE TABLE IF NOT EXISTS hall_of_fame_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hall_of_fame_entries_unit_name ON hall_of_fame_entries(unit_name, created_at DESC);
+
+-- World Bus：跨玩家不可篡改的唯一事实源（设计文档 docs/事件耦合与跨玩家关联.md）。
+-- append-only，永不 UPDATE/DELETE；权威排序键 = (world_tick, occurred_at, id)，即「谁先动手」。
+-- 刻意不设 units 外键：actor/target 可能是别的玩家、别的分片、甚至已离线的角色，跨界引用不能被 FK 卡住。
+CREATE TABLE IF NOT EXISTS cross_events (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  actor_unit_id TEXT,
+  target_unit_id TEXT,
+  event_kind TEXT NOT NULL,
+  region_id TEXT,
+  importance INTEGER NOT NULL DEFAULT 0,
+  world_tick INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cross_events_world ON cross_events(world_id, world_tick, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_cross_events_actor ON cross_events(actor_unit_id);
+CREATE INDEX IF NOT EXISTS idx_cross_events_target ON cross_events(target_unit_id);
