@@ -1474,7 +1474,7 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 				memoryImportanceBoost = defiantMemoryBoost
 			}
 
-			appendDecisionTrace(state, DecisionTrace{
+			service.shadowDecisionTrace(ctx, state.ID, appendDecisionTrace(state, DecisionTrace{
 				ID:                    uuid.NewString(),
 				UnitID:                actor.ID,
 				FactionID:             actor.FactionID,
@@ -1532,7 +1532,7 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 				Provider:              result.Provider,
 				Model:                 result.Model,
 				UsedFallback:          result.UsedFallback,
-			})
+			}))
 
 			if compliance.Final.Speak != "" {
 				appendLog(state, "speech", fmt.Sprintf("%s：%s", actor.DisplayName(), compliance.Final.Speak), actor.ID, "")
@@ -3731,8 +3731,8 @@ func appendDialogue(state *State, message DialogueMessage) {
 	}
 }
 
-// appendDecisionTrace 追加决策轨迹并按上限截断。
-func appendDecisionTrace(state *State, trace DecisionTrace) {
+// appendDecisionTrace 追加决策轨迹并按上限截断。返回所追加的轨迹（供旁路表影子双写）。
+func appendDecisionTrace(state *State, trace DecisionTrace) DecisionTrace {
 	state.DecisionTraces = append(state.DecisionTraces, trace)
 	summary := strings.TrimSpace(trace.NextAction)
 	if summary == "" {
@@ -3752,6 +3752,7 @@ func appendDecisionTrace(state *State, trace DecisionTrace) {
 	if len(state.DecisionTraces) > maxDecisionHistory {
 		state.DecisionTraces = state.DecisionTraces[len(state.DecisionTraces)-maxDecisionHistory:]
 	}
+	return trace
 }
 
 // appendLLMInteraction 追加 LLM 交互记录并按上限截断。

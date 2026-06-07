@@ -253,3 +253,15 @@ CREATE TABLE IF NOT EXISTS relevance_anchors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_relevance_anchors_char ON relevance_anchors(character_unit_id);
+
+-- 决策轨迹旁路表（拆 state_json 第一片，沙盘 §11.2）。影子双写：决策轨迹 append 时同时写这里，
+-- 留全量历史（blob 仍按上限裁剪、仍为权威读源——本表零风险，仅旁路留痕，后续验证后再移出 blob）。
+CREATE TABLE IF NOT EXISTS decision_traces (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  unit_id TEXT,
+  trace_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_traces_session ON decision_traces(session_id, occurred_at);

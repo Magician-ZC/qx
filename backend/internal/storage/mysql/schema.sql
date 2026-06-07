@@ -232,3 +232,12 @@ CREATE TABLE IF NOT EXISTS relevance_anchors (
   PRIMARY KEY (character_unit_id, anchor_kind, anchor_ref),
   INDEX idx_relevance_anchors_char (character_unit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS decision_traces (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  unit_id VARCHAR(191) NULL,
+  trace_json LONGTEXT NOT NULL,
+  occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_decision_traces_session (session_id, occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
