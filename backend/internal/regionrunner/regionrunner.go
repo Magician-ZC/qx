@@ -152,6 +152,7 @@ type stats struct {
 	ticks, enqueued, claimed, completed, reclaimed, failed, backpressured int64
 	foraged, rested, socialized, reflected                                int64 // real-2/4a 动作计数：觅食/休息/社交/反思
 	deferred, dropped, conflicted, settled                                int64 // 让位战斗/丢弃(逝者或删档)/乐观并发冲突退避/饱和空写短路
+	llmCalls, llmFallbacks                                                int64 // real-3：HOT 单位经 LLM 决策成功 / LLM 失败回退反射
 }
 
 // Runner 是 region-runner 引擎实例。
@@ -164,6 +165,13 @@ type Runner struct {
 	mutator   *status.Mutator   // 经它改饥饿等保护字段、留痕
 	execGuard func(string) bool // 让位战斗：某会话在聚焦执行中则跳过其单位（默认恒 false）
 	st        stats
+
+	// real-3 HOT-LLM（默认 llm==nil → 全程反射；main 按 QUNXIANG_REGION_RUNNER_LLM 注入才启用，见 ambient_llm.go）。
+	llm               ambientLLM    // 离线决策 LLM 客户端
+	costEstimate      costEstimator // 用量→USD（注入 session.EstimateLLMCostUSD）
+	llmBudgetMicroUSD int64         // 进程级预算上限（micro-USD，0=不限）
+	llmSpentMicroUSD  int64         // 已花（atomic，micro-USD）
+	llmLatched        int32         // 预算耗尽闩（atomic，1=此后全转反射）
 }
 
 // New 构造 region-runner。now 用 time.Now；execGuard 默认恒 false（无战斗让位，测试/未接 session 时）。
@@ -331,9 +339,10 @@ func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob
 		return scheduler.TierHot, true
 	}
 
-	// 选动作（real-4a：反射层在觅食/休息/社交/反思间按 hunger/morale 选；real-3 将把 HOT 单位换成 LLM 决，
-	// 失败/预算耗尽回退本反射）。再经 applyAction 落地。
-	action := decideAmbientReflex(record)
+	// 选动作（real-3）：当前 HOT 单位且 LLM 启用且预算未耗尽 → LLM 在觅食/休息/社交/反思间决；否则零成本反射
+	// decideAmbientReflex（LLM 任何失败也回退它）。再经下方饱和短路 + applyAction 落地（对 LLM/反射动作同等处理）。
+	currentTier := scheduler.ClassifyTier(tick, lastActive)
+	action := r.chooseAmbientAction(ctx, record, currentTier)
 	// 饱和空写短路：动作把已达 clamp 边界的字段继续往界外推（如满意单位 morale 已 1.0 仍选反思）→ 写入是 before==after 空写。
 	// 跳过它（不落地/不计数/不升 HOT），按既有活跃度自然降温——否则会每 COLD 周期永久空写污染记忆环/事件表/遥测（评审 load-bearing）。
 	if ambientSaturated(record, ambientEffects[action]) {
@@ -509,5 +518,12 @@ func (r *Runner) Stats() map[string]any {
 		"dropped":       atomic.LoadInt64(&r.st.dropped),
 		"conflicted":    atomic.LoadInt64(&r.st.conflicted),
 		"settled":       atomic.LoadInt64(&r.st.settled),
+		// real-3 HOT-LLM 遥测：llm_enabled 是否注入了客户端；llm_calls 成功经 LLM 决策次数；llm_fallbacks LLM 失败回退反射；
+		// llm_spent_usd 进程级累计成本；llm_latched 预算是否已耗尽闩死（此后全转反射）。
+		"llm_enabled":   r.llm != nil,
+		"llm_calls":     atomic.LoadInt64(&r.st.llmCalls),
+		"llm_fallbacks": atomic.LoadInt64(&r.st.llmFallbacks),
+		"llm_spent_usd": float64(atomic.LoadInt64(&r.llmSpentMicroUSD)) / 1e6,
+		"llm_latched":   atomic.LoadInt32(&r.llmLatched) == 1,
 	}
 }

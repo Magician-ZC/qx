@@ -62,6 +62,16 @@ func main() {
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
 	regionRunner.SetExecutionGuard(session.IsExecutionRunning) // 让位聚焦战斗：在战会话的单位由战斗循环管
+	// real-3 HOT-LLM（默认关）：QUNXIANG_REGION_RUNNER_LLM=true 才给 HOT 单位上 LLM 离线决策；
+	// 进程级成本上限 QUNXIANG_REGION_LLM_BUDGET_USD（默认 1.0 USD），沿用 session 同一单价表估算。
+	if envBool("QUNXIANG_REGION_RUNNER_LLM") {
+		budgetUSD := envFloatDefault("QUNXIANG_REGION_LLM_BUDGET_USD", 1.0)
+		if budgetUSD <= 0 { // 配置笔误 0/负数不得让烧钱护栏失效（SetLLMClient 还会再夹一层做防御纵深）。
+			logger.Warn("QUNXIANG_REGION_LLM_BUDGET_USD non-positive; using default", "got", budgetUSD, "default", 1.0)
+			budgetUSD = 1.0
+		}
+		regionRunner.SetLLMClient(aiService, session.EstimateLLMCostUSD, budgetUSD)
+	}
 	accountService := account.NewService(db, cfg.AuthTokenTTL)
 	if err := accountService.EnsureSchema(context.Background()); err != nil {
 		logger.Error("ensure account schema on sqlite", "error", err)
@@ -171,6 +181,14 @@ func envBool(key string) bool {
 // envIntDefault 读整数环境变量，缺失/非法时回退默认值。
 func envIntDefault(key string, def int) int {
 	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil {
+		return v
+	}
+	return def
+}
+
+// envFloatDefault 读浮点环境变量，缺失/非法时回退默认值。
+func envFloatDefault(key string, def float64) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(key)), 64); err == nil {
 		return v
 	}
 	return def
