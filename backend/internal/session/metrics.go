@@ -37,6 +37,11 @@ func normalizeTokenUsage(promptTokens int, outputTokens int, totalTokens int) (i
 	return promptTokens, outputTokens, totalTokens
 }
 
+// EstimateLLMCostUSD 是 estimateLLMCostUSD 的导出包装，供成本基准工具(cmd/costbench)复用同一套单价表。
+func EstimateLLMCostUSD(provider string, model string, promptTokens int, outputTokens int) float64 {
+	return estimateLLMCostUSD(provider, model, promptTokens, outputTokens)
+}
+
 // estimateLLMCostUSD 按 provider 单价估算一次调用成本（USD）。
 func estimateLLMCostUSD(provider string, model string, promptTokens int, outputTokens int) float64 {
 	provider = strings.ToLower(strings.TrimSpace(provider))
