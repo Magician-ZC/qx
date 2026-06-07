@@ -167,6 +167,22 @@ func TestStopPropagation(t *testing.T) {
 	}
 }
 
+func TestRouteFor(t *testing.T) {
+	if RouteFor(0.1) != RouteAutonomous {
+		t.Fatalf("低分应自治不打扰")
+	}
+	if RouteFor(0.4) != RouteHighlight {
+		t.Fatalf("中分应进高光卡")
+	}
+	if RouteFor(0.7) != RoutePending {
+		t.Fatalf("高分应升级待决策")
+	}
+	// 边界。
+	if RouteFor(FatePendingGate) != RoutePending || RouteFor(FateHighlightGate) != RouteHighlight {
+		t.Fatalf("阈值边界路由错误")
+	}
+}
+
 func TestConsentTierFor(t *testing.T) {
 	if ConsentTierFor(1) != Unilateral {
 		t.Fatalf("层1应 unilateral")

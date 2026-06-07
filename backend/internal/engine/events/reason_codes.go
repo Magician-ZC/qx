@@ -7,6 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/storage/dbdialect"
 )
@@ -22,6 +25,7 @@ const (
 	CategoryEconomy  Category = "economy_material"
 	CategoryRelation Category = "relation_change"
 	CategoryCommand  Category = "command_response"
+	CategoryFate     Category = "fate_event" // 命运流程事件（相关性命中/待决策入队等，非状态变更）
 )
 
 // ReasonCode 类型定义用于统一该模块的数据表达。
@@ -42,6 +46,12 @@ const (
 	ReasonRelationBetray  ReasonCode = "RELATION_BETRAYAL"
 	ReasonCommandForced   ReasonCode = "COMMAND_FORCED_ORDER"
 	ReasonCommandAccepted ReasonCode = "COMMAND_ACCEPTED_ADVICE"
+
+	// 命运流程事件（经 EmitProcessEvent，非状态变更，不经 Mutator）。
+	ReasonRelevanceMatch   ReasonCode = "RELEVANCE_MATCH"   // 世界事件命中某角色的锚
+	ReasonInboxHighlight   ReasonCode = "INBOX_HIGHLIGHT"   // 进高光卡（可一瞥）
+	ReasonPendingDecision  ReasonCode = "PENDING_DECISION"  // 升级待决策，入命运收件箱
+	ReasonDecisionResolved ReasonCode = "DECISION_RESOLVED" // 待决策被处理（玩家或过期兜底）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -71,7 +81,64 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonRelationBetray, Category: CategoryRelation, DisplayName: "遭遇背叛", DefaultReasonText: "对同伴的信任受到打击", StatDomains: []string{"loyalty"}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonCommandForced, Category: CategoryCommand, DisplayName: "强制命令", DefaultReasonText: "被强令执行高风险命令", StatDomains: []string{"loyalty", "morale"}, ImportanceMin: 3, ImportanceMax: 7},
 		{Code: ReasonCommandAccepted, Category: CategoryCommand, DisplayName: "建议被采纳", DefaultReasonText: "自己的建议被采纳", StatDomains: []string{"loyalty", "morale"}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonRelevanceMatch, Category: CategoryFate, DisplayName: "命运相关", DefaultReasonText: "一件事触到了她在乎的人或物", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 7},
+		{Code: ReasonInboxHighlight, Category: CategoryFate, DisplayName: "高光时刻", DefaultReasonText: "她经历了一段值得一看的事", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonPendingDecision, Category: CategoryFate, DisplayName: "待决策", DefaultReasonText: "一件关乎她命运的事在等你拿主意", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonDecisionResolved, Category: CategoryFate, DisplayName: "决断已下", DefaultReasonText: "一件待决策的事有了着落", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 	}
+}
+
+// ProcessEvent 是一条命运流程事件（非状态变更，不经 status.Mutator）。
+type ProcessEvent struct {
+	SessionID     string
+	OwnerUnitID   string // 这条事件属于谁（actor）
+	RelatedUnitID string // 关联对象（target，可空则用 owner）
+	Code          ReasonCode
+	Category      Category
+	Payload       any // 序列化进 payload_json
+}
+
+// EmitProcessEvent 把一条命运流程事件直接写入 events 表（append-only 留痕），不改任何状态字段。
+// 用于命运收件箱/相关性命中这类「事件本身」而非「状态变更」的留痕（设计文档「纯流程事件旁路」）。
+func EmitProcessEvent(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, event ProcessEvent) (string, error) {
+	related := event.RelatedUnitID
+	if related == "" {
+		related = event.OwnerUnitID
+	}
+	category := event.Category
+	if category == "" {
+		category = CategoryFate
+	}
+	payload := event.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal process event payload: %w", err)
+	}
+	id := uuid.NewString()
+	if _, err := execer.ExecContext(
+		ctx,
+		`
+		INSERT INTO events (
+			id, session_id, actor_unit_id, target_unit_id, event_type, reason_code, payload_json, occurred_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+		id,
+		event.SessionID,
+		event.OwnerUnitID,
+		related,
+		string(category),
+		string(event.Code),
+		string(encoded),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return "", fmt.Errorf("insert process event: %w", err)
+	}
+	return id, nil
 }
 
 // Lookup 按原因码查找定义。

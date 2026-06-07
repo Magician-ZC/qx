@@ -168,7 +168,32 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 	}
 
 	appendLog(state, "threat_encounter", result.InboxCard, actor.ID, elite.ID)
+
+	// 把遭遇结果按相关性路由进命运收件箱（她自己的事，相关性由重要度/情绪决定）。
+	importance, emotion := eliteOutcomeWeight(result.Outcome)
+	if _, err := service.SurfaceFateEvent(ctx, state.ID, actor, FateEvent{
+		ActorID:       actor.ID,
+		TargetID:      actor.ID,
+		ReasonCode:    events.ReasonInboxHighlight,
+		Importance:    importance,
+		EmotionWeight: emotion,
+		Summary:       result.InboxCard,
+	}); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// eliteOutcomeWeight 把遭遇结局映射为命运重要度与情绪强度（驱动收件箱三档路由）。
+func eliteOutcomeWeight(outcome string) (int, float64) {
+	switch outcome {
+	case "down":
+		return 8, -0.7 // 濒死，强相关，应升级待决策
+	case "fled":
+		return 6, -0.4
+	default: // defeated
+		return 5, 0.4
+	}
 }
 
 // grantEliteLoot 按贡献分配掉落（单人=独享），货币类经 Mutator 落 Wallet 并留痕；排他件记入结果（入库为后续）。

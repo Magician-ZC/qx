@@ -121,6 +121,33 @@ func PassesGate(relevance float64) bool {
 	return relevance >= RelevanceGate
 }
 
+// FateRoute 是命运事件的三档路由（设计宪法 §4.2 / 4.6）。
+type FateRoute string
+
+const (
+	RouteAutonomous FateRoute = "autonomous" // <0.25：自治不打扰，只留痕
+	RouteHighlight  FateRoute = "highlight"  // 0.25–0.55：进高光卡，可一瞥
+	RoutePending    FateRoute = "pending"    // ≥0.55：升级待决策，进命运收件箱
+)
+
+// 命运分三档阈值（[待测试/可调]）。
+const (
+	FateHighlightGate = 0.25
+	FatePendingGate   = 0.55
+)
+
+// RouteFor 按相关性/命运分把事件分到三档之一。
+func RouteFor(fateScore float64) FateRoute {
+	switch {
+	case fateScore >= FatePendingGate:
+		return RoutePending
+	case fateScore >= FateHighlightGate:
+		return RouteHighlight
+	default:
+		return RouteAutonomous
+	}
+}
+
 // StopPropagation 判断关系图传播是否应在此跳停止（任一条件成立即停，防全图洪泛）。
 func StopPropagation(hop int, transmit float64, fidelity float64) bool {
 	return hop >= MaxHops || transmit < TransmitFloor || fidelity < FidelityFloor
