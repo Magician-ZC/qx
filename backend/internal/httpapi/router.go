@@ -166,6 +166,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			attrOOCRate = float64(attrOOC) / float64(attrTotal)
 		}
 
+		reflexTotal, reflexCouldSkip := session.ReflexStats()
+		reflexSkipRate := 0.0
+		if reflexTotal > 0 {
+			reflexSkipRate = float64(reflexCouldSkip) / float64(reflexTotal)
+		}
+
 		status := gin.H{
 			"status":                     "ok",
 			"service":                    "qunxiang-backend",
@@ -185,6 +191,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"total":    attrTotal,
 				"ooc":      attrOOC,
 				"ooc_rate": attrOOCRate,
+			},
+			// 反射层影子遥测：本可被纯代码反射层短路、本可省下的 LLM 调用比例（决策用 LLM、结算用代码）。
+			"reflex_shadow": gin.H{
+				"total":      reflexTotal,
+				"could_skip": reflexCouldSkip,
+				"skip_rate":  reflexSkipRate,
 			},
 		}
 

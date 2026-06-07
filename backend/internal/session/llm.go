@@ -246,6 +246,9 @@ func (service *Service) generateUnitDecision(
 		return unitDecisionPayload{}, result, buildLLMInteraction(state, actor.ID, "decision", "", systemPrompt, userPrompt, result, err.Error()), err
 	}
 
+	// 反射层影子：统计这次本可被反射层零成本短路、本可省下的 LLM 调用（不改变行为）。
+	recordReflexShadow(state, actor, targetIDs)
+
 	responseSchema := buildUnitDecisionSchema(candidates)
 	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
 		Task:           ai.TaskUnitDecision,
