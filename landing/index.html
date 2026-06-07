@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>群像 · 一个会自己活的角色</title>
+<meta name="description" content="你创建一个角色，丢进一个永不停止的世界。离线时它由 AI 自主谋生、结盟、复仇、相爱、背叛；上线时你重新介入它的命运。" />
+<!--
+  ============================================================================
+  《群像》大世界 — 假门测试落地页（单文件，可直接部署）
+  对应 docs/验证实验设计.md §3.2（三版 A/B 落地页）+ §3.3（卖点问卷）
+
+  用法：
+  1) 三个广告系列分别投向：
+       https://你的域名/?src=autonomy   → A 版（角色自治）
+       https://你的域名/?src=story       → B 版（读故事+介入命运）
+       https://你的域名/?src=world       → C 版（共享世界）
+     无 src 参数时默认 A 版。utm_* 参数会被一并采集用于归因。
+  2) 配置下方 CONFIG.formEndpoint（Formspree / 自建 API），把留资与问卷 POST 出去；
+     未配置时为"本地模式"：数据存 localStorage 并打到 dataLayer/console，便于先跑通。
+  3) 配置 CONFIG.gaMeasurementId 接 GA4（或本页已注入 GTM/gtag 时自动复用）。
+  转化口径：lead_submit = 留资转化（§3.5 北极星）；survey_submit 携带 Q1–Q5 答案。
+  ============================================================================
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #0b1018;
+    --bg-1: #121a27;
+    --panel: rgba(22, 31, 46, 0.72);
+    --panel-line: rgba(150, 180, 220, 0.14);
+    --ink: #eef3fb;
+    --ink-soft: #aebbcf;
+    --ink-mute: #74849c;
+    --gold: #e8b86a;
+    --gold-deep: #c8923f;
+    --tense: #d96a6a;      /* 紧张红 */
+    --warm: #e6a766;       /* 温情橙 */
+    --crisis: #9c7ad0;     /* 危机紫 */
+    --amb: #d98bb0;        /* 暧昧粉 */
+    --calm: #6aa6d9;       /* 平静蓝 */
+    --serif: "Noto Serif SC", "Songti SC", "STSong", "Iowan Old Style", serif;
+    --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system, system-ui, sans-serif;
+    --radius: 14px;
+    --maxw: 1080px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 700px at 78% -10%, rgba(232,184,106,0.10), transparent 60%),
+      radial-gradient(900px 600px at 8% 12%, rgba(106,166,217,0.10), transparent 55%),
+      linear-gradient(180deg, var(--bg-1), var(--bg-0) 60%);
+    background-attachment: fixed;
+    min-height: 100vh;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+  a { color: var(--gold); }
+  .wrap { width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
+
+  /* ---------- top bar ---------- */
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 0 6px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--serif); font-weight: 900; letter-spacing: 2px; font-size: 20px; }
+  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 14px var(--gold); }
+  .badge-live { font-size: 12px; color: var(--gold); border: 1px solid rgba(232,184,106,0.4); border-radius: 999px; padding: 3px 10px; letter-spacing: 1px; }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 42px 0 16px; }
+  .eyebrow { color: var(--gold); font-size: 13px; letter-spacing: 3px; margin: 0 0 16px; text-transform: uppercase; }
+  h1.title {
+    font-family: var(--serif);
+    font-weight: 900;
+    font-size: clamp(28px, 5.4vw, 52px);
+    line-height: 1.28;
+    margin: 0 0 20px;
+    letter-spacing: 0.5px;
+    text-wrap: balance;
+  }
+  h1.title em { color: var(--gold); font-style: normal; }
+  .subtitle { font-size: clamp(15px, 2.4vw, 19px); color: var(--ink-soft); max-width: 760px; margin: 0 0 22px; }
+  .valueprop {
+    font-size: clamp(14px, 2.2vw, 17px);
+    color: var(--ink);
+    border-left: 3px solid var(--gold);
+    padding: 4px 0 4px 16px;
+    margin: 0 0 30px;
+    max-width: 720px;
+    font-family: var(--serif);
+    font-weight: 500;
+  }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+  .btn {
+    appearance: none; border: 0; cursor: pointer; font-family: var(--sans);
+    font-size: 16px; font-weight: 700; border-radius: 12px; padding: 15px 26px;
+    transition: transform .12s ease, box-shadow .2s ease, background .2s ease;
+  }
+  .btn-primary {
+    background: linear-gradient(180deg, var(--gold), var(--gold-deep));
+    color: #2a1c08; box-shadow: 0 10px 30px rgba(232,184,106,0.28);
+  }
+  .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 14px 38px rgba(232,184,106,0.38); }
+  .btn-ghost { background: transparent; color: var(--ink); border: 1px solid var(--panel-line); }
+  .btn-ghost:hover { border-color: var(--gold); color: var(--gold); }
+  .btn:focus-visible { outline: 3px solid rgba(232,184,106,0.6); outline-offset: 2px; }
+
+  /* ---------- selling points ---------- */
+  .points { padding: 44px 0 8px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-line); border-radius: var(--radius);
+    padding: 22px 20px; backdrop-filter: blur(8px);
+  }
+  .card .tag { font-size: 12px; letter-spacing: 1px; color: var(--ink-mute); }
+  .card h3 { font-family: var(--serif); font-size: 20px; margin: 8px 0 8px; font-weight: 700; }
+  .card.c0 { border-top: 3px solid var(--tense); }
+  .card.c1 { border-top: 3px solid var(--crisis); }
+  .card.c2 { border-top: 3px solid var(--calm); }
+  .card p { margin: 0; color: var(--ink-soft); font-size: 14.5px; }
+
+  /* ---------- form ---------- */
+  .signup { padding: 46px 0 30px; }
+  .signup-inner {
+    background: linear-gradient(180deg, rgba(28,38,55,0.85), rgba(18,26,39,0.85));
+    border: 1px solid var(--panel-line); border-radius: 18px; padding: 30px 26px;
+    max-width: 640px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+  .signup h2 { font-family: var(--serif); font-size: 24px; margin: 0 0 6px; text-align: center; }
+  .signup .lead-copy { color: var(--ink-soft); text-align: center; font-size: 14.5px; margin: 0 0 20px; }
+  .field { display: flex; gap: 10px; flex-wrap: wrap; }
+  .field input[type="text"] {
+    flex: 1 1 220px; min-width: 0; background: rgba(8,12,18,0.7); border: 1px solid var(--panel-line);
+    color: var(--ink); border-radius: 11px; padding: 14px 16px; font-size: 16px; font-family: var(--sans);
+  }
+  .field input::placeholder { color: var(--ink-mute); }
+  .field input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(232,184,106,0.18); }
+  .field .btn-primary { flex: 0 0 auto; }
+  .err { color: var(--tense); font-size: 13px; min-height: 18px; margin: 8px 2px 0; }
+  .trust { color: var(--ink-mute); font-size: 12.5px; text-align: center; margin: 16px 0 0; }
+
+  /* ---------- modal ---------- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(5,8,13,0.72); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center; padding: 18px; z-index: 50;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: linear-gradient(180deg, #18202e, #111824); border: 1px solid var(--panel-line);
+    border-radius: 18px; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto;
+    padding: 26px 24px; box-shadow: 0 30px 80px rgba(0,0,0,0.5);
+  }
+  .modal h2 { font-family: var(--serif); font-size: 22px; margin: 0 0 6px; }
+  .modal .sub { color: var(--ink-soft); font-size: 14px; margin: 0 0 18px; }
+  .q { margin: 0 0 22px; }
+  .q .qt { font-weight: 700; font-size: 15.5px; margin: 0 0 10px; }
+  .q .qt .req { color: var(--gold); }
+  .q .hint { color: var(--ink-mute); font-size: 12.5px; font-weight: 400; }
+  .opt {
+    display: flex; gap: 11px; align-items: flex-start; background: rgba(8,12,18,0.5);
+    border: 1px solid var(--panel-line); border-radius: 10px; padding: 11px 13px; margin: 0 0 8px; cursor: pointer;
+    transition: border-color .15s ease, background .15s ease; font-size: 14.5px; color: var(--ink-soft);
+  }
+  .opt:hover { border-color: rgba(232,184,106,0.4); }
+  .opt input { margin-top: 3px; accent-color: var(--gold); flex: 0 0 auto; }
+  .opt.checked { border-color: var(--gold); background: rgba(232,184,106,0.08); color: var(--ink); }
+  .opt.disabled { opacity: 0.45; cursor: not-allowed; }
+  .q textarea {
+    width: 100%; background: rgba(8,12,18,0.6); border: 1px solid var(--panel-line); color: var(--ink);
+    border-radius: 10px; padding: 12px 14px; font-size: 15px; font-family: var(--sans); resize: vertical; min-height: 64px;
+  }
+  .q textarea:focus { outline: none; border-color: var(--gold); }
+  .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 8px; }
+  .skip { background: transparent; border: 0; color: var(--ink-mute); cursor: pointer; font-size: 14px; font-family: var(--sans); }
+  .thanks { text-align: center; padding: 14px 0; }
+  .thanks .big { font-family: var(--serif); font-size: 26px; margin: 0 0 10px; }
+  .thanks p { color: var(--ink-soft); }
+
+  footer { color: var(--ink-mute); font-size: 12.5px; text-align: center; padding: 26px 0 40px; }
+  footer .vtag { opacity: 0.5; }
+
+  @media (max-width: 760px) {
+    .points { grid-template-columns: 1fr; }
+    .field .btn-primary { flex: 1 1 100%; }
+    .hero { padding: 30px 0 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+  <header class="wrap topbar">
+    <div class="brand"><span class="dot"></span>群像</div>
+    <span class="badge-live">内测预约 · 限量</span>
+  </header>
+
+  <main>
+    <section class="wrap hero">
+      <p class="eyebrow" id="eyebrow">一个会自己活的角色</p>
+      <h1 class="title" id="title"></h1>
+      <p class="subtitle" id="subtitle"></p>
+      <p class="valueprop" id="valueprop"></p>
+      <div class="cta-row">
+        <button class="btn btn-primary" id="ctaPrimary" data-cta="primary"></button>
+        <button class="btn btn-ghost" id="ctaSecondary" data-cta="secondary"></button>
+      </div>
+    </section>
+
+    <section class="wrap points" id="points" aria-label="核心卖点"></section>
+
+    <section class="wrap signup" id="signup">
+      <div class="signup-inner">
+        <h2 id="formTitle">让它先活起来</h2>
+        <p class="lead-copy" id="formLead"></p>
+        <form id="leadForm" novalidate>
+          <div class="field">
+            <input type="text" id="contact" name="contact" autocomplete="email"
+                   placeholder="你的邮箱 / 手机 / 微信" aria-label="联系方式（邮箱、手机或微信）" />
+            <button type="submit" class="btn btn-primary" id="formSubmit">占个名额</button>
+          </div>
+          <div class="err" id="formErr" role="alert"></div>
+          <p class="trust" id="formTrust"></p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    群像 · 内测预约 ｜ 我们只会在「你的角色可以诞生了」那天联系你一次
+    <div class="vtag" id="vtag"></div>
+  </footer>
+
+  <!-- 通用弹层：问卷 / 演示提示 -->
+  <div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal" id="modal"></div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ===================== 可配置项 ===================== */
+  var CONFIG = {
+    // 留资 + 问卷 POST 目标。留空=本地模式（存 localStorage + dataLayer/console）。
+    // 接 Formspree 例：'https://formspree.io/f/xxxxxxx'；或自建 '/api/leads'
+    formEndpoint: "",
+    // GA4 Measurement ID（可选）。留空则仅在已注入 gtag/GTM 时复用。
+    gaMeasurementId: "",
+    defaultVariant: "autonomy"
+  };
+
+  /* ===================== 三版文案（§3.2） ===================== */
+  var VARIANTS = {
+    autonomy: {
+      eyebrow: "它会自己活，也会违背你",
+      title: '你创建一个角色，丢进一个永不停止的世界。然后你下线了——而它，<em>开始自己活</em>。',
+      subtitle: "离线时，它由 AI 自主谋生、结盟、复仇、相爱、背叛。它做的每一个决定，都不一定是你想要的。上线时，你重新介入它的命运。",
+      valueprop: "这不是一个你操控的棋子，是一个有自己意志、会在你不在时做出选择、并把每一步都写进编年史的「活人」。",
+      ctaPrimary: "抢先体验：领养我的第一个角色",
+      ctaSecondary: "先看它会怎么「活」（30秒演示）",
+      formTitle: "让它先活起来",
+      formLead: "留下邮箱或微信，开服第一批名额优先通知你。我们只在「你的角色可以诞生了」那天联系你一次，不发广告。",
+      formTrust: "内测限量，先到先得。你的角色一旦诞生，它的一生只属于你。",
+      points: [
+        { tag: "它不等你", title: "你下线，它不暂停", body: "你下线后，它不会暂停。它会饿了去找吃的、遇到人去结交、被挑衅去应战——按它自己的性格，不按你的剧本。" },
+        { tag: "它会违背你", title: "它有自己的脾气", body: "你给它定下「离线宪章」，但当它的野心和你的意志冲突，它可能不听。这是张力，也是它之所以是「它」。" },
+        { tag: "你能回来", title: "随时夺回方向盘", body: "上线第一眼，你看到它这段时间经历了什么，以及一封它正等你拍板的紧急信——错过，它就自己选了。" }
+      ]
+    },
+    story: {
+      eyebrow: "一个会写自传的角色",
+      title: "你不在的时候，它替自己活了一整天。<em>回来听它讲讲</em>。",
+      subtitle: "它在你离线时遇见的人、爱过的人、背叛过的人，都成了它写给你的故事。而故事的下一页，由你来翻。",
+      valueprop: "世界上第一个会在你不在时继续生活、并把这段人生讲给你听的角色——你介入的不是一局游戏，是一条命。",
+      ctaPrimary: "领养一个会自己活的角色",
+      ctaSecondary: "看一个角色离线一天的真实故事",
+      formTitle: "让你的角色第一批诞生",
+      formLead: "留下联系方式，开服那天，让你的角色第一批诞生。",
+      formTrust: "我们承诺：它经历的每一件事都不是脚本，是它当下「决定」要做的。",
+      points: [
+        { tag: "它会自己经历", title: "一个会自己经历的角色", body: "你睡着的八小时，它过了一整天。它认识了谁、做了什么选择，回来一张卡就看懂。" },
+        { tag: "命运可改写", title: "一段你能改写的命运", body: "每次上线，它都有一个正在发生、还没盖棺定论的难题等你。你的一个决定，改变它接下来的人生。" },
+        { tag: "专属编年史", title: "一部只属于你们的编年史", body: "它的相遇、决裂、复仇、和解，全部留痕，可回放、可做成图分享给朋友。" }
+      ]
+    },
+    world: {
+      eyebrow: "所有人的角色活在同一个世界",
+      title: "成千上万个角色活在同一个世界里。<em>其中一个，是你的</em>。",
+      subtitle: "这里没有 NPC。你遇到的每一个人，都是另一个玩家丢进来的角色，由 AI 替他活着。结盟还是反目，由你们各自的角色当下决定。",
+      valueprop: "一个不会重置、不分服、所有人共享的活世界——你的角色在这里结下的恩怨，是真实历史的一部分。",
+      ctaPrimary: "把我的角色放进这个世界",
+      ctaSecondary: "看看这个世界现在正发生什么",
+      formTitle: "占一个开服名额",
+      formLead: "这个世界正在等它的第一批居民。留下联系方式，占一个开服名额。",
+      formTrust: "你的恩怨会被记住——谁先背叛谁，都有不可篡改的时间戳。",
+      points: [
+        { tag: "活世界", title: "一个真正的活世界", body: "你下线后世界照转，势力在兴衰、战争在爆发、传奇在诞生，你的角色身在其中。" },
+        { tag: "被记住", title: "你的恩怨会被记住", body: "谁先背叛谁，谁先示好，都有不可篡改的时间戳。世界会记得你的角色做过什么。" },
+        { tag: "被传颂", title: "你的传奇能被后人听说", body: "角色死后进入名人堂，几百回合后出生的新角色，会「听说过」你当年的故事。" }
+      ]
+    }
+  };
+  // src（UTM）→ 变体键
+  var SRC_MAP = { autonomy: "autonomy", story: "story", world: "world", a: "autonomy", b: "story", c: "world" };
+
+  /* ===================== 问卷（§3.3） ===================== */
+  var SURVEY = [
+    {
+      id: "q1", type: "single", required: true,
+      title: "上面这些，最打动你的是哪一点？", hint: "只选一个",
+      options: [
+        { k: "A", t: "角色在我离线时会【自己生活、自己做决定】，不用我盯着" },
+        { k: "B", t: "角色可能会【违背我的意志】，有自己的脾气和选择" },
+        { k: "C", t: "上线后我能【介入、改变它的命运】" },
+        { k: "D", t: "能【读到它经历的故事】、做成图分享" },
+        { k: "E", t: "所有人的角色活在【同一个共享世界】里" },
+        { k: "F", t: "把 AI 算力做成游戏资源（天命点）这种【玩法创新】" },
+        { k: "G", t: "说不清，就是觉得新鲜" }
+      ]
+    },
+    {
+      id: "q2", type: "multi", required: true, max: 3,
+      title: "你希望你的角色离线时，能自己做哪些事？", hint: "多选，最多 3 项",
+      options: [
+        { k: "live", t: "谋生、赚钱、攒家底" },
+        { k: "friend", t: "主动结交朋友、建立关系" },
+        { k: "love", t: "谈恋爱、结婚、生孩子" },
+        { k: "revenge", t: "向仇人复仇" },
+        { k: "ally", t: "结盟，或在必要时背叛盟友" },
+        { k: "passive", t: "我希望它【尽量别自作主张】，重要的事都等我" },
+        { k: "explore", t: "探索、迁徙到新地方" }
+      ]
+    },
+    {
+      id: "q3", type: "single", required: true,
+      title: "如果你离线时，角色做了一件你【不会同意】的事（比如把它当传家宝的剑送了人，或和你讨厌的人结了盟），你的第一反应是？",
+      options: [
+        { k: "A", t: "有点生气，但这就是它有自己想法的证明，我能接受" },
+        { k: "B", t: "很好奇它为什么这么做，想回去看看" },
+        { k: "C", t: "会很不爽，但如果能补救我可以接受" },
+        { k: "D", t: "不能接受，这让我觉得这不是「我的」角色" },
+        { k: "E", t: "直接弃坑" }
+      ]
+    },
+    {
+      id: "q4", type: "open", required: false,
+      title: "一句话，你最想让你的第一个角色是个什么样的人？", hint: "选填",
+      placeholder: "比如：一个想找回失散妹妹的落魄剑客……"
+    },
+    {
+      id: "q5", type: "single", required: false,
+      title: "如果让角色「活得更像个真人」（记得更久、反应更快、离线经历更密集）需要每月花一点钱，你的意愿？", hint: "选填",
+      options: [
+        { k: "A", t: "愿意，每月 ¥30 以内可以" },
+        { k: "B", t: "看体验，先免费玩" },
+        { k: "C", t: "只玩免费的" },
+        { k: "D", t: "不会为这个付费" }
+      ]
+    }
+  ];
+
+  /* ===================== 工具：参数 / 埋点 ===================== */
+  var qs = new URLSearchParams(location.search);
+  function getParam(n) { return (qs.get(n) || "").trim(); }
+
+  var srcRaw = getParam("src").toLowerCase();
+  var variantKey = SRC_MAP[srcRaw] || CONFIG.defaultVariant;
+  var V = VARIANTS[variantKey];
+
+  var ATTRIBUTION = {
+    variant: variantKey,
+    src: srcRaw || "(direct)",
+    utm_source: getParam("utm_source"),
+    utm_medium: getParam("utm_medium"),
+    utm_campaign: getParam("utm_campaign"),
+    utm_content: getParam("utm_content"),
+    referrer: document.referrer || "",
+    landing_path: location.pathname + location.search
+  };
+
+  // 稳定的访客 id，用于跨事件归因（localStorage）
+  function visitorId() {
+    try {
+      var k = "qx_vid", v = localStorage.getItem(k);
+      if (!v) { v = "v_" + Math.random().toString(36).slice(2) + "_" + (window.performance && performance.now ? Math.floor(performance.now()) : 0); localStorage.setItem(k, v); }
+      return v;
+    } catch (e) { return "v_nostore"; }
+  }
+  var VID = visitorId();
+
+  // 统一埋点：dataLayer(GTM) + gtag(GA4) + console + 本地日志
+  if (CONFIG.gaMeasurementId && !window.gtag) {
+    var s = document.createElement("script");
+    s.async = true; s.src = "https://www.googletagmanager.com/gtag/js?id=" + encodeURIComponent(CONFIG.gaMeasurementId);
+    document.head.appendChild(s);
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function () { window.dataLayer.push(arguments); };
+    window.gtag("js", new Date());
+    window.gtag("config", CONFIG.gaMeasurementId);
+  }
+  function track(event, props) {
+    var payload = Object.assign({ event: event, vid: VID, ts: new Date().toISOString() }, ATTRIBUTION, props || {});
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+    if (typeof window.gtag === "function") {
+      try { window.gtag("event", event, payload); } catch (e) {}
+    }
+    try {
+      var log = JSON.parse(localStorage.getItem("qx_events") || "[]");
+      log.push(payload); localStorage.setItem("qx_events", JSON.stringify(log.slice(-200)));
+    } catch (e) {}
+    if (window.console && console.debug) console.debug("[track]", event, payload);
+  }
+
+  // 把留资/问卷数据送到后端（或本地模式）
+  function postData(kind, data) {
+    var body = Object.assign({ kind: kind, vid: VID }, ATTRIBUTION, data);
+    if (CONFIG.formEndpoint) {
+      return fetch(CONFIG.formEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.ok; }).catch(function () { return false; });
+    }
+    // 本地模式：存 localStorage，便于先跑通流程
+    try {
+      var key = "qx_" + kind;
+      var arr = JSON.parse(localStorage.getItem(key) || "[]");
+      arr.push(body); localStorage.setItem(key, JSON.stringify(arr));
+    } catch (e) {}
+    return Promise.resolve(true);
+  }
+
+  /* ===================== 渲染落地页 ===================== */
+  function $(id) { return document.getElementById(id); }
+  function render() {
+    document.title = "群像 · " + V.eyebrow;
+    $("eyebrow").textContent = V.eyebrow;
+    $("title").innerHTML = V.title;          // 文案含 <em>，可信内联标记
+    $("subtitle").textContent = V.subtitle;
+    $("valueprop").textContent = V.valueprop;
+    $("ctaPrimary").textContent = V.ctaPrimary;
+    $("ctaSecondary").textContent = V.ctaSecondary;
+    $("formTitle").textContent = V.formTitle;
+    $("formLead").textContent = V.formLead;
+    $("formTrust").textContent = V.formTrust;
+    $("vtag").textContent = "variant: " + variantKey + " · src: " + ATTRIBUTION.src;
+
+    var pts = $("points");
+    pts.innerHTML = "";
+    V.points.forEach(function (p, i) {
+      var el = document.createElement("article");
+      el.className = "card c" + i;
+      el.innerHTML = '<div class="tag"></div><h3></h3><p></p>';
+      el.querySelector(".tag").textContent = p.tag;
+      el.querySelector("h3").textContent = p.title;
+      el.querySelector("p").textContent = p.body;
+      pts.appendChild(el);
+    });
+  }
+
+  /* ===================== 弹层 ===================== */
+  var overlay = $("overlay"), modal = $("modal"), lastFocus = null;
+  function openModal(html) {
+    modal.innerHTML = html;
+    overlay.classList.add("open");
+    lastFocus = document.activeElement;
+    var f = modal.querySelector("button, input, textarea, [tabindex]");
+    if (f) f.focus();
+  }
+  function closeModal() {
+    overlay.classList.remove("open");
+    modal.innerHTML = "";
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) { /* 问卷不允许点空白关闭，避免误丢；演示弹层可关 */ if (overlay.dataset.dismissable === "1") closeModal(); } });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && overlay.dataset.dismissable === "1") closeModal(); });
+
+  /* ===================== 留资表单 ===================== */
+  function classifyContact(v) {
+    if (/@/.test(v)) return "email";
+    if (/^\+?\d[\d\s-]{6,}$/.test(v)) return "phone";
+    return "wechat";
+  }
+  function validContact(v) {
+    if (!v || v.length < 4) return false;
+    if (/@/.test(v)) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+    return v.length >= 5; // 手机/微信：宽松，非空且足够长
+  }
+
+  var leadCaptured = null;
+  $("leadForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = $("contact"), errEl = $("formErr");
+    var v = input.value.trim();
+    if (!validContact(v)) {
+      errEl.textContent = "请填一个能联系到你的邮箱、手机或微信～";
+      input.focus();
+      track("lead_submit_invalid", {});
+      return;
+    }
+    errEl.textContent = "";
+    var ctype = classifyContact(v);
+    leadCaptured = { contact: v, contact_type: ctype, submitted_at: new Date().toISOString() };
+    track("lead_submit", { contact_type: ctype });          // ← 假门转化口径（§3.5 北极星）
+    postData("lead", leadCaptured);
+    openSurvey();
+  });
+
+  /* ===================== 问卷弹层 ===================== */
+  function openSurvey() {
+    track("survey_view", {});
+    var html = '<h2 id="modalTitle">谢谢！再花 30 秒帮我们一个忙</h2>'
+      + '<p class="sub">你的回答会直接决定我们怎么把这个游戏做出来。</p>'
+      + '<form id="surveyForm">';
+    SURVEY.forEach(function (q) {
+      html += '<div class="q" data-qid="' + q.id + '" data-type="' + q.type + (q.max ? '" data-max="' + q.max : '') + '">';
+      html += '<div class="qt">' + (q.required ? '<span class="req">*</span> ' : '') + escapeHtml(q.title)
+        + (q.hint ? ' <span class="hint">（' + escapeHtml(q.hint) + '）</span>' : '') + '</div>';
+      if (q.type === "open") {
+        html += '<textarea data-qid="' + q.id + '" placeholder="' + escapeHtml(q.placeholder || "") + '"></textarea>';
+      } else {
+        q.options.forEach(function (o) {
+          var inputType = q.type === "multi" ? "checkbox" : "radio";
+          html += '<label class="opt"><input type="' + inputType + '" name="' + q.id + '" value="' + o.k + '" />'
+            + '<span>' + escapeHtml(o.t) + '</span></label>';
+        });
+      }
+      html += '<div class="err" data-err="' + q.id + '"></div></div>';
+    });
+    html += '<div class="modal-actions">'
+      + '<button type="button" class="skip" id="surveySkip">跳过，直接完成</button>'
+      + '<button type="submit" class="btn btn-primary">提交</button>'
+      + '</div></form>';
+    overlay.dataset.dismissable = "0";
+    openModal(html);
+    wireSurvey();
+  }
+
+  function wireSurvey() {
+    // 选项高亮 + 多选上限
+    modal.querySelectorAll(".q").forEach(function (qEl) {
+      var type = qEl.dataset.type;
+      var max = parseInt(qEl.dataset.max || "0", 10);
+      qEl.querySelectorAll(".opt input").forEach(function (inp) {
+        inp.addEventListener("change", function () {
+          if (type === "multi" && max) {
+            var checked = qEl.querySelectorAll(".opt input:checked");
+            if (checked.length >= max) {
+              qEl.querySelectorAll(".opt input:not(:checked)").forEach(function (o) { o.disabled = true; o.closest(".opt").classList.add("disabled"); });
+            } else {
+              qEl.querySelectorAll(".opt input").forEach(function (o) { o.disabled = false; o.closest(".opt").classList.remove("disabled"); });
+            }
+          }
+          qEl.querySelectorAll(".opt").forEach(function (l) { l.classList.toggle("checked", l.querySelector("input").checked); });
+        });
+      });
+    });
+
+    $("surveySkip").addEventListener("click", function () { finishSurvey(collectSurvey(), true); });
+    modal.querySelector("#surveyForm").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var ans = collectSurvey();
+      // 校验必答
+      var ok = true;
+      SURVEY.forEach(function (q) {
+        var errEl = modal.querySelector('[data-err="' + q.id + '"]');
+        if (errEl) errEl.textContent = "";
+        if (q.required) {
+          var a = ans[q.id];
+          if (!a || (Array.isArray(a) && a.length === 0)) {
+            ok = false;
+            if (errEl) errEl.textContent = "这题是必答的～";
+          }
+        }
+      });
+      if (!ok) return;
+      finishSurvey(ans, false);
+    });
+  }
+
+  function collectSurvey() {
+    var ans = {};
+    SURVEY.forEach(function (q) {
+      if (q.type === "open") {
+        var ta = modal.querySelector('textarea[data-qid="' + q.id + '"]');
+        var val = ta ? ta.value.trim() : "";
+        if (val) ans[q.id] = val;
+      } else if (q.type === "multi") {
+        var arr = [];
+        modal.querySelectorAll('input[name="' + q.id + '"]:checked').forEach(function (i) { arr.push(i.value); });
+        if (arr.length) ans[q.id] = arr;
+      } else {
+        var sel = modal.querySelector('input[name="' + q.id + '"]:checked');
+        if (sel) ans[q.id] = sel.value;
+      }
+    });
+    return ans;
+  }
+
+  function finishSurvey(ans, skipped) {
+    track("survey_submit", { skipped: !!skipped, q1: ans.q1 || "", q2: (ans.q2 || []).join("|"), q3: ans.q3 || "", q5: ans.q5 || "" });
+    postData("survey", { lead: leadCaptured, answers: ans, skipped: !!skipped });
+    overlay.dataset.dismissable = "1";
+    openModal(
+      '<div class="thanks">'
+      + '<div class="big">名额已为你预留 ✦</div>'
+      + '<p id="modalTitle">开服第一批，我们会第一时间通知你。<br/>到那天，你的第一个角色就可以诞生了。</p>'
+      + '<div class="modal-actions" style="justify-content:center;margin-top:18px;">'
+      + '<button type="button" class="btn btn-ghost" id="thanksClose">好的</button></div></div>'
+    );
+    var c = $("thanksClose"); if (c) c.addEventListener("click", closeModal);
+  }
+
+  /* ===================== CTA ===================== */
+  $("ctaPrimary").addEventListener("click", function () {
+    track("cta_click", { cta: "primary" });
+    document.getElementById("signup").scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(function () { var c = $("contact"); if (c) c.focus(); }, 420);
+  });
+  $("ctaSecondary").addEventListener("click", function () {
+    track("cta_click", { cta: "secondary" });   // 次 CTA 点击本身是强意向信号（假门）
+    overlay.dataset.dismissable = "1";
+    openModal(
+      '<h2 id="modalTitle">演示马上就来</h2>'
+      + '<p class="sub">第一段「角色离线一天」的真实演示正在路上。留个联系方式，做好了第一时间发给你。</p>'
+      + '<div class="field"><input type="text" id="demoContact" placeholder="你的邮箱 / 手机 / 微信" aria-label="联系方式" />'
+      + '<button class="btn btn-primary" id="demoSubmit">通知我</button></div>'
+      + '<div class="err" id="demoErr"></div>'
+    );
+    var ds = $("demoSubmit");
+    ds.addEventListener("click", function () {
+      var v = $("demoContact").value.trim();
+      if (!validContact(v)) { $("demoErr").textContent = "填一个能联系到你的方式吧～"; return; }
+      track("lead_submit", { contact_type: classifyContact(v), source_cta: "demo" });
+      postData("lead", { contact: v, contact_type: classifyContact(v), source_cta: "demo", submitted_at: new Date().toISOString() });
+      leadCaptured = { contact: v, contact_type: classifyContact(v) };
+      closeModal();
+      openSurvey();
+    });
+  });
+
+  /* ===================== 工具 ===================== */
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+    });
+  }
+
+  /* ===================== 启动 ===================== */
+  render();
+  track("page_view", { variant: variantKey });
+})();
+</script>
+</body>
+</html>
