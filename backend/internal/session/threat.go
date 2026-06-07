@@ -586,14 +586,15 @@ func (service *Service) grantEliteLoot(ctx context.Context, state *State, actor 
 // applyDefeatPenalty 失败惩罚经后果分级闸降级（elite 候选层=1，恒落「可恢复」：士气重挫），经 Mutator 留痕。
 func (service *Service) applyDefeatPenalty(ctx context.Context, state *State, actor *unit.Record, threat Threat) (int, error) {
 	candidate := candidateDefeatLayer(threat.Tier)
-	// 牵挂/在世天数尚未在 session 落地，单人 elite 用保守值——分级闸对新角色硬锁，最坏只到候选层。
-	layer := encounter.DegradePenalty(candidate, 0, 0)
+	// 后果分级闸用**真实牵挂**：深牵挂+陪伴久的角色才可能挨更重的后果；萍水相逢的被硬锁在「可恢复」。
+	care := service.ComputeAttachment(ctx, actor.ID, actor.Status.Loyalty, state.TurnState.Turn)
+	layer := encounter.DegradePenalty(candidate, care, state.TurnState.Turn)
 
 	res, err := service.mutator.Apply(ctx, status.Mutation{
 		UnitID:     actor.ID,
 		Turn:       state.TurnState.Turn,
 		Field:      status.FieldMorale,
-		Delta:      -0.15,
+		Delta:      -defeatMoraleHitForLayer(layer), // 代价随分级层放大（绝不触碰 lives，D0-D3 保护）
 		ReasonCode: events.ReasonEmotionTrauma,
 		ReasonText: fmt.Sprintf("没能赢下那头%s，心气受了挫", threat.Name),
 		Actors:     []string{actor.ID},
