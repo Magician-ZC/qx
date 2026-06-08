@@ -260,6 +260,7 @@ func (service *Service) generateUnitDecision(
 		MaxTokens:      220,
 		Timeout:        llmRequestTimeout,
 		Metadata:       sessionLLMMetadata(state, actor.ID),
+		Cacheable:      true, // 单位决策高频重复情境：相同 prompt 复用、跳过 LLM（§11.2 降本，缓存 flag-gated；命中仍对当前状态 re-validate）
 	})
 	if err != nil {
 		cause := fmt.Errorf("unit decision generation failed: %w", err)

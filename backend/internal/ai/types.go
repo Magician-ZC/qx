@@ -141,6 +141,7 @@ type CompletionRequest struct {
 	Timeout        time.Duration
 	Metadata       map[string]string
 	Fallback       RuleFallback
+	Cacheable      bool // 是否可进 prompt 缓存（高频重复情境的决策设 true；§11.2 降本，缓存全程 flag-gated 见 prompt_cache.go）
 }
 
 // CompletionResult 结构体用于承载该模块的核心数据。

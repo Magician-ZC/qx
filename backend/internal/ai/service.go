@@ -23,6 +23,7 @@ type Service struct {
 	validator Validator
 	providers map[ProviderName]Provider
 	profiles  map[TaskKind]TaskProfile
+	cache     *promptCache // prompt 缓存（nil=未启用，QUNXIANG_PROMPT_CACHE 默认关）
 }
 
 var (
@@ -98,6 +99,7 @@ func NewService(cfg config.Config, logger *slog.Logger) *Service {
 		validator: validator,
 		providers: providers,
 		profiles:  ConfiguredTaskProfiles(cfg.LLMTimeout),
+		cache:     promptCacheFromEnv(),
 	}
 }
 
@@ -189,6 +191,16 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 		return CompletionResult{}, fmt.Errorf("unsupported task kind %q", request.Task)
 	}
 
+	// prompt 缓存（§11.2 降本，flag-gated）：相同情境的成功决策直接复用、跳过 LLM。命中的 Output 仍由调用方对当前状态 re-validate。
+	cacheable := request.Cacheable && s.cache != nil
+	var ckey string
+	if cacheable {
+		ckey = cacheKey(request)
+		if cached, hit := s.cache.get(ckey); hit {
+			return cached, nil
+		}
+	}
+
 	timeout := request.Timeout
 	if timeout == 0 {
 		timeout = profile.Timeout
@@ -247,7 +259,7 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 			continue
 		}
 
-		return CompletionResult{
+		result := CompletionResult{
 			Provider:     response.Provider,
 			Model:        response.Model,
 			Output:       response.Output,
@@ -257,7 +269,11 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 				Attempts:  attempts,
 				RawOutput: response.RawOutput,
 			},
-		}, nil
+		}
+		if cacheable { // 只缓存成功的真 LLM 输出（fallback 不入缓存）
+			s.cache.put(ckey, result)
+		}
+		return result, nil
 	}
 
 	joined := errors.Join(failures...)
@@ -351,10 +367,16 @@ func (s *Service) Status() map[string]any {
 		}
 	}
 
+	promptCacheStatus := map[string]any{"enabled": false}
+	if s.cache != nil {
+		promptCacheStatus = s.cache.Stats()
+	}
+
 	return map[string]any{
-		"ready":     ready,
-		"providers": providers,
-		"routes":    routes,
+		"ready":        ready,
+		"providers":    providers,
+		"routes":       routes,
+		"prompt_cache": promptCacheStatus,
 	}
 }
 
