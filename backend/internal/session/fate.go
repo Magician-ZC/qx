@@ -225,10 +225,14 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		// 发生在别人身上 → 经她的锚（含离线宪章红线锚）翻译牵挂相关度，并记下命中里最重的锚类别（翻译矩阵用）。
 		rel, anchorKind = eventRelevanceWithAnchor(service.buildRelevanceAnchorsWithState(ctx, state, owner.ID), ev)
 	}
-	// §5「为什么会这样」对玩家可见：归因因果句缺省时，用可解析前因（命中锚类别 + 事件摘要）派生一句，
-	// 让命运卡（fateCard）的「（…）」尾注非空（修「字段恒空=死管线」）。调用方显式给了 AttributionZH 则尊重之。
+	// §5「为什么会这样」对玩家可见：归因因果句缺省时，先走 §M1 data-driven 翻译层（按 事件语义类 × 锚类 生成贴合个人的命运 beat），
+	// 命中则用更像「命运 beat」的措辞；未命中严格回落 deriveFateProvenance（与原行为逐字节一致）。调用方显式给了 AttributionZH 则尊重之。
 	if strings.TrimSpace(ev.AttributionZH) == "" {
-		ev.AttributionZH = deriveFateProvenance(ev, anchorKind)
+		if beat, ok := translateFateBeat(ev, relevance.AnchorKind(anchorKind)); ok {
+			ev.AttributionZH = beat
+		} else {
+			ev.AttributionZH = deriveFateProvenance(ev, anchorKind)
+		}
 	}
 	// FateScore 三因子（设计宪法 §4.2）：不可逆度 × 牵挂相关度 × 情绪强度，三者 ∈ [0,1]。
 	// careRelevance=rel（上面算出的关系/重要度相关性）；irreversibility/emotion 是 [floor,1] 的阻尼系数，
@@ -946,7 +950,10 @@ func (service *Service) resolvedDecisionIDs(ctx context.Context, unitID string) 
 
 // WorldizeDeath 把一个角色之死，按相关性路由进「在乎她的每个人」的命运收件箱（双向耦合）。
 // 返回被实际惊动（进高光卡/待决策）的人数。这正是「她的密友死了→我的命运」的机制落地。
-func (service *Service) WorldizeDeath(ctx context.Context, sessionID string, deceased unit.Record) (int, error) {
+// WorldizeDeath 把一个角色之死按相关性路由进「在乎她的人」的命运收件箱。
+// killerAttributionZH 可选：凶手本次 LLM 决策的归因因果句（§5.4），非空则作为死亡卡的「为什么」尾注，
+// 让哀悼者看到的是当次决策因果而非启发式模板；空则由 SurfaceFateEvent 回落翻译层/启发式。
+func (service *Service) WorldizeDeath(ctx context.Context, sessionID string, deceased unit.Record, killerAttributionZH string) (int, error) {
 	if service == nil || service.db == nil {
 		return 0, fmt.Errorf("worldize death: missing db")
 	}
@@ -988,6 +995,7 @@ func (service *Service) WorldizeDeath(ctx context.Context, sessionID string, dec
 			Importance:    8,
 			EmotionWeight: -0.6,
 			Summary:       summary,
+			AttributionZH: killerAttributionZH, // 非空=凶手当次 LLM 因果句；空则 SurfaceFateEvent 回落翻译层/启发式
 		})
 		if err != nil {
 			return surfaced, err

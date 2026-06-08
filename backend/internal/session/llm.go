@@ -16,6 +16,7 @@ import (
 
 	"qunxiang/backend/internal/ai"
 	"qunxiang/backend/internal/engine/decision"
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -304,6 +305,18 @@ func (service *Service) generateUnitDecision(
 		if !ok && service.enforcementActive() {
 			fallback := oocFallbackDecision()
 			message := "attribution_ooc:" + reason
+			// §5.2：OOC 优雅回退时落一条可追溯审计行（events 表 append-only，best-effort 不阻断主链路）——
+			// 此前 OOC 仅增进程级内存计数(AttributionStats)、重启即丢、无单条溯源。
+			if service.db != nil {
+				_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+					SessionID:   state.ID,
+					OwnerUnitID: actor.ID,
+					Code:        events.ReasonOOCRejected,
+					Category:    events.CategoryLifecycle,
+					Payload:     map[string]any{"reason": reason, "turn": state.TurnState.Turn},
+					WorldID:     state.WorldID,
+				})
+			}
 			return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
 		}
 	}
@@ -346,7 +359,37 @@ func (service *Service) generateUnitDecision(
 		}
 	}
 
+	// §5.4：暂存本次 LLM 决策的归因因果句（经 §5 校验后才可信），供同一执行流内该单位造成的命运卡取「当次因果句」。
+	if choice.Attribution != nil {
+		service.rememberDecisionNarrative(actor.ID, choice.Attribution.NarrativeZH)
+	}
+
 	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
+}
+
+// rememberDecisionNarrative 暂存某单位本次 LLM 决策的归因因果句（NarrativeZH），供同一执行流内由该单位造成的
+// 命运卡（如 WorldizeDeath 的死亡卡）取用「当次 LLM 因果句」而非启发式模板（§5.4）。空值不存。
+func (service *Service) rememberDecisionNarrative(unitID, narrative string) {
+	narrative = strings.TrimSpace(narrative)
+	if service == nil || unitID == "" || narrative == "" {
+		return
+	}
+	service.decisionNarrativeMu.Lock()
+	if service.decisionNarrative == nil {
+		service.decisionNarrative = make(map[string]string)
+	}
+	service.decisionNarrative[unitID] = narrative
+	service.decisionNarrativeMu.Unlock()
+}
+
+// recallDecisionNarrative 取某单位最近一次暂存的归因因果句；无则返回 ""。
+func (service *Service) recallDecisionNarrative(unitID string) string {
+	if service == nil || unitID == "" {
+		return ""
+	}
+	service.decisionNarrativeMu.Lock()
+	defer service.decisionNarrativeMu.Unlock()
+	return service.decisionNarrative[unitID]
 }
 
 func confusedUnitDecision(

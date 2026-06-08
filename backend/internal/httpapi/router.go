@@ -1272,10 +1272,14 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		// 解析失败也返 ok：埋点端点对客户端永远成功，绝不暴露内部细节。
 		_ = c.ShouldBindJSON(&request)
 
-		// 白名单：事件名 → 漏斗阶段。仅这两个客户端事件允许注入，其余忽略。
+		// 白名单：事件名 → 漏斗阶段。仅这些客户端事件允许注入，其余忽略。
 		stage, allowed := map[string]analytics.Stage{
 			analytics.EventStatusCardViewed: analytics.StageActivation, // 状态卡查看 = 激活
 			analytics.EventShareInitiated:   analytics.StageReferral,   // 分享发起 = 转介
+			// 命运高光卡三键轻反馈（GDD §8 乐趣度量：惊喜命中率/OOC 率）= 留存内核心乐趣信号。
+			analytics.EventFateReactExpected: analytics.StageRetention,
+			analytics.EventFateReactSurprise: analytics.StageRetention,
+			analytics.EventFateReactOoc:      analytics.StageRetention,
 		}[request.Name]
 		if allowed {
 			props := request.Props

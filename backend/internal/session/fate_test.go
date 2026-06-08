@@ -81,7 +81,7 @@ func TestWorldizeDeath_SurfacesToMourners(t *testing.T) {
 		t.Fatalf("insert relation: %v", err)
 	}
 
-	surfaced, err := service.WorldizeDeath(ctx, "s1", fallen)
+	surfaced, err := service.WorldizeDeath(ctx, "s1", fallen, "")
 	if err != nil {
 		t.Fatalf("worldize death: %v", err)
 	}

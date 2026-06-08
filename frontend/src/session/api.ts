@@ -1051,7 +1051,7 @@ export function trackFunnel(kind: string, props?: { email?: string; source?: str
 }
 
 // emitClientAnalytics 向 /api/analytics/client 提交一条客户端行为事件（best-effort）。
-// 后端白名单 status_card_viewed / share_initiated → 落 product_events；非白名单被后端静默丢弃。
+// 后端白名单 status_card_viewed / share_initiated / fate_react_expected / fate_react_surprise / fate_react_ooc → 落 product_events；非白名单被后端静默丢弃。
 // 与 trackFunnel 一样吞掉所有错误——调用方可裸调 `void emitClientAnalytics("status_card_viewed")` 而无需 try/catch。
 export function emitClientAnalytics(name: string, props?: Record<string, unknown>): Promise<void> {
   return request<{ ok?: boolean }>(`/api/analytics/client`, {

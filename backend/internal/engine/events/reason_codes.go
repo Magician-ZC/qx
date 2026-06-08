@@ -103,6 +103,10 @@ const (
 	ReasonAmbitionShift ReasonCode = "AMBITION_SHIFT"
 	// REDLINE_TRIP：某行为触发了宪章红线（被归因校验/硬门判为越线），用于回响与复盘留痕。
 	ReasonRedlineTrip ReasonCode = "REDLINE_TRIP"
+	// OOC_REJECTED：归因校验判定「无源戏剧性/越红线」后，优雅回退安全决策时记一条可追溯审计（宪法 §5.2）。
+	// 经 EmitProcessEvent 留痕（含被拒动作/单位/reason），不改保护状态字段、不走 status.Mutator。
+	// 补齐 OOC 原仅有进程级内存计数（AttributionStats）、无持久审计行、重启即丢的缺口。
+	ReasonOOCRejected ReasonCode = "OOC_REJECTED"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -161,6 +165,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCharterUpdated, Category: CategoryPlayer, DisplayName: "宪章变更", DefaultReasonText: "你重新拟定了她离场后的行事章程", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonAmbitionShift, Category: CategoryLifecycle, DisplayName: "野心流转", DefaultReasonText: "经历沉淀，她内心所求悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonRedlineTrip, Category: CategoryLifecycle, DisplayName: "触碰红线", DefaultReasonText: "一桩行为越过了她（或你）立下的红线", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonOOCRejected, Category: CategoryLifecycle, DisplayName: "动机被拦", DefaultReasonText: "因无法解释的动机被拦下，回退到稳妥选择", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 	}
 }
 

@@ -97,6 +97,11 @@ type Service struct {
 	memoryRecallMu    sync.Mutex
 	memoryRecallTurn  map[string]int
 
+	// 决策归因因果句瞬态缓存（§5.4）：generateUnitDecision 落地后按 unitID 暂存其 LLM 当次决策的 NarrativeZH，
+	// 供同一执行流内由该单位造成的命运卡（如 WorldizeDeath）取「当次 LLM 因果句」而非启发式模板。执行流单 goroutine，加锁防御。
+	decisionNarrativeMu sync.Mutex
+	decisionNarrative   map[string]string
+
 	// 归因校验强制开关（每实例配置）；累计计数为进程级全局，见 attribution_bridge.go。
 	attributionEnforced bool
 
@@ -3059,7 +3064,8 @@ func (service *Service) applyAttack(
 				return err
 			}
 			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
-			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
+			// 带上凶手本次 LLM 决策的归因因果句（§5.4）：让死亡卡的「为什么」是当次决策因果而非启发式模板（recall 为空则回落）。
+			_, _ = service.WorldizeDeath(ctx, state.ID, *target, service.recallDecisionNarrative(attacker.ID))
 			// 阵亡产品埋点（best-effort）：留存/牵挂信号，进 product_events 供北极星/漏斗聚合。
 			_ = analytics.Emit(ctx, service.db, analytics.Event{
 				Stage: analytics.StageRetention, Name: analytics.EventCharacterDied,

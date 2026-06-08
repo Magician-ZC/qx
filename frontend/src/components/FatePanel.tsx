@@ -59,6 +59,28 @@ function cardText(payload: Record<string, unknown>): string {
   return String(payload.narrative ?? "她那边，出了点事。");
 }
 
+// 高光卡三键反馈的事件名（设计 GDD §8 核心乐趣度量：玩家一点即埋点，供后端算「惊喜命中率 / OOC 率」）。
+// expected=意料之中、surprise=有点意外但合理（命中惊喜）、ooc=太离谱（疑似失格）。
+const fateReactEventName = {
+  expected: "fate_react_expected",
+  surprise: "fate_react_surprise",
+  ooc: "fate_react_ooc",
+} as const;
+type FateReactKind = keyof typeof fateReactEventName;
+
+// fateCardKey 给一张高光卡取稳定标识：优先 decision_id，否则对 narrative 做短哈希（FNV-1a 32bit → base36）。
+// 与埋点 props.card 同源，确保去重 Set 与后端聚合用同一标识。
+function fateCardKey(card: FateCard): string {
+  if (card.decision_id) return card.decision_id;
+  const text = (card.narrative ?? "").trim();
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
 const panelStyle: React.CSSProperties = {
   position: "absolute",
   top: 64,
@@ -118,6 +140,27 @@ const shareBtnStyle: React.CSSProperties = {
   color: "#cdb98a",
   borderRadius: 6,
   padding: "3px 8px",
+  fontSize: 11,
+};
+// 高光卡「三键轻反馈」一行（贴叙事下方，比分享更轻，是埋点入口非操作）。
+const reactRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 5,
+  marginTop: 7,
+  flexWrap: "wrap",
+  alignItems: "center",
+};
+const reactBtnStyle: React.CSSProperties = {
+  cursor: "pointer",
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  color: "#aeb4c0",
+  borderRadius: 999,
+  padding: "2px 9px",
+  fontSize: 11,
+};
+const reactDoneStyle: React.CSSProperties = {
+  color: "#9aa0ad",
   fontSize: 11,
 };
 const btnStyle: React.CSSProperties = {
@@ -235,6 +278,9 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
   const seenRef = useRef<Set<string>>(new Set());
   // shareInitiatedRef 守卫 share_initiated 同一卡只上报一次（按 narrative 去重），避免重复点击灌漏斗。
   const shareInitiatedRef = useRef<Set<string>>(new Set());
+  // reactedRef 守卫高光卡三键反馈同一卡只记一次（按 fateCardKey 去重）；reactedTick 仅驱动按钮态重渲。
+  const reactedRef = useRef<Set<string>>(new Set());
+  const [reactedTick, setReactedTick] = useState(0);
 
   // 外部选中单位变化时，跟随聚焦（仅当面板尚未手动切换过其它单位时不强切；这里简单跟随首选）。
   useEffect(() => {
@@ -333,6 +379,17 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
     } catch {
       setToast("她的故事在这儿——长按或选中，讲给别人听。");
     }
+  }, []);
+
+  // onReact 处理高光卡三键轻反馈（意料之中 / 有点意外但合理 / 太离谱）：一点即埋点，供后端算惊喜命中率/OOC 率。
+  // 同卡只记一次（reactedRef 按 fateCardKey 去重）；埋点 best-effort 吞错，绝不阻断 UX。
+  const onReact = useCallback((card: FateCard, kind: FateReactKind) => {
+    const key = fateCardKey(card);
+    if (reactedRef.current.has(key)) return;
+    reactedRef.current.add(key);
+    void emitClientAnalytics(fateReactEventName[kind], { card: key, source: "fate_highlight" });
+    setReactedTick((n) => n + 1);
+    setToast("收到。她的命运记下了你的看法。");
   }, []);
 
   return (
@@ -446,19 +503,42 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
       {highlights.length === 0 ? (
         <div style={{ ...sectionCardStyle, color: "#9aa0ad" }}>还很平静。让世界往前走走看。</div>
       ) : (
-        highlights.map((c, i) => (
-          <div key={`h${i}`} style={sectionCardStyle}>
-            <div>{c.narrative}</div>
-            <button
-              type="button"
-              style={shareBtnStyle}
-              title="把她的故事讲给别人听"
-              onClick={() => onShare(c.narrative)}
-            >
-              讲给别人听
-            </button>
-          </div>
-        ))
+        highlights.map((c, i) => {
+          // reactedTick 进表达式仅为让按钮态随 reactedRef 变化重渲（值本身不参与逻辑）。
+          const reacted = reactedTick >= 0 && reactedRef.current.has(fateCardKey(c));
+          return (
+            <div key={`h${i}`} style={sectionCardStyle}>
+              <div>{c.narrative}</div>
+              {/* 三键轻反馈：这段她的命运，落在你预期里还是吓你一跳？一点即埋点（同卡只记一次）。 */}
+              <div style={reactRowStyle}>
+                {reacted ? (
+                  <span style={reactDoneStyle}>已反馈，多谢</span>
+                ) : (
+                  <>
+                    <span style={{ color: "#7e8493", fontSize: 11 }}>这段：</span>
+                    <button type="button" style={reactBtnStyle} title="在意料之中" onClick={() => onReact(c, "expected")}>
+                      意料之中
+                    </button>
+                    <button type="button" style={reactBtnStyle} title="有点意外，但合理" onClick={() => onReact(c, "surprise")}>
+                      有点意外但合理
+                    </button>
+                    <button type="button" style={reactBtnStyle} title="太离谱了，不像她" onClick={() => onReact(c, "ooc")}>
+                      太离谱
+                    </button>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                style={shareBtnStyle}
+                title="把她的故事讲给别人听"
+                onClick={() => onShare(c.narrative)}
+              >
+                讲给别人听
+              </button>
+            </div>
+          );
+        })
       )}
 
       {/* 槽三：回响带 */}

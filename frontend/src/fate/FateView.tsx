@@ -50,6 +50,28 @@ function cardText(payload: Record<string, unknown>): string {
   return String(payload.narrative ?? "她那边，出了点事。");
 }
 
+// 高光卡三键反馈的事件名（设计 GDD §8 核心乐趣度量：玩家一点即埋点，供后端算「惊喜命中率 / OOC 率」）。
+// expected=意料之中、surprise=有点意外但合理（命中惊喜）、ooc=太离谱（疑似失格）。
+const fateReactEventName = {
+  expected: "fate_react_expected",
+  surprise: "fate_react_surprise",
+  ooc: "fate_react_ooc",
+} as const;
+type FateReactKind = keyof typeof fateReactEventName;
+
+// fateCardKey 给一张高光卡取稳定标识：优先 decision_id，否则对 narrative 做短哈希（FNV-1a 32bit → base36）。
+// 与埋点 props.card 同源，确保去重 Set 与后端聚合用同一标识。
+function fateCardKey(card: FateCard): string {
+  if (card.decision_id) return card.decision_id;
+  const text = (card.narrative ?? "").trim();
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
 export function FateView({ sessionId, unitId }: Props) {
   const [status, setStatus] = useState<StatusCard | null>(null);
   const [cards, setCards] = useState<FateCard[]>([]);
@@ -61,6 +83,9 @@ export function FateView({ sessionId, unitId }: Props) {
   const statusViewedRef = useRef(false);
   // shareInitiatedRef 守卫 share_initiated 同一卡只上报一次（按 narrative 去重），避免重复点击灌漏斗。
   const shareInitiatedRef = useRef<Set<string>>(new Set());
+  // reactedRef 守卫高光卡三键反馈同一卡只记一次（按 fateCardKey 去重）；reactedTick 仅驱动按钮态重渲。
+  const reactedRef = useRef<Set<string>>(new Set());
+  const [reactedTick, setReactedTick] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -168,6 +193,17 @@ export function FateView({ sessionId, unitId }: Props) {
     [],
   );
 
+  // onReact 处理高光卡三键轻反馈（意料之中 / 有点意外但合理 / 太离谱）：一点即埋点，供后端算惊喜命中率/OOC 率。
+  // 同卡只记一次（reactedRef 按 fateCardKey 去重）；埋点 best-effort 吞错，绝不阻断 UX。
+  const onReact = useCallback((card: FateCard, kind: FateReactKind) => {
+    const key = fateCardKey(card);
+    if (reactedRef.current.has(key)) return;
+    reactedRef.current.add(key);
+    void emitClientAnalytics(fateReactEventName[kind], { card: key, source: "fate_highlight" });
+    setReactedTick((n) => n + 1);
+    setToast("收到。她的命运记下了你的看法。");
+  }, []);
+
   return (
     <div className="fate-root">
       <header className="fate-header">
@@ -218,18 +254,41 @@ export function FateView({ sessionId, unitId }: Props) {
       <section className="fate-highlights">
         <div className="fate-slot-title">她近来经历的</div>
         {highlights.length === 0 && <div className="fate-empty">还很平静。让世界往前走走看。</div>}
-        {highlights.map((c, i) => (
-          <div className="fate-card fate-card-highlight" key={`h${i}`}>
-            <span className="fate-card-text">{c.narrative}</span>
-            <button
-              className="fate-share-btn"
-              title="把她的故事讲给别人听"
-              onClick={() => onShare(c.narrative)}
-            >
-              讲给别人听
-            </button>
-          </div>
-        ))}
+        {highlights.map((c, i) => {
+          // reactedTick 进表达式仅为让按钮态随 reactedRef 变化重渲（值本身不参与逻辑）。
+          const reacted = reactedTick >= 0 && reactedRef.current.has(fateCardKey(c));
+          return (
+            <div className="fate-card fate-card-highlight" key={`h${i}`}>
+              <span className="fate-card-text">{c.narrative}</span>
+              {/* 三键轻反馈：这段她的命运，落在你预期里还是吓你一跳？一点即埋点（同卡只记一次）。 */}
+              <div className="fate-react-row">
+                {reacted ? (
+                  <span className="fate-react-done">已反馈，多谢</span>
+                ) : (
+                  <>
+                    <span className="fate-react-label">这段：</span>
+                    <button className="fate-react-btn" title="在意料之中" onClick={() => onReact(c, "expected")}>
+                      意料之中
+                    </button>
+                    <button className="fate-react-btn" title="有点意外，但合理" onClick={() => onReact(c, "surprise")}>
+                      有点意外但合理
+                    </button>
+                    <button className="fate-react-btn" title="太离谱了，不像她" onClick={() => onReact(c, "ooc")}>
+                      太离谱
+                    </button>
+                  </>
+                )}
+              </div>
+              <button
+                className="fate-share-btn"
+                title="把她的故事讲给别人听"
+                onClick={() => onShare(c.narrative)}
+              >
+                讲给别人听
+              </button>
+            </div>
+          );
+        })}
       </section>
 
       {/* 槽三：回响带（因为你上次…） */}

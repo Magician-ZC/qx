@@ -40,6 +40,10 @@ const (
 	EventPurchase          = "purchase"
 	EventComplianceBlocked = "compliance_blocked"
 	EventCharacterDied     = "character_died" // 角色阵亡（留存/牵挂信号：一场死亡是别人传记里的「回到那一刻」）
+	// 命运高光卡三键轻反馈（GDD §8 核心乐趣度量：惊喜命中率=surprise/total、OOC 率=ooc/total）。
+	EventFateReactExpected = "fate_react_expected" // 意料之中
+	EventFateReactSurprise = "fate_react_surprise" // 有点意外但合理 = 命中惊喜
+	EventFateReactOoc      = "fate_react_ooc"      // 太离谱 = 疑似失格
 )
 
 // Event 是一条漏斗埋点。

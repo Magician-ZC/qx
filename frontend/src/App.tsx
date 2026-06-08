@@ -24,6 +24,7 @@ import {
   subscribeSessionStream,
   talkToUnit,
   trackFunnel,
+  emitClientAnalytics,
 } from "./session/api";
 import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
 import type { FieldBossResult } from "./session/types";
@@ -4060,6 +4061,23 @@ export function App() {
                             ))}
                           </ul>
                         ) : null}
+                        <button
+                          type="button"
+                          className="action-button action-button-secondary hall-archive-share-btn"
+                          onClick={() => {
+                            const lines = [
+                              `【${entry.unit_name} 的一生】`,
+                              entry.biography,
+                              ...(entry.top_events ?? []).slice(0, 3).map((e) => `· ${e}`),
+                            ].filter((s) => s && s.trim() !== "");
+                            void copyTextToClipboard(lines.join("\n"));
+                            void emitClientAnalytics("share_initiated", { source: "hall_archive" });
+                            void trackFunnel("share_initiated", { source: "hall_archive" });
+                            setMessage(`已复制 ${entry.unit_name} 的传记，可以分享给别人了。`);
+                          }}
+                        >
+                          分享 TA 的一生
+                        </button>
                       </article>
                     ))}
                   </div>

@@ -89,6 +89,12 @@ type NorthStarReport struct {
 	ShareInitiated    int     `json:"share_initiated"`     // share_initiated（转介）
 	Purchases         int     `json:"purchases"`           // purchase（营收）
 	ReturnVisits      int     `json:"return_visits"`       // return_visit（留存）
+	// GDD §8 核心乐趣度量（命运高光卡三键反馈）。
+	FateReactExpected int     `json:"fate_react_expected"` // 意料之中
+	FateReactSurprise int     `json:"fate_react_surprise"` // 有点意外但合理 = 命中惊喜
+	FateReactOoc      int     `json:"fate_react_ooc"`      // 太离谱 = 疑似失格
+	SurpriseHitRate   float64 `json:"surprise_hit_rate"`   // surprise/(expected+surprise+ooc)；分母 0 -> 0
+	OocRate           float64 `json:"ooc_rate"`            // ooc/(expected+surprise+ooc)；分母 0 -> 0
 	GeneratedAt       string  `json:"generated_at"`
 }
 
@@ -120,8 +126,16 @@ func NorthStar(ctx context.Context, q Querier, sinceDays int) (NorthStarReport, 
 	report.ShareInitiated = counts[EventShareInitiated]
 	report.Purchases = counts[EventPurchase]
 	report.ReturnVisits = counts[EventReturnVisit]
+	report.FateReactExpected = counts[EventFateReactExpected]
+	report.FateReactSurprise = counts[EventFateReactSurprise]
+	report.FateReactOoc = counts[EventFateReactOoc]
 	if report.DecisionPending > 0 {
 		report.InboxProcessRate = float64(report.DecisionResolved) / float64(report.DecisionPending)
+	}
+	// 惊喜命中率 / OOC 率（GDD §8）：分母=三键反馈总票数；无反馈→0。
+	if total := report.FateReactExpected + report.FateReactSurprise + report.FateReactOoc; total > 0 {
+		report.SurpriseHitRate = float64(report.FateReactSurprise) / float64(total)
+		report.OocRate = float64(report.FateReactOoc) / float64(total)
 	}
 	return report, nil
 }
