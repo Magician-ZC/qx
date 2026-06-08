@@ -231,6 +231,22 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, status)
 	})
 
+	// 运营成本/单位经济仪表盘（只读聚合，产品验证）：跨会话真实 LLM 成本 + MAU 代理 + 单位经济。?days=N 限窗口（默认 30，0=全量）。
+	router.GET("/api/ops/cost-dashboard", func(c *gin.Context) {
+		days := 30
+		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				days = v
+			}
+		}
+		data, err := newSessionService().CostDashboard(c.Request.Context(), days, time.Now())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, data)
+	})
+
 	router.GET("/api/world/terrains", func(c *gin.Context) {
 		if err := world.SeedTerrainCatalog(c.Request.Context(), deps.Store); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
