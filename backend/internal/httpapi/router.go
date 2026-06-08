@@ -187,6 +187,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			reflexSkipRate = float64(reflexCouldSkip) / float64(reflexTotal)
 		}
 
+		// 合规/红线遥测：内容安全双向审核计数 + 突然戏剧性动作的硬前因门控计数。
+		safetyChecked, safetyBlocked := session.ContentSafetyStats()
+		gateTotal, gateBlocked := session.SurpriseGateStats()
+
 		status := gin.H{
 			"status":                     "ok",
 			"service":                    "qunxiang-backend",
@@ -214,6 +218,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"skip_rate":       reflexSkipRate,
 				"short_circuited": reflexShortCircuited,
 				"enabled":         deps.ReflexShortCircuit,
+			},
+			// 内容安全双向审核遥测（合规硬门槛，QUNXIANG_CONTENT_SAFETY 默认关→恒放行、checked 仍计）。
+			"content_safety": gin.H{
+				"checked": safetyChecked,
+				"blocked": safetyBlocked,
+			},
+			// 突然戏剧性动作（恋爱/卖传家宝/叛变）的硬前因门控遥测：无源前因被回退安全决策的次数。
+			"surprise_gate": gin.H{
+				"total":   gateTotal,
+				"blocked": gateBlocked,
 			},
 		}
 
@@ -1040,7 +1054,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 
-		c.JSON(http.StatusCreated, gin.H{"unit": record})
+		response := gin.H{"unit": record}
+		// 兑现命运 onboarding「她身边已有二十个有名有姓的人」承诺：with_village 时附带 20 人关系网。
+		// best-effort：村庄是附加体验，SeedVillage 失败不影响 bootstrap（吞错只记日志）。
+		// worldID 传空=不入世界；seed+1 派生避免与主单位撞种子。
+		if withVillage := c.Query("with_village"); withVillage == "1" || withVillage == "true" {
+			villagers := newSessionService().SeedVillageBestEffort(c.Request.Context(), sessionID, factionID, "", seed+1)
+			response["villagers"] = villagers
+		}
+
+		c.JSON(http.StatusCreated, response)
 	})
 
 	router.POST("/api/units/:id/mutations", func(c *gin.Context) {

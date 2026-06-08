@@ -29,6 +29,77 @@ type actionModifiers struct {
 	AttackMultiplier float64
 }
 
+// 抗命溯源卡与成长旁白相关的对外约定（宪法 §3.3「抗命叙事化为她的成长」）。
+//
+// 设计：抗命（refused）时，决策的可见字段被加固为「祖魂身份」的灵魂——既给出
+// 一张「她为什么没听你」的结构化溯源卡（归因落到原则 4 的五来源之一），又附上
+// 固定成长旁白。因为 unitDecisionPayload（types.go）不能改、没有专门的结构化
+// 槽位，故采用「现有可见字段 + 约定标记」的最小侵入式编码：
+//   - Speak：放固定成长旁白原文（前端把它当作她的成长旁白直接渲染）。
+//   - Reasoning：在原拒绝理由后，追加一段以 defianceTraceMarker 起头的单行
+//     溯源卡，键值用 defianceTraceFieldSep（"|"）分隔、键名用 "=" 赋值，便于前端
+//     正则/split 取值；当前字段：source（五来源标签）、phrase（一句「她为什么
+//     没听你」短语）、narration（成长旁白，冗余携带便于纯文本面板直接取用）。
+//
+// 前端取值约定（最小渲染契约）：
+//
+//	找到 Reasoning 中以 "「她为什么没听你」溯源卡 ::" 起头的行，去掉标记后按
+//	"|" 切片，每片再按首个 "=" 拆 key/value；source/phrase 渲染成溯源卡，
+//	narration 与 Speak 一致，渲染成黄字成长旁白。无该标记则按普通拒绝理由处理。
+const (
+	// defianceGrowthNarration 是宪法 §3.3 钦定的固定成长旁白原文，逐字不可改。
+	defianceGrowthNarration = "她第一次没有照你说的做。她在变成她自己。"
+	// defianceTraceMarker 标识 Reasoning 中嵌入的溯源卡片段起头，供前端识别。
+	defianceTraceMarker = "「她为什么没听你」溯源卡 ::"
+	// defianceTraceFieldSep 分隔溯源卡内的多个键值。
+	defianceTraceFieldSep = "|"
+)
+
+// defianceSourceLabel 表示抗命归因落点的五来源标签（原则 4：人格/记忆/红线/关系/压力）。
+type defianceSourceLabel string
+
+// 常量定义区：抗命溯源的五来源固定标签。
+const (
+	defianceSourcePersona  defianceSourceLabel = "人格"
+	defianceSourceMemory   defianceSourceLabel = "记忆"
+	defianceSourceRedline  defianceSourceLabel = "红线"
+	defianceSourceRelation defianceSourceLabel = "关系"
+	defianceSourcePressure defianceSourceLabel = "压力"
+)
+
+// defianceSource 把抗命理由文本归因到五来源之一，并给出一句「她为什么没听你」短语。
+//
+// 纯函数、确定性：仅依赖 reason 文本关键词匹配，无随机、无外部状态。判定优先级
+// 按「越具体越优先」：红线 > 记忆 > 关系 > 压力 > 人格（人格兜底，因为任何抗命终归
+// 是她这个人在选）。短语统一以「她」为主语，呼应宪法对外语气。
+func defianceSource(reason string) (defianceSourceLabel, string) {
+	text := strings.ToLower(strings.TrimSpace(reason))
+
+	switch {
+	case containsAny(text, "红线", "底线", "原则", "良心", "不肯杀", "下不去手", "不愿伤", "誓约", "信仰", "宁死"):
+		return defianceSourceRedline, "这越过了她不肯让步的底线。"
+	case containsAny(text, "埋伏", "陷阱", "上次", "记得", "教训", "断粮", "倒下", "受伤", "太险", "勉强", "见过", "经历过"):
+		return defianceSourceMemory, "她记得上一次照做的下场。"
+	// 注意：用多字关系短语而非裸单字『他』——『他』会子串误命中『其他/他们』，把非关系原因误标成关系（评审修复）。
+	case containsAny(text, "队友", "同伴", "战友", "朋友", "护着", "护住", "保护", "舍不得", "不忍", "丢下", "抛下", "牵挂", "为了他", "放不下", "身边的人", "她在那"):
+		return defianceSourceRelation, "她放不下身边那个人。"
+	case containsAny(text, "太累", "疲惫", "疲劳", "撑不住", "饿", "断粮", "怕", "恐惧", "崩", "士气", "扛不住", "压力", "喘不过"):
+		return defianceSourcePressure, "她已经被现实压得喘不过气。"
+	default:
+		return defianceSourcePersona, "这不是她会做的选择。"
+	}
+}
+
+// composeDefianceTrace 把溯源来源、短语与成长旁白编码成可被前端解析的单行溯源卡。
+func composeDefianceTrace(source defianceSourceLabel, phrase string) string {
+	parts := []string{
+		fmt.Sprintf("source=%s", source),
+		fmt.Sprintf("phrase=%s", strings.TrimSpace(phrase)),
+		fmt.Sprintf("narration=%s", defianceGrowthNarration),
+	}
+	return defianceTraceMarker + " " + strings.Join(parts, defianceTraceFieldSep)
+}
+
 // obedienceResolution 结构体用于承载该模块的核心数据。
 type obedienceResolution struct {
 	Requested         unitDecisionPayload
@@ -383,13 +454,15 @@ func loyaltyRejectModifier(actor unit.Record) float64 {
 }
 
 // refusedDecision 生成“拒绝执行后转为 hold”的替代决策。
+//
+// 抗命（refused）是祖魂身份的灵魂时刻：此处把决策的可见字段加固为
+//   - Speak：固定成长旁白原文（宪法 §3.3，逐字钦定）——前端渲染为黄字成长旁白；
+//   - Reasoning：原拒绝理由 + 一行可解析的「她为什么没听你」溯源卡，归因落到
+//     原则 4 的五来源之一（人格/记忆/红线/关系/压力）。
+//
+// 仅抗命路径触发；服从路径完全不经过本函数，零影响。确定性：溯源来源仅由 reason
+// 文本经纯函数 defianceSource 判定，不引入随机。
 func refusedDecision(decision unitDecisionPayload, reason string) unitDecisionPayload {
-	speak := limitTextRunes(firstNonEmptyText(
-		decision.Speak,
-		decision.NextAction,
-		decision.Memory,
-		decision.Reasoning,
-	), 16)
 	nextAction := limitTextRunes(firstNonEmptyText(
 		decision.NextAction,
 		decision.Speak,
@@ -402,13 +475,25 @@ func refusedDecision(decision unitDecisionPayload, reason string) unitDecisionPa
 		decision.NextAction,
 		decision.Reasoning,
 	), 18)
+
+	trimmedReason := strings.TrimSpace(reason)
+	source, phrase := defianceSource(trimmedReason)
+	trace := composeDefianceTrace(source, phrase)
+
+	// 拒绝理由 = 原因 + 换行 + 溯源卡（前端按 defianceTraceMarker 切出溯源卡）。
+	reasoning := trace
+	if trimmedReason != "" {
+		reasoning = trimmedReason + "\n" + trace
+	}
+
 	return unitDecisionPayload{
 		Action:     DecisionActionHold,
 		NextAction: nextAction,
-		Speak:      speak,
 		Memory:     memory,
 		Knowledge:  strings.TrimSpace(decision.Knowledge),
-		Reasoning:  strings.TrimSpace(reason),
+		// Speak 直接承载固定成长旁白原文（不截断，保证逐字呈现）。
+		Speak:     defianceGrowthNarration,
+		Reasoning: reasoning,
 	}
 }
 

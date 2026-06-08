@@ -10,7 +10,7 @@ import (
 )
 
 func TestComputeAttachmentRisesWithCoCreation(t *testing.T) {
-	_, repo, service := newThreatTestService(t)
+	db, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 	rec := unit.BootstrapRecord(9, "s1", "player", "她")
 	if err := repo.Save(ctx, rec); err != nil {
@@ -18,9 +18,11 @@ func TestComputeAttachmentRisesWithCoCreation(t *testing.T) {
 	}
 
 	// 固定共鸣与在世，只改共创：处理她的待决策前后对比。
+	// 每次先 Surface 一条真实待决策再 resolve（用真 decisionID）——伪造 decisionID 现已被归属校验拒绝。
 	before := service.ComputeAttachment(ctx, rec.ID, 0.5, 5)
 	for i := 0; i < 6; i++ {
-		if err := service.ResolveFateDecision(ctx, "s1", rec.ID, "d"+string(rune('a'+i)), "intervene"); err != nil {
+		decisionID := surfacePendingDecisionFor(t, ctx, db, repo, service, rec, int64(100+i))
+		if err := service.ResolveFateDecision(ctx, "s1", rec.ID, decisionID, "intervene"); err != nil {
 			t.Fatalf("处理待决策失败: %v", err)
 		}
 	}

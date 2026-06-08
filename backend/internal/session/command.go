@@ -72,6 +72,10 @@ func (service *Service) SetFactionDirective(
 	if text == "" {
 		return Snapshot{}, fmt.Errorf("directive text is required")
 	}
+	// 内容安全审核（玩家输入侧，flag QUNXIANG_CONTENT_SAFETY 默认关→放行）：违规指令文本在落 DirectiveHistory 前即拒，不入库、不喂 LLM。
+	if v := service.ModerateText(ctx, text, "input"); !v.Allowed {
+		return Snapshot{}, fmt.Errorf("directive rejected by content safety: %s", v.Reason)
+	}
 	if state.Outcome != OutcomeOngoing {
 		return Snapshot{}, fmt.Errorf("session is already finished")
 	}

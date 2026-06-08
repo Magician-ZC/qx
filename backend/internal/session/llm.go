@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/engine/decision"
+	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -305,6 +308,23 @@ func (service *Service) generateUnitDecision(
 		}
 	}
 
+	// 门控意外（engine/decision.GateSurprise，设计宪法 §5.3 红线）：突然恋爱/卖传家宝/叛变即使归因看似合理，
+	// 也必须有专属前因（关系积累/重压/忠诚崩坏）才允许落地；不足则优雅回退安全决策，绝不让无源戏剧性转折发生。
+	// 与归因强制同档（仅 enforcementActive 时阻断）；非门控动作零影响，影子模式下只计遥测不阻断。
+	if gated, isGated := gatedActionForChoice(choice); isGated {
+		gate := service.evaluateSurpriseGate(ctx, actor, choice, gated)
+		surpriseGateTotal.Add(1)
+		// 注意：本函数内局部变量 `decision`（unitDecisionPayload）遮蔽了 decision 包，故经包级 helper surpriseGateAllowed 比较。
+		if !surpriseGateAllowed(gate) {
+			surpriseGateBlocked.Add(1)
+			if service.enforcementActive() {
+				fallback := oocFallbackDecision()
+				message := fmt.Sprintf("surprise_gate_block:%s:%s", gated, gate.Reason)
+				return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
+			}
+		}
+	}
+
 	// 回响 Echo：若这次选择被归因到一条真实玩家动作，生成「因为你上次…，这一回…」回响卡进收件箱（best-effort）。
 	// SurfaceEcho 会再次核验 ref 真实存在，绝不编造前因（宪法 §6.2）。
 	if ref, narrative, has := echoRefFromAttribution(choice.Attribution); has {
@@ -315,6 +335,15 @@ func (service *Service) generateUnitDecision(
 			narrative = "她做了和你上次引导不太一样的选择"
 		}
 		_, _ = service.SurfaceEcho(ctx, state.ID, actor.ID, ref, narrative, 0)
+	}
+
+	// 内容安全审核（AI 输出侧，flag QUNXIANG_CONTENT_SAFETY 默认关→放行）：单位决策的玩家可见对白（speak）
+	// 被判违规则替换占位，并脱敏 result——堵死「双向」审核的输出侧盲点（generateUnitDecision 的 speak 此前完全未审）。
+	if strings.TrimSpace(decision.Speak) != "" {
+		if v := service.ModerateText(ctx, decision.Speak, "output"); !v.Allowed {
+			decision.Speak = unsafeSpeakPlaceholder
+			result = redactCompletionResultOutput(result, unsafeSpeakPlaceholder)
+		}
 	}
 
 	return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
@@ -465,7 +494,23 @@ func (service *Service) generateDialogueReply(
 	}
 
 	reply.Reply = strings.TrimSpace(reply.Reply)
+	// 内容安全审核（AI 输出侧，flag QUNXIANG_CONTENT_SAFETY 默认关→放行）：玩家可见的 AI 对白被判不安全则替换为安全占位，
+	// 并脱敏 result（Output/RawOutput）——否则原始违规文本仍会经 LLMInteraction 的 ParsedOutput/RawOutput 广播外泄。
+	replyBlocked := false
+	if v := service.ModerateText(ctx, reply.Reply, "output"); !v.Allowed {
+		reply.Reply = unsafeDialoguePlaceholder
+		result = redactCompletionResultOutput(result, unsafeDialoguePlaceholder)
+		replyBlocked = true
+	}
 	reply.Memory = limitTextRunes(strings.TrimSpace(reply.Memory), 18)
+	// Memory 也是 LLM 输出，会落库并复现进未来 prompt/快照：主回复被拦时不保留原 Memory；非空 Memory 自身违规也丢弃。
+	if replyBlocked {
+		reply.Memory = ""
+	} else if reply.Memory != "" {
+		if v := service.ModerateText(ctx, reply.Memory, "output"); !v.Allowed {
+			reply.Memory = ""
+		}
+	}
 	if reply.Memory == "" {
 		reply.Memory = limitTextRunes(reply.Reply, 18)
 	}
@@ -3927,4 +3972,181 @@ func formatDialogueOptions(state State, byID map[string]*unit.Record, actor *uni
 		return "无（交谈只能选择视野内的非自己单位；被外交策略禁止的跨阵营接触不会进入候选）"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// --- 门控意外（GateSurprise 硬前因门控，设计宪法 §5.3）---
+//
+// 把 engine/decision.GateSurprise 接入决策链：突然恋爱/卖传家宝/叛变这类高代价转折，
+// 即使 LLM 的归因看似合理、也必须有数据里真实存在的专属前因（关系积累/重压/忠诚崩坏）才允许落地。
+// 与归因强制同档：仅 enforcementActive 时才真正阻断；影子模式下只记遥测、不改变行为。普通动作零影响。
+
+// 进程级门控遥测（跨所有会话累计；与归因遥测一样进程级，不随每请求新建的 Service 重置）。
+var (
+	surpriseGateTotal   atomic.Int64 // 进入门控判定的戏剧性动作总次数
+	surpriseGateBlocked atomic.Int64 // 其中被判定为「不放行」（reject/freeze）的次数
+)
+
+// SurpriseGateStats 返回进程级累计：进入门控的戏剧性动作总数与被拦截数。
+func SurpriseGateStats() (total int64, blocked int64) {
+	return surpriseGateTotal.Load(), surpriseGateBlocked.Load()
+}
+
+// 内容安全拦截后的安全占位文案（AI 输出侧）。
+const (
+	unsafeDialoguePlaceholder = "（她欲言又止，没有说出口。）"
+	unsafeSpeakPlaceholder    = "（这句话被安全策略隐去了。）"
+)
+
+// redactCompletionResultOutput 返回 result 的脱敏副本：把 Output 重写为安全占位 JSON、清空 Debug.RawOutput，
+// 使内容安全拦截后原始违规文本不再经 LLMInteraction 的 ParsedOutput/RawOutput 落库或广播外泄（评审 load-bearing 修复）。
+func redactCompletionResultOutput(result ai.CompletionResult, placeholder string) ai.CompletionResult {
+	redacted := result
+	encoded, err := json.Marshal(map[string]string{"redacted": placeholder})
+	if err != nil {
+		encoded = []byte(`{"redacted":""}`)
+	}
+	redacted.Output = encoded
+	redacted.Debug.RawOutput = ""
+	return redacted
+}
+
+// 叛变意图的中文关键词（无原生 defect 动作，靠声明的行动意图启发式识别）。只取**明确自指叛变**的短语：
+// 「投敌/倒戈/叛逃/投靠敌/归顺敌/改投敌/背叛阵营/出卖阵营」——刻意剔除易在防御/讨论语境出现的裸词
+// （「叛变」常见于「防止叛变/担心叛变」、「改投」可指「改投他处」、「卖阵营」歧义），避免误伤正常动作。
+var defectIntentKeywords = []string{"投敌", "倒戈", "叛逃", "投靠敌", "归顺敌", "改投敌", "背叛阵营", "出卖阵营"}
+
+// gatedActionForChoice 判断一个 LLM choice 是否属于需要专属前因的门控动作，并映射到 decision.GatedAction。
+// 仅识别能稳妥判定的三类：romance（原生恋爱动作）、sell_pinned（变卖/赠出传家宝级物品）、defect（叛变意图）。
+func gatedActionForChoice(choice unitDecisionChoicePayload) (decision.GatedAction, bool) {
+	// 恋爱：原生 romance 动作即表白/确认伴侣（family 是已确认恋人后的共育，不在突然恋爱门控内）。
+	if choice.Action == DecisionActionRomance {
+		return decision.ActionRomance, true
+	}
+	// 卖/赠传家宝：trade 且为 sell/gift，且标的是「永久锚」级物品（父辈遗志/独有遗物）。
+	if choice.Action == DecisionActionTrade &&
+		(choice.TradeKind == TradeActionKindSell || choice.TradeKind == TradeActionKindGift) &&
+		isPermanentAnchorItem(choice.ItemID, choice.ItemName) {
+		return decision.ActionSellPinned, true
+	}
+	// 叛变：无原生动作，靠**声明的行动意图**识别——**只扫 next_action**（该单位下一步要做什么），
+	// 不扫 reasoning/speak/memory（那些是策略推理/表忠/对话/记忆，含「防止叛变」「我绝不倒戈」「玩家说防投敌」
+	// 等会误判正常动作的语境）。配合上面收紧的关键词，把「文本提到叛变就静默替换成 Hold」的行为回归彻底堵死
+	// （评审 load-bearing 误杀修复）。
+	if containsAny(strings.ToLower(choice.NextAction), defectIntentKeywords...) {
+		return decision.ActionDefect, true
+	}
+	return "", false
+}
+
+// permanentAnchorItemTags 是把物品标记为「永久锚」（绝不可随意变卖）的物品标签。
+var permanentAnchorItemTags = []string{"heirloom", "pinned", "legacy", "relic", "soulbound", "bound", "unique", "anchor"}
+
+// isPermanentAnchorItem 判断标的是否为父辈遗志/独有遗物级的永久锚物品。
+// 命中条件：物品定义带永久锚标签；或物品 ID 不在静态目录里（说明是叙事生成的独有遗物，而非可买卖的量产货）。
+// 这是保守启发式：宁可把疑似传家宝挡在自治之外（上交玩家/剔除），也不让 LLM 擅自变卖。
+func isPermanentAnchorItem(itemID, itemName string) bool {
+	id := strings.ToLower(strings.TrimSpace(itemID))
+	name := strings.ToLower(strings.TrimSpace(itemName))
+	if id == "" && name == "" {
+		return false
+	}
+	if definition, ok := item.Lookup(itemID); ok {
+		for _, tag := range definition.Tags {
+			if containsAny(strings.ToLower(tag), permanentAnchorItemTags...) {
+				return true
+			}
+		}
+		// 目录内的量产物品（可买卖）不视为永久锚。
+		return false
+	}
+	// 目录外的具名物品视为叙事独有遗物（没有市场价、不可量产）。
+	return id != "" || name != ""
+}
+
+// evaluateSurpriseGate 为一个门控动作构造 decision.GateInput 并跑 GateSurprise。
+// 关系/物品/忠诚等前因从单位快照与实时关系存储读取（DB 不可用时退化为空关系，仍能判定恋爱/忠诚类）。
+// surpriseGateAllowed 判定门控结果是否放行（包级 helper：generateUnitDecision 内 `decision` 被局部变量遮蔽，无法直接用 decision.GateAllow）。
+func surpriseGateAllowed(gate decision.GateResult) bool {
+	return gate.Decision == decision.GateAllow
+}
+
+func (service *Service) evaluateSurpriseGate(ctx context.Context, actor *unit.Record, choice unitDecisionChoicePayload, gated decision.GatedAction) decision.GateResult {
+	in := buildSurpriseGateInput(actor, choice, gated)
+	if gated == decision.ActionRomance && service != nil && service.db != nil && actor != nil {
+		// 恋爱需要对目标的真实关系积累：affection + 关系记忆条数。从实时关系存储补齐。
+		if targetID := strings.TrimSpace(choice.TargetUnitID); targetID != "" {
+			for _, row := range service.loadTopOutgoingRelations(ctx, actor.ID, attributionRelationLimit) {
+				if row.TargetUnitID != targetID {
+					continue
+				}
+				in.TargetAffection = row.Affection / relationAxisScale
+				// 关系四轴任一显著即视为「有过实质来往」，累计一条关系记忆/一个互动窗口。
+				if absRel(row.Trust) >= 1 || absRel(row.Affection) >= 1 || absRel(row.Fear) >= 1 || absRel(row.Rivalry) >= 1 {
+					in.RelationMemoryCount = 2
+					in.AccumulatedWindows = 3
+				}
+				break
+			}
+		}
+	}
+	return decision.GateSurprise(gated, in)
+}
+
+// buildSurpriseGateInput 从单位当前快照与 choice 廉价构造 GateInput（纯函数，无 DB，可测）。
+// 关系类字段（恋爱）由调用方在有 DB 时补齐；忠诚/压力/物品类字段在此即可定。
+func buildSurpriseGateInput(actor *unit.Record, choice unitDecisionChoicePayload, gated decision.GatedAction) decision.GateInput {
+	in := decision.GateInput{}
+	if actor != nil {
+		s := actor.Status
+		in.Loyalty = s.Loyalty
+		in.HasDebtPressure = s.Wallet == 0
+		in.HasThreatPressure = s.InCombat
+		// 忠诚崩坏的佐证：负面记忆/关系恶化用决策归因里是否带 memory/relation 前因近似；
+		// 势力衰退压力用低士气近似。这些是保守佐证，宁缺毋滥（无佐证则门控更严，符合红线）。
+		in.HasFactionDeclinePressure = s.Morale <= 0.25
+	}
+	if gated == decision.ActionDefect {
+		in.HasNegativeMemory = attributionHasCauseKind(choice.Attribution, string(decision.CauseMemory))
+		in.HasRelationDecay = attributionHasCauseKind(choice.Attribution, string(decision.CauseRelation))
+	}
+	if gated == decision.ActionSellPinned {
+		// 永久锚（父辈遗志类）绝不可卖：交给 GateSurprise 判 PINNED_PERMANENT。
+		in.ItemIsPermanentAnchor = isParentLegacyItem(choice.ItemID, choice.ItemName)
+	}
+	return in
+}
+
+// isParentLegacyItem 判断是否为「父辈遗志」级、绝对不可变卖的永久锚（比一般传家宝更硬）。
+// 以「目录外的具名独有遗物」为父辈遗志：它没有市场价、不可量产，卖出即永久失去角色羁绊。
+func isParentLegacyItem(itemID, itemName string) bool {
+	id := strings.ToLower(strings.TrimSpace(itemID))
+	if _, ok := item.Lookup(itemID); ok {
+		// 目录内可买卖物品即便带锚标签也只走「需玩家决策/重压自治」分支，不算绝对不可卖。
+		return false
+	}
+	return id != "" || strings.TrimSpace(itemName) != ""
+}
+
+// attributionHasCauseKind 判断归因 primary/supporting 是否含某类前因（用于近似「有负面记忆/关系恶化」佐证）。
+func attributionHasCauseKind(payload *attributionPayload, kind string) bool {
+	if payload == nil {
+		return false
+	}
+	if payload.Primary.Kind == kind {
+		return true
+	}
+	for _, c := range payload.Supporting {
+		if c.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// absRel 取关系轴绝对值（关系存储为 [-10,10] 原始刻度）。
+func absRel(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

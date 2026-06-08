@@ -65,3 +65,34 @@ func TestSeedVillagePersists(t *testing.T) {
 		}
 	}
 }
+
+// TestSeedVillageBestEffortReturnsCount 断言 onboarding 用的吞错包装在 worldID 为空（不入世界）时
+// 仍落库满员 20 人并返回数量、织出关系网——这是 /api/units/bootstrap?with_village=1
+// 兑现「身边二十人」的核心路径（worldID 空=不进世界，纯本局关系网）。
+func TestSeedVillageBestEffortReturnsCount(t *testing.T) {
+	db, _, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	n := service.SeedVillageBestEffort(ctx, "s-bootstrap", "player", "", 42)
+	if n != villageseed.VillageSize {
+		t.Fatalf("best-effort 应落库 %d 人，得到 %d", villageseed.VillageSize, n)
+	}
+
+	// worldID 为空时不入世界，但关系网仍落库（relations 表非空）。
+	var relCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relations`).Scan(&relCount); err != nil {
+		t.Fatalf("统计 relations 失败: %v", err)
+	}
+	if relCount == 0 {
+		t.Fatalf("出生关系网应落 relations 行")
+	}
+}
+
+// TestSeedVillageBestEffortSwallowsError 断言依赖缺失时包装吞错返回 0 而非 panic，
+// 保证 bootstrap 主路径（建主单位）永不被村庄附加体验拖垮。
+func TestSeedVillageBestEffortSwallowsError(t *testing.T) {
+	var nilService *Service
+	if got := nilService.SeedVillageBestEffort(context.Background(), "s", "f", "", 1); got != 0 {
+		t.Fatalf("依赖缺失应吞错返回 0，得到 %d", got)
+	}
+}

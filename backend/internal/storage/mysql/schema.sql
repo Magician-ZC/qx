@@ -337,3 +337,10 @@ CREATE TABLE IF NOT EXISTS consent_requests (
   INDEX idx_consent_requests_target (target_unit_id, status),
   INDEX idx_consent_requests_status (status, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fate_decision_resolutions (
+  decision_id VARCHAR(191) PRIMARY KEY,
+  unit_id VARCHAR(191) NOT NULL,
+  resolve_type VARCHAR(32) NOT NULL,
+  resolved_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -386,3 +386,13 @@ CREATE TABLE IF NOT EXISTS consent_requests (
 
 CREATE INDEX IF NOT EXISTS idx_consent_requests_target ON consent_requests(target_unit_id, status);
 CREATE INDEX IF NOT EXISTS idx_consent_requests_status ON consent_requests(status, created_at);
+
+-- 命运待决策去重表：decision_id 作主键，是 ResolveFateDecision 的原子抢占闸——
+-- INSERT 成功者为唯一赢家（才施加后果），主键冲突者为重复/并发 POST，幂等 no-op。
+-- 杜绝「同一 decisionID 被重复 resolve 反复刷 morale/loyalty」（设计宪法 §4.6 一事一果）。
+CREATE TABLE IF NOT EXISTS fate_decision_resolutions (
+  decision_id TEXT PRIMARY KEY,
+  unit_id TEXT NOT NULL,
+  resolve_type TEXT NOT NULL,
+  resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

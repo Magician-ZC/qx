@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/storage/dbdialect"
@@ -82,4 +83,15 @@ func (service *Service) SeedVillage(ctx context.Context, sessionID string, facti
 		_ = service.UpsertAnchor(ctx, records[i].ID, relevance.Goal, "goal:"+records[i].ID, clampFloat(0.5+m.Traits.Ambition*0.5, 0, 1), m.LifeGoal, 0)
 	}
 	return out, nil
+}
+
+// SeedVillageBestEffort 是 onboarding 用的吞错包装：调 SeedVillage 生成 20 人关系网，
+// 失败只记日志、返回已落库人数，绝不让上层（/api/units/bootstrap）失败——村庄是附加体验。
+// 返回值是「实际落库的村民数」（即便中途出错，前面已 Save 的人也算数）。
+func (service *Service) SeedVillageBestEffort(ctx context.Context, sessionID string, factionID string, worldID string, seed int64) int {
+	villagers, err := service.SeedVillage(ctx, sessionID, factionID, worldID, seed)
+	if err != nil {
+		log.Printf("seed village best-effort failed (session=%s faction=%s): %v; persisted %d", sessionID, factionID, err, len(villagers))
+	}
+	return len(villagers)
 }
