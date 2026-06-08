@@ -71,3 +71,20 @@ func TestReflexShortCircuitApplies(t *testing.T) {
 		t.Fatalf("nil actor 不应短路")
 	}
 }
+
+// TestReflexShortCircuit_RespectsImmediateOrder 守评审 load-bearing：持有未消费即时令（玩家已付指挥力）的单位
+// 在安静 tick 也**不**短路——否则会静默吞掉玩家付费的命令。
+func TestReflexShortCircuit_RespectsImmediateOrder(t *testing.T) {
+	quiet := &unit.Record{ID: "u-quiet"}
+	quiet.Status.HP = 80
+	quiet.Status.Hunger = 80
+	if !reflexShortCircuitApplies(State{}, quiet, nil) {
+		t.Fatalf("无令的安静 tick 应可短路")
+	}
+	st := State{}
+	st.TurnState.Turn = 1
+	st.DirectiveHistory = []Directive{{Kind: DirectiveKindOrder, Turn: 1, TargetUnitID: "u-quiet", AppliesTo: "u-quiet"}}
+	if reflexShortCircuitApplies(st, quiet, nil) {
+		t.Fatalf("持有未消费即时令的单位不应短路（否则吞掉玩家付费命令）")
+	}
+}

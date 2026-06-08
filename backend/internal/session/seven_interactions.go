@@ -93,14 +93,17 @@ func (service *Service) RecordSevenInteraction(ctx context.Context, worldID, act
 }
 
 // applySevenEffect 加载 actor/target 并应用四轴关系增量（unilateral 或 consent accept 时）。
+// **best-effort 跨分片安全**：actor/target 任一不在本库（跨分片/远端角色）→ 关系效果本地不应用、返回 nil
+// （世界总线事件已是跨分片可仲裁事实；relations 表有 units FK，远端角色本就无法落本地关系行）。
+// 仅真实 DB 写失败才返错。这样七种交互对「目标在别分片」的设计场景不再整体崩坏（评审 load-bearing）。
 func (service *Service) applySevenEffect(ctx context.Context, actorID, targetID string, tmpl interactionTemplate) error {
 	actor, err := service.units.GetByID(ctx, actorID)
 	if err != nil {
-		return fmt.Errorf("seven effect load actor: %w", err)
+		return nil // actor 不在本库 → 跳过本地关系效果（best-effort）
 	}
 	target, err := service.units.GetByID(ctx, targetID)
 	if err != nil {
-		return fmt.Errorf("seven effect load target: %w", err)
+		return nil // target 跨分片/远端 → 跳过本地关系效果（best-effort）
 	}
 	if _, err := service.applyRelationShift(ctx, nil, &actor, &target, tmpl.Delta, "七种交互·"+tmpl.Reason); err != nil {
 		return fmt.Errorf("seven effect apply relation: %w", err)

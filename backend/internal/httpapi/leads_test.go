@@ -58,4 +58,10 @@ func TestLeadEndpoints(t *testing.T) {
 	if out.Total != 2 || out.ByKind["lead"] != 1 || out.ByKind["survey"] != 1 || out.UniqueVisitors != 2 {
 		t.Fatalf("漏斗聚合不符: %+v", out)
 	}
+
+	// 超长字段（攻击面）应被夹长度、双驱动一致返回 201（不 500）——守评审 load-bearing。
+	long := strings.Repeat("x", 5000)
+	if code := post(`{"kind":"` + long + `","vid":"` + long + `","email":"` + long + `","source":"` + long + `"}`); code != http.StatusCreated {
+		t.Fatalf("超长字段应被夹后 201，得 %d", code)
+	}
 }

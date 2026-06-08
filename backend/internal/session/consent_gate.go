@@ -101,9 +101,12 @@ func (service *Service) ResolveConsentRequest(ctx context.Context, reqID string,
 		return req, fmt.Errorf("consent request %s already resolved", reqID)
 	}
 	if accept {
+		// exactly-once 由上面的原子 flip(WHERE status='pending') 保证：仅唯一胜出的 accept 走到这里，绝不双重应用关系增量。
+		// applySevenEffect 已 best-effort（跨分片/远端角色干净跳过，仅真实 relations 写错才返错）；故仅在罕见 DB 写错时
+		// 会留下「accepted 但关系未应用」的可恢复边界——状态已落 accepted、世界总线事件已是事实，调用方据返回错误可重试/告警。
 		if tmpl, ok := sevenTemplates[SevenInteraction(req.Interaction)]; ok {
 			if err := service.applySevenEffect(ctx, req.ActorID, req.TargetID, tmpl); err != nil {
-				return req, err // 效果应用失败：状态已置 accepted，关系未变（调用方可重试/告警）
+				return req, err
 			}
 		}
 	}

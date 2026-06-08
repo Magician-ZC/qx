@@ -49,10 +49,11 @@ func (service *Service) CostDashboard(ctx context.Context, sinceDays int, now ti
 		return data, fmt.Errorf("cost dashboard: missing db")
 	}
 
-	// 时间窗口：occurred_at 是 "YYYY-MM-DD HH:MM:SS" 文本（双驱动默认 CURRENT_TIMESTAMP），字典序=时间序，可直接 > 比较。
+	// 时间窗口：llm_interactions.occurred_at 由 persistLLMInteractions 用 traceTimeLayout（定宽纳秒 RFC3339）写入，
+	// 字典序=时间序。cutoff 必须用**同一布局**才能正确 > 比较（否则 'T' vs ' ' 错位致窗口尾部多算约 1 天，评审 load-bearing）。
 	cutoff := ""
 	if sinceDays > 0 {
-		cutoff = now.UTC().AddDate(0, 0, -sinceDays).Format("2006-01-02 15:04:05")
+		cutoff = now.UTC().AddDate(0, 0, -sinceDays).Format(traceTimeLayout)
 	}
 
 	rows, err := service.queryInteractionRows(ctx, cutoff)

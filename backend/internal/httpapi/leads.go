@@ -28,11 +28,14 @@ func registerLeadEndpoints(router *gin.Engine, store *sql.DB) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot encode body"})
 			return
 		}
-		kind := firstNonEmpty(asString(body["kind"]), "lead")
-		source := firstNonEmpty(asString(body["source"]), asString(body["utm_source"]))
+		// 夹长度对齐 MySQL VARCHAR 宽度（避免攻击者超长串在 MySQL strict 模式 500、SQLite 201 的双驱动发散；payload_json 是 LONGTEXT/TEXT 不夹）。
+		kind := clampStr(firstNonEmpty(asString(body["kind"]), "lead"), 32)
+		vid := clampStr(asString(body["vid"]), 191)
+		email := clampStr(asString(body["email"]), 255)
+		source := clampStr(firstNonEmpty(asString(body["source"]), asString(body["utm_source"])), 191)
 		if _, err := store.ExecContext(c.Request.Context(),
 			`INSERT INTO fake_door_leads (id, kind, vid, email, source, payload_json, created_at) VALUES (?,?,?,?,?,?,?)`,
-			uuid.NewString(), kind, asString(body["vid"]), asString(body["email"]), source, string(raw),
+			uuid.NewString(), kind, vid, email, source, string(raw),
 			time.Now().UTC().Format("2006-01-02 15:04:05"),
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -88,4 +91,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// clampStr 按 rune 截断到 max 长度（避免超长串溢出 MySQL VARCHAR；按 rune 防多字节字符截半）。
+func clampStr(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }

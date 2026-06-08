@@ -38,6 +38,11 @@ func reflexShortCircuitApplies(state State, actor *unit.Record, targetIDs []stri
 	if actor == nil {
 		return false
 	}
+	// 玩家本回合给该单位下了即时令（已扣指挥力的付费动作）→ **绝不短路**，交 LLM 落实其意图，否则会在安静 tick 静默吞掉
+	// 玩家付费的命令（评审 load-bearing）。这是 buildReflexSituation 缺的廉价已知 gate 信号，等价于 HasNewOrder=true。
+	if _, has := activeImmediateOrderForUnit(state, actor.ID); has {
+		return false
+	}
 	dec := decision.DefaultRouter().Route(buildReflexSituation(state, actor, targetIDs))
 	if dec.NeedsLLM {
 		return false

@@ -102,4 +102,16 @@ func TestSevenInteractionsAndConsent(t *testing.T) {
 	if _, err := service.RecordSevenInteraction(ctx, "w1", "a", "b", SevenInteraction("bogus"), 1); err == nil {
 		t.Fatalf("未知交互应报错")
 	}
+
+	// 跨分片 target（不在本库）：unilateral 交互仍成功（总线记事实），关系效果 best-effort 跳过、不整体崩坏（评审 load-bearing）。
+	res4, err := service.RecordSevenInteraction(ctx, "w1", "a", "remote-x", InteractionAcquaint, 5)
+	if err != nil {
+		t.Fatalf("跨分片 target 不应使交互失败: %v", err)
+	}
+	if !res4.Applied {
+		t.Fatalf("unilateral 交互应标记 applied（关系效果对远端 best-effort 跳过）")
+	}
+	if relAxis(t, service, "trust", "a", "remote-x") != 0 {
+		t.Fatalf("远端 target 不应有本地关系行")
+	}
 }

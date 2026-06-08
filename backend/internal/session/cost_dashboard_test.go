@@ -65,3 +65,32 @@ func TestCostDashboard_Aggregates(t *testing.T) {
 		t.Fatalf("单位经济应 total=3 active=2 dead=1，得 total=%d %+v", d.UnitsTotal, d.UnitsByLifeState)
 	}
 }
+
+// TestCostDashboard_WindowCutoff 守评审 load-bearing：cutoff 与存储的 traceTimeLayout occurred_at 同布局可比，
+// 窗口正确过滤（旧行排除）。用 traceTimeLayout 显式写 occurred_at（仿 persistLLMInteractions）。
+func TestCostDashboard_WindowCutoff(t *testing.T) {
+	db, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	insAt := func(occurredAt string, cost float64) {
+		it := LLMInteraction{ID: uuid.NewString(), Provider: "openai", EstimatedCost: cost, TotalTokens: 10}
+		raw, _ := json.Marshal(it)
+		if _, err := db.ExecContext(ctx, `INSERT INTO llm_interactions (id, session_id, interaction_json, occurred_at) VALUES (?,?,?,?)`,
+			it.ID, "s1", string(raw), occurredAt); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	insAt(now.Add(-1*time.Hour).Format(traceTimeLayout), 0.01)  // 窗口内（1 小时前）
+	insAt(now.Add(-72*time.Hour).Format(traceTimeLayout), 0.99) // 窗口外（3 天前）
+
+	d, err := service.CostDashboard(ctx, 1, now) // 最近 1 天
+	if err != nil {
+		t.Fatalf("CostDashboard: %v", err)
+	}
+	if d.TotalInteractions != 1 {
+		t.Fatalf("最近 1 天应只算 1 条（3 天前的被排除），得 %d", d.TotalInteractions)
+	}
+	if d.TotalCostUSD > 0.01+1e-9 {
+		t.Fatalf("不应把窗口外的 0.99 算进来，得 %.4f", d.TotalCostUSD)
+	}
+}
