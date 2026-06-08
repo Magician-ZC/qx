@@ -39,6 +39,7 @@ const (
 	EventShareInitiated    = "share_initiated"
 	EventPurchase          = "purchase"
 	EventComplianceBlocked = "compliance_blocked"
+	EventCharacterDied     = "character_died" // 角色阵亡（留存/牵挂信号：一场死亡是别人传记里的「回到那一刻」）
 )
 
 // Event 是一条漏斗埋点。
@@ -48,6 +49,11 @@ type Event struct {
 	SessionID string
 	UnitID    string
 	Props     any // 序列化进 properties_json
+	// 维度列（均可选，向后兼容：旧调用方不传=NULL）。供漏斗按用户/实验组/客户端版本切片。
+	UserID     string // 关联账户（跨会话归因，缺失=匿名/未登录）
+	ABBucket   string // A/B 实验分桶标识（如 "control"/"variant_a"）
+	ClientTS   string // 客户端事件时间戳（前端原始口径，用于端到端延迟/时钟偏差核对）
+	AppVersion string // 客户端应用版本（按版本切片转化/回归）
 }
 
 // Execer 是写入所需的最小依赖（*sql.DB 或 *sql.Tx 均满足）。
@@ -71,10 +77,12 @@ func Emit(ctx context.Context, execer Execer, ev Event) error {
 	if err != nil {
 		return fmt.Errorf("analytics marshal props: %w", err)
 	}
+	// 维度列（user_id/ab_bucket/client_ts/app_version）由 schema agent 建；旧调用方不传=NULL（nullable 兜底）。
 	if _, err := execer.ExecContext(ctx, `
-		INSERT INTO product_events (id, stage, event_name, session_id, unit_id, properties_json)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		uuid.NewString(), string(ev.Stage), ev.Name, nullable(ev.SessionID), nullable(ev.UnitID), string(encoded)); err != nil {
+		INSERT INTO product_events (id, stage, event_name, session_id, unit_id, properties_json, user_id, ab_bucket, client_ts, app_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		uuid.NewString(), string(ev.Stage), ev.Name, nullable(ev.SessionID), nullable(ev.UnitID), string(encoded),
+		nullable(ev.UserID), nullable(ev.ABBucket), nullable(ev.ClientTS), nullable(ev.AppVersion)); err != nil {
 		return fmt.Errorf("analytics insert: %w", err)
 	}
 	return nil

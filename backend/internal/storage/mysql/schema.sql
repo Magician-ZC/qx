@@ -216,6 +216,8 @@ CREATE TABLE IF NOT EXISTS world_bosses (
   INDEX idx_world_bosses_world (world_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- user_id/ab_bucket/client_ts/app_version 供北极星/A-B 口径（按用户聚合、实验分桶、客户端校时、版本切片），
+-- 全可空，兼容历史无这些维度的旧埋点；存量库经 dbmigrate 幂等补列。
 CREATE TABLE IF NOT EXISTS product_events (
   id VARCHAR(191) PRIMARY KEY,
   stage VARCHAR(32) NOT NULL,
@@ -224,6 +226,10 @@ CREATE TABLE IF NOT EXISTS product_events (
   unit_id VARCHAR(191) NULL,
   properties_json LONGTEXT NOT NULL,
   occurred_at VARCHAR(64) NOT NULL DEFAULT '',
+  user_id VARCHAR(191) NULL,
+  ab_bucket VARCHAR(64) NULL,
+  client_ts VARCHAR(64) NULL,
+  app_version VARCHAR(64) NULL,
   INDEX idx_product_events_name (event_name, occurred_at),
   INDEX idx_product_events_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

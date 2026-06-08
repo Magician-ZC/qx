@@ -336,6 +336,38 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, data)
 	})
 
+	// 产品漏斗只读聚合（P0 通电：让 product_events 富埋点从 write-only 变可消费）。days<=0/缺省=全量。
+	router.GET("/api/ops/product-funnel", opsTokenGuard(), func(c *gin.Context) {
+		days := 0
+		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				days = v
+			}
+		}
+		report, err := analytics.FunnelCounts(c.Request.Context(), deps.Store, days)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, report)
+	})
+
+	// 北极星指标只读聚合（D2 收件箱处理率 / 分享 / 付费 / 回访）。days<=0/缺省=全量。
+	router.GET("/api/ops/north-star", opsTokenGuard(), func(c *gin.Context) {
+		days := 0
+		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				days = v
+			}
+		}
+		report, err := analytics.NorthStar(c.Request.Context(), deps.Store, days)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, report)
+	})
+
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
 	// 漏斗端点是 ops 敏感只读聚合，套 opsTokenGuard；POST /api/leads 是 landing 公开提交，保持公开（不守卫）。
 	// 漏斗路由在 leads.go 内注册，这里用路径作用域的前置中间件守卫，避免影响公开的 /api/leads。

@@ -85,6 +85,62 @@ func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]
 	return out, rows.Err()
 }
 
+// EnsureTable 幂等建表（双驱动：按方言选 DDL）：对**已存在**的表无副作用（CREATE TABLE IF NOT EXISTS），
+// 对缺表的存量库补建。用于 schema.sql 后期新增、但现网旧库 applySchema 不会重跑全量的场景——
+// 把建表 DDL 也纳入迁移，使老库与 fresh 库收敛到同一形态。可在每次 Open 安全重复执行。
+func EnsureTable(ctx context.Context, db *sql.DB, sqliteDDL, mysqlDDL string) error {
+	if db == nil {
+		return fmt.Errorf("ensure table: nil db")
+	}
+	ddl := sqliteDDL
+	if dbdialect.IsMySQL(db) {
+		ddl = mysqlDDL
+	}
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("ensure table: %w", err)
+	}
+	return nil
+}
+
+// RelevanceAnchorsTableSQLite / RelevanceAnchorsTableMySQL 是相关性锚持久表的双驱动建表 DDL
+// （列/主键严格对齐 session/anchors.go 的 UpsertAnchor INSERT 与 loadPersistentAnchors SELECT，
+// 复合主键 (character_unit_id, anchor_kind, anchor_ref) 是 ON CONFLICT/ON DUPLICATE KEY 的依赖）。
+// schema.sql 的 fresh 库已含本表，此处供存量旧库（升级前无此表）经迁移幂等补建，否则持久锚静默永不落库/加载。
+const RelevanceAnchorsTableSQLite = `
+CREATE TABLE IF NOT EXISTS relevance_anchors (
+  character_unit_id TEXT NOT NULL,
+  anchor_kind TEXT NOT NULL,
+  anchor_ref TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 0,
+  label TEXT NOT NULL DEFAULT '',
+  half_life_days REAL NOT NULL DEFAULT 14,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (character_unit_id, anchor_kind, anchor_ref)
+)`
+
+const RelevanceAnchorsTableMySQL = `
+CREATE TABLE IF NOT EXISTS relevance_anchors (
+  character_unit_id VARCHAR(191) NOT NULL,
+  anchor_kind VARCHAR(32) NOT NULL,
+  anchor_ref VARCHAR(191) NOT NULL,
+  weight DOUBLE NOT NULL DEFAULT 0,
+  label VARCHAR(255) NOT NULL DEFAULT '',
+  half_life_days DOUBLE NOT NULL DEFAULT 14,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (character_unit_id, anchor_kind, anchor_ref),
+  INDEX idx_relevance_anchors_char (character_unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// ProductEventAnalyticsColumns 给 product_events 补北极星/A-B 口径列（全可空 TEXT，与游戏状态解耦）：
+// user_id（按用户聚合留存/北极星）、ab_bucket（A-B 实验分桶）、client_ts（客户端原始时间戳，校时漂移分析）、
+// app_version（按版本切片）。nullable —— 兼容历史无这些维度的旧埋点；列已存在则 EnsureColumns 安全跳过。
+var ProductEventAnalyticsColumns = []Column{
+	{Name: "user_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "ab_bucket", SQLiteType: "TEXT", MySQLType: "VARCHAR(64) NULL"},
+	{Name: "client_ts", SQLiteType: "TEXT", MySQLType: "VARCHAR(64) NULL"},
+	{Name: "app_version", SQLiteType: "TEXT", MySQLType: "VARCHAR(64) NULL"},
+}
+
 // EventScopeColumns 是 events 表的世界作用域双键列（沙盘 §8.7：加列不改义，Mutator/流程事件可双写）。
 var EventScopeColumns = []Column{
 	{Name: "world_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},

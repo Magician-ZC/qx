@@ -236,6 +236,8 @@ CREATE TABLE IF NOT EXISTS world_bosses (
 CREATE INDEX IF NOT EXISTS idx_world_bosses_world ON world_bosses(world_id, status);
 
 -- 产品分析埋点（AARRR 漏斗，append-only，无 FK，与游戏状态解耦；设计 docs/验证实验设计.md §5.2）。
+-- user_id/ab_bucket/client_ts/app_version 供北极星/A-B 口径（按用户聚合、实验分桶、客户端校时、版本切片），
+-- 全可空，兼容历史无这些维度的旧埋点；存量库经 dbmigrate 幂等补列。
 CREATE TABLE IF NOT EXISTS product_events (
   id TEXT PRIMARY KEY,
   stage TEXT NOT NULL,
@@ -243,7 +245,11 @@ CREATE TABLE IF NOT EXISTS product_events (
   session_id TEXT,
   unit_id TEXT,
   properties_json TEXT NOT NULL DEFAULT '{}',
-  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  user_id TEXT,
+  ab_bucket TEXT,
+  client_ts TEXT,
+  app_version TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_events_name ON product_events(event_name, occurred_at);

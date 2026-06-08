@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/analytics"
 	combatdomain "qunxiang/backend/internal/combat"
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/events"
@@ -521,6 +522,10 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	appendLog(&state, "weather", fmt.Sprintf("本回合天气：%s。%s", state.Weather.DisplayName, state.Weather.Note), "", "")
 	ensureFactionRelations(&state)
 
+	// 把本局接入世界（QUNXIANG_WORLD_BINDING：默认 shared 共享主世界，点亮 worldbus/cross-event/七交互/world-boss 整层；
+	// best-effort 不阻断建局）。必须在玩家单位已落库之后、seedAmbientForUnits/seedVillageForSession 之前——使 state.WorldID 在 ambient/村庄锚落库时已置位。
+	_ = service.bindSessionWorld(ctx, &state)
+
 	// 把玩家单位 seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op）。best-effort：绝不因调度登记失败拖垮建局。
 	// draft 模式此处 PlayerUnitIDs 尚空（单位在 ApplyOpeningDraft 才落库），故对 draft 自然 no-op、由组队完成时再 seed。
 	// 传 state.WorldID（未接多世界时恒空 → region_id 回退 sessionID；接入后才升级世界子区分片）。
@@ -680,6 +685,8 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 	state.SetupDeadlineAt = time.Time{}
 	appendLog(&state, "setup", fmt.Sprintf("开局组队完成：玩家选择了 %d 名单位。第 1 回合部署阶段开始。", len(state.PlayerUnitIDs)), "", "")
 	ensureFactionRelations(&state)
+	// 组队完成、玩家单位刚落库 → 先接入世界（默认 shared，点亮跨玩家整层；best-effort），再 seed 离线调度。
+	_ = service.bindSessionWorld(ctx, &state)
 	// 组队完成、玩家单位刚落库 → seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op；best-effort）。
 	// 传 state.WorldID（未接多世界时恒空 → region_id 回退 sessionID；接入后才升级世界子区分片）。
 	_ = service.seedAmbientForUnits(ctx, sessionID, state.WorldID, state.PlayerUnitIDs)
@@ -3053,6 +3060,12 @@ func (service *Service) applyAttack(
 			}
 			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
 			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
+			// 阵亡产品埋点（best-effort）：留存/牵挂信号，进 product_events 供北极星/漏斗聚合。
+			_ = analytics.Emit(ctx, service.db, analytics.Event{
+				Stage: analytics.StageRetention, Name: analytics.EventCharacterDied,
+				SessionID: state.ID, UnitID: target.ID,
+				Props: map[string]any{"turn": state.TurnState.Turn, "killer_id": attacker.ID},
+			})
 			// 血仇传播（flag-gated 默认开，QUNXIANG_BLOOD_FEUD=false 才关 + best-effort）：在乎死者的人继承对凶手 attacker 的敌意，
 			// 最亲近者哀恸、世仇留痕并投「为TA复仇？」命运卡。绝不影响战斗结算。
 			// 传入 byID（执行主循环持有的活指针映射），令哀恸 morale 的 Mutator 结果能回写内存态，

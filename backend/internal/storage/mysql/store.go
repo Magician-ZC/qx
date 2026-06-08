@@ -87,6 +87,16 @@ func Open(dsn string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 相关性锚持久表（存量旧库补建；fresh 库 schema.sql 已建）——否则持久锚 silently 永不落库/加载。
+	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.RelevanceAnchorsTableSQLite, dbmigrate.RelevanceAnchorsTableMySQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// product_events 北极星/A-B 维度列（user_id/ab_bucket/client_ts/app_version，幂等补列）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "product_events", dbmigrate.ProductEventAnalyticsColumns); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
