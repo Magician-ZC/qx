@@ -136,7 +136,7 @@ func (service *Service) maybeResolveActionGapTrade(
 	}
 
 	choice, result, interaction, err := service.generateDeploymentChoice(ctx, *state, byID, left, right, candidates)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if err != nil {
 		appendLog(
 			state,

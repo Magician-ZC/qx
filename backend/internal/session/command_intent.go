@@ -73,7 +73,7 @@ func (service *Service) refreshEnemyGlobalDirectiveForDeploymentPhase(
 		return
 	}
 	payload, _, interaction := service.generateEnemyGlobalDirective(ctx, *state, units, reason)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	text := strings.TrimSpace(payload.Directive)
 	if text == "" {
 		text = fallbackEnemyGlobalDirective(state, units).Directive

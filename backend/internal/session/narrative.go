@@ -151,7 +151,7 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 	if !ok || batcher == nil || len(plans) == 1 {
 		for _, plan := range plans {
 			payload, _, interaction, err := service.generateUnitIdentityNarrative(ctx, plan.record)
-			appendUnitIdentityLLMInteraction(state, interaction)
+			service.appendUnitIdentityLLMInteraction(ctx, state, interaction)
 			if err != nil {
 				plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 				plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
@@ -189,19 +189,19 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		}
 		handled[batchResult.Key] = struct{}{}
 		if batchResult.Err != nil {
-			appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", batchResult.Err.Error()))
+			service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", batchResult.Err.Error()))
 			plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 			plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 			continue
 		}
 		payload, err := parseUnitIdentityNarrativePayload(batchResult.Result)
 		if err != nil {
-			appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", err.Error()))
+			service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, "", err.Error()))
 			plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 			plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 			continue
 		}
-		appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, payload.RecruitmentPitch, ""))
+		service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, payload.RecruitmentPitch, ""))
 		plan.record.Identity.Biography = payload.Biography
 		plan.record.Identity.RecruitmentPitch = payload.RecruitmentPitch
 	}
@@ -209,7 +209,7 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		if _, ok := handled[key]; ok || plan.record == nil {
 			continue
 		}
-		appendUnitIdentityLLMInteraction(state, buildUnitIdentityBatchInteraction(state, plan, ai.CompletionResult{}, "", "unit profile batch result missing"))
+		service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, ai.CompletionResult{}, "", "unit profile batch result missing"))
 		plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 		plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 	}
@@ -233,13 +233,13 @@ func buildUnitIdentityBatchInteraction(
 	return buildLLMInteraction(current, unitID, "unit_profile", summary, plan.systemPrompt, plan.userPrompt, result, errorMessage)
 }
 
-func appendUnitIdentityLLMInteraction(state *State, interaction LLMInteraction) {
+func (service *Service) appendUnitIdentityLLMInteraction(ctx context.Context, state *State, interaction LLMInteraction) {
 	if state == nil || strings.TrimSpace(interaction.ID) == "" {
 		return
 	}
 	interaction.Turn = state.TurnState.Turn
 	interaction.Phase = state.TurnState.Phase
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 }
 
 func (service *Service) ensureUnitNarrativeCacheTable(ctx context.Context) error {
@@ -506,7 +506,7 @@ func (service *Service) refreshRecordNarrativeInPlace(ctx context.Context, state
 	}
 
 	payload, _, interaction, err := service.generateUnitIdentityNarrative(ctx, record)
-	appendUnitIdentityLLMInteraction(state, interaction)
+	service.appendUnitIdentityLLMInteraction(ctx, state, interaction)
 	if err != nil {
 		return false
 	}
@@ -673,7 +673,7 @@ func (service *Service) recordBattleReportBestEffort(
 		return
 	}
 	payload, result, interaction, err := service.generateBattleReport(ctx, *state, byID, *narrator)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if err != nil {
 		payload = fallbackBattleReportPayload(*state, byID, *narrator)
 	}

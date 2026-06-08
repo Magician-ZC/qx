@@ -52,7 +52,7 @@ func (service *Service) persistHallOfFame(
 
 		topEvents := service.collectLegacyTopEvents(ctx, *state, *record, 30)
 		summary, result, interaction := service.generateHallBiography(ctx, *state, *record, topEvents)
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 		if strings.TrimSpace(summary) == "" {
 			summary = fallbackHallBiography(*record, state.Outcome, topEvents)
 		}

@@ -35,7 +35,7 @@ func (service *Service) recordUnitReflectionBestEffort(
 		eventSummary,
 		interactionKind,
 	)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if err != nil {
 		logKind := "reflection_error"
 		if interactionKind == "unit_dialogue" {

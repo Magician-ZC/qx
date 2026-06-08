@@ -112,7 +112,7 @@ func (service *Service) maybeResolveRomanceAndFamily(ctx context.Context, state 
 		romanceScore(*state, *left, *right, "fall_in_love")%100 < 10 &&
 		service.canAttemptRomanceProposal(ctx, *state, left, right) {
 		proposal, result, interaction, ok := service.requestRomanceProposal(ctx, *state, byID, left, right)
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 		if !ok || proposal.Proposer == "none" {
 			return
 		}
@@ -133,7 +133,7 @@ func (service *Service) maybeResolveRomanceAndFamily(ctx context.Context, state 
 	}
 	if canAttemptFamilyAction(*state, left, right) && romanceScore(*state, *left, *right, "child")%100 < 6 {
 		consent, result, interaction, ok := service.requestRomanceConsent(ctx, *state, byID, left, right, "是否共同养育新生命")
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 		if !ok || !consent.LeftAgree || !consent.RightAgree {
 			service.recordRomanceConsentDialogue(ctx, state, left, right, consent, result)
 			appendLog(state, "family_hold", romanceConsentHoldMessage(consent, left, right), left.ID, right.ID)
@@ -169,7 +169,7 @@ func (service *Service) executeRomance(ctx context.Context, state *State, byID m
 		return service.applyActionHungerCost(ctx, state, actor, "克制表白")
 	}
 	proposal, result, interaction, ok := service.requestRomanceProposal(ctx, *state, byID, actor, target)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if !ok || proposal.Proposer == "none" {
 		appendLog(state, "romance_hold", "我把话咽了回去，还不是时候。", actor.ID, target.ID)
 		return nil
@@ -210,7 +210,7 @@ func (service *Service) executeFamily(ctx context.Context, state *State, byID ma
 		return nil
 	}
 	consent, result, interaction, ok := service.requestRomanceConsent(ctx, *state, byID, actor, target, "是否共同养育新生命")
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	service.recordRomanceConsentDialogue(ctx, state, actor, target, consent, result)
 	if !ok || !consent.LeftAgree || !consent.RightAgree {
 		appendLog(state, "family_hold", romanceConsentHoldMessage(consent, actor, target), actor.ID, target.ID)
@@ -394,7 +394,7 @@ func (service *Service) resolveDuePregnancies(ctx context.Context, state *State)
 		}
 		birthCoord := findChildBirthCoord(state.Map, byID, *pregnant)
 		profile, _, interaction := service.generateChildProfile(ctx, *state, byID, *left, *right, *pregnant)
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 		child := createChildUnit(*state, *left, *right, birthCoord, profile)
 		if err := service.units.Save(ctx, child); err != nil {
 			appendLog(state, "romance_error", "新生命没能加入战场。", left.ID, right.ID)
@@ -1029,7 +1029,7 @@ func (service *Service) maybeConvertWildling(ctx context.Context, state *State, 
 	}
 	proposal := fmt.Sprintf("是否由 %s 自愿接受 %s 的感化，并加入 %s。", wild.DisplayName(), contact.DisplayName(), contact.FactionID)
 	consent, result, interaction, ok := service.requestPairConsent(ctx, *state, byID, wild, contact, proposal, "感化、招募、加入阵营或改变归属", "wildling_consent")
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if !ok || !consent.LeftAgree || !consent.RightAgree {
 		service.recordRomanceConsentDialogue(ctx, state, wild, contact, consent, result)
 		appendLog(state, "wildling_convert_hold", romanceConsentHoldMessage(consent, wild, contact), contact.ID, wild.ID)

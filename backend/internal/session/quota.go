@@ -43,6 +43,10 @@ func quotaPeriodBucket() string {
 	return time.Now().UTC().Format("2006-01")
 }
 
+// 注意：账户级成本记账已由注入的 SpendRecorder（=billing.Service，见 service.go 的 recordLLMSpendBestEffort）承接——
+// 经 appendLLMInteractionWithSpend 这一 choke point 与会话级成本表（accumulateLLMMetrics）同口径，覆盖执行主循环全部带真实成本的
+// LLM 站点（combat_shake/reflection/social/romance/intelligence/interaction_actions/narrative/pigeon/random_events/command_intent/legacy_hall 等）。
+// 本方法（与 billing.Service.AddSpend 同表同语义）已成为影子/死代码，保留仅为避免连带改动与兼容潜在历史调用点，**勿在新路径调用**。
 // chargeLLMQuota 把一次 LLM 成本（micro_usd）best-effort 累加进 account_llm_quota，供把会话级预算护栏升级到账户级。
 // flag QUNXIANG_BILLING_ENABLED 关时（默认）直接 no-op；accountID 空、micro<=0、db 不可用时同样 no-op；内部吞错（best-effort）。
 // 返回 error 仅供调用方可选记日志——返回非 nil 也**不应**中断主循环（与 analytics 埋点同纪律）。

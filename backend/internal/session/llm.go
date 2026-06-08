@@ -245,7 +245,7 @@ func (service *Service) generateUnitDecision(
 	if attrPromptBlock != "" {
 		userPrompt = userPrompt + "\n" + attrPromptBlock
 	}
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		decision := budgetGuardrailDecision(actor)
 		result := budgetGuardrailResult(state)
 		return decision, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, decision), systemPrompt, userPrompt, result, ""), nil
@@ -455,7 +455,7 @@ func (service *Service) generateDialogueReply(
 		relationSummary,
 		knowledgeSummary,
 	)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		reply := budgetGuardrailDialogueReply()
 		result := budgetGuardrailResult(state)
 		return reply, result, buildLLMInteraction(state, record.ID, "dialogue", reply.Reply, systemPrompt, userPrompt, result, ""), nil
@@ -536,7 +536,7 @@ func (service *Service) requestUnitDialogueReply(
 	relationSummary := service.relationSummaryForPrompt(ctx, byID, *target, 4)
 	knowledgeSummary := service.knowledgeSummaryForPrompt(ctx, target.ID, 4)
 	userPrompt := buildUnitDialogueReplyPrompt(state, byID, actor, target, actorLine, memorySummary, relationSummary, knowledgeSummary)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		payload := dialogueReplyPayload{Reply: "我听到了，按局势来。", Mood: "steady", Intent: "acknowledge", Memory: "我回应了队友交谈。"}
 		result := budgetGuardrailResult(state)
 		return payload, result, buildLLMInteraction(state, target.ID, "unit_dialogue_reply", payload.Reply, systemPrompt, userPrompt, result, ""), true
@@ -629,7 +629,7 @@ func (service *Service) generateUnitReflection(
 		relationSummary,
 		knowledgeSummary,
 	)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		payload := budgetGuardrailReflection(eventSummary)
 		result := budgetGuardrailResult(state)
 		return payload, result, buildLLMInteraction(state, record.ID, interactionKind, payload.Bubble, systemPrompt, userPrompt, result, ""), nil
@@ -689,7 +689,7 @@ func (service *Service) generateDeploymentChoice(
 	leftRelationSummary := service.relationSummaryForPrompt(ctx, byID, *left, 4)
 	rightRelationSummary := service.relationSummaryForPrompt(ctx, byID, *right, 4)
 	userPrompt := buildDeploymentPrompt(state, byID, left, right, candidates, leftMemorySummary, rightMemorySummary, leftRelationSummary, rightRelationSummary)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		choice := budgetGuardrailDeploymentChoice()
 		result := budgetGuardrailResult(state)
 		return choice, result, buildLLMInteraction(state, left.ID, "unit_dialogue", deploymentChoiceInteractionSummary(choice), systemPrompt, userPrompt, result, ""), nil
@@ -767,7 +767,7 @@ func (service *Service) generateUpkeepChoice(
 		relationSummary,
 		knowledgeSummary,
 	)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		choice := budgetGuardrailUpkeepChoice()
 		result := budgetGuardrailResult(state)
 		return choice, result, buildLLMInteraction(state, record.ID, "reflection", choice.Bubble, systemPrompt, userPrompt, result, ""), nil
@@ -833,7 +833,7 @@ func (service *Service) generateCombatShakeChoice(
 		relationSummary,
 		knowledgeSummary,
 	)
-	if llmBudgetGuardrailActive(state) {
+	if service.llmBlocked(ctx, state) {
 		choice := budgetGuardrailCombatShakeChoice()
 		result := budgetGuardrailResult(state)
 		return choice, result, buildLLMInteraction(state, record.ID, "shake", choice.Bubble, systemPrompt, userPrompt, result, ""), nil

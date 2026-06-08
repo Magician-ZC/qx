@@ -15,15 +15,23 @@ import {
   logoutAccount,
   registerAccount,
   resolveEliteEncounter,
+  resolveFieldBoss,
+  setAccountToken,
   setImmediateOrder,
   setSessionRoleToken,
   setGlobalDirective,
   setTaskDirective,
   subscribeSessionStream,
   talkToUnit,
+  trackFunnel,
 } from "./session/api";
 import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
+import type { FieldBossResult } from "./session/types";
 import { FatePanel } from "./components/FatePanel";
+import GovernancePanel, { ReportDialog, PrivacyEraseDialog } from "./components/GovernancePanel";
+import BillingPanel from "./components/BillingPanel";
+import ComplianceGatePanel, { ComplianceBlockedBanner } from "./components/ComplianceGate";
+import ConsentInbox from "./components/ConsentInbox";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -455,6 +463,23 @@ export function App() {
   // elite/PvE 遭遇：进行中的单位与最近一次结果（用于展示在事件流/弹层）。
   const [eliteEncounterBusyUnitID, setEliteEncounterBusyUnitID] = useState("");
   const [eliteEncounterResult, setEliteEncounterResult] = useState<EliteEncounterResult | null>(null);
+  // 组队 PvE（野外 Boss）：选中的队员、进行中标志与最近一次结果。
+  const [fieldBossSelectionIDs, setFieldBossSelectionIDs] = useState<string[]>([]);
+  const [fieldBossBusy, setFieldBossBusy] = useState(false);
+  const [fieldBossResult, setFieldBossResult] = useState<FieldBossResult | null>(null);
+  const [fieldBossModalOpen, setFieldBossModalOpen] = useState(false);
+  // 玩家侧治理：举报弹窗（不受 developer 门，所有玩家可见）。
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
+  // 运营/dev 治理台 + 隐私擦除（developer 门控）。
+  const [governancePanelOpen, setGovernancePanelOpen] = useState(false);
+  const [privacyEraseOpen, setPrivacyEraseOpen] = useState(false);
+  // 商业化/合规浮层（玩家可见，常驻入口触发）。
+  const [billingPanelOpen, setBillingPanelOpen] = useState(false);
+  const [compliancePanelOpen, setCompliancePanelOpen] = useState(false);
+  // 合规 403 拦截横幅：被门拦时存后端 reason，渲染 ComplianceBlockedBanner 引导实名/告知宵禁/防沉迷。
+  const [complianceBlockReason, setComplianceBlockReason] = useState<string | null>(null);
+  // 跨玩家同意收件箱浮层（针对当前选中角色）。
+  const [consentInboxOpen, setConsentInboxOpen] = useState(false);
   const [dialogueDraft, setDialogueDraft] = useState("");
   const [latestDialogueReply, setLatestDialogueReply] = useState("");
   const [terrainCatalog, setTerrainCatalog] = useState<TerrainDefinition[]>([]);
@@ -765,9 +790,15 @@ export function App() {
   useEffect(() => {
     const token = accountAuthToken.trim();
     if (!token) {
+      // 登出/无 token：同步清掉 api.ts 模块级 Bearer，billing/compliance 不再误带空 token。
+      setAccountToken("");
       setAccountUser(null);
       return;
     }
+
+    // 关键：把恢复/登录得到的 token 同步进 api.ts 模块级 Bearer，
+    // 否则刷新后恢复登录态时 billing/compliance 的强制 Bearer 端点会发空 token 被 401。
+    setAccountToken(token);
 
     let cancelled = false;
     void getCurrentAccount(token)
@@ -782,6 +813,7 @@ export function App() {
         if (cancelled) {
           return;
         }
+        setAccountToken("");
         setAccountUser(null);
         setAccountAuthToken("");
         clearAccountAuthFromStorage();
@@ -1757,6 +1789,47 @@ export function App() {
     }
   }
 
+  // toggleFieldBossMember 在组队 PvE 选人列表里加/减一个队员。
+  function toggleFieldBossMember(unitID: string) {
+    setFieldBossSelectionIDs((current) =>
+      current.includes(unitID) ? current.filter((id) => id !== unitID) : [...current, unitID],
+    );
+  }
+
+  // handleFieldBoss 触发一次组队 PvE（野外 Boss）遭遇（真实动作：按贡献分赃/分级惩罚并落命运收件箱）。
+  async function handleFieldBoss() {
+    const activeSession = sessionRef.current;
+    if (!activeSession || fieldBossBusy) {
+      return;
+    }
+    const unitIDs = fieldBossSelectionIDs.filter((id) => id);
+    if (unitIDs.length === 0) {
+      setMessage("请先勾选要组队出战的队员。");
+      return;
+    }
+    setFieldBossBusy(true);
+    setMessage(`${unitIDs.length} 人结伴前去挑战野外强敌，胜负未卜…`);
+    try {
+      const result = await resolveFieldBoss(activeSession.id, unitIDs);
+      setFieldBossResult(result);
+      setMessage(result.Victory ? `组队告捷（${result.Rounds} 回合），按贡献分赃。` : `组队折戟（${result.Rounds} 回合），各自承担后果。`);
+      void trackFunnel("field_boss_resolved", { source: result.Victory ? "victory" : "defeat" });
+      // 刷新一次快照，让 HP/钱包等结算落地反映到界面。
+      try {
+        const latest = await getSession(activeSession.id);
+        if (latest.session.id === activeSession.id) {
+          applySessionSnapshot(latest.session);
+        }
+      } catch {
+        // 快照刷新失败不影响遭遇结果展示。
+      }
+    } catch (err) {
+      setMessage(`组队出战未成行：${err instanceof APIError ? err.message : String(err)}`);
+    } finally {
+      setFieldBossBusy(false);
+    }
+  }
+
   function handleReturnToMainMenu() {
     setSession(null);
     sessionRef.current = null;
@@ -1802,12 +1875,23 @@ export function App() {
       setDuelJoinSessionID("");
       setDuelJoinRoleToken("");
       setDuelRoomStatus(null);
+      setFieldBossSelectionIDs([]);
       window.history.replaceState(null, "", window.location.pathname);
       setLoadState("ready");
       setMessage(`单人战场已生成（${nextSession.fog_of_war_enabled ? "有雾" : "无雾"}，随机事件${nextSession.random_events_enabled ? "开启" : "关闭"}）。玩家只做自然语言指挥；进食、交易、采集、建造与战斗都由 AI 单位自己执行。`);
+      // 漏斗埋点：建局成功是核心转化点（best-effort 吞错，绝不影响 UX）。
+      void trackFunnel("single_player_session_started", { source: nextSession.fog_of_war_enabled ? "fog" : "clear" });
     } catch (error) {
-      setLoadState("error");
-      setMessage(getErrorMessage(error, "创建单人对局失败"));
+      // 合规门 403：登录态被宵禁/未实名/防沉迷超限拦截——渲染拦截横幅引导，不当作普通报错。
+      if (error instanceof APIError && error.status === 403) {
+        setLoadState("idle");
+        setStartMode("landing");
+        setComplianceBlockReason(error.reason ?? "");
+        setMessage("");
+      } else {
+        setLoadState("error");
+        setMessage(getErrorMessage(error, "创建单人对局失败"));
+      }
     } finally {
       setBusy(false);
     }
@@ -1954,8 +2038,15 @@ export function App() {
       window.history.replaceState(null, "", playerLink);
       setMessage(`多人房间已创建（房间号 ${roomCode}）。先把房间号或加入链接发给对手，对手进入后再开始游戏。`);
     } catch (error) {
-      setLoadState("error");
-      setMessage(getErrorMessage(error, "创建双人房失败"));
+      // 合规门 403：登录态被宵禁/未实名/防沉迷超限拦截——渲染拦截横幅引导，不当作普通报错。
+      if (error instanceof APIError && error.status === 403) {
+        setLoadState("idle");
+        setComplianceBlockReason(error.reason ?? "");
+        setMessage("");
+      } else {
+        setLoadState("error");
+        setMessage(getErrorMessage(error, "创建双人房失败"));
+      }
     } finally {
       setBusy(false);
     }
@@ -2120,6 +2211,13 @@ export function App() {
         setMessage(`本局已结束：${outcomeLabels[nextSession.outcome]}。`);
       }
     } catch (error) {
+      // 合规门 403：推进被宵禁/未实名/防沉迷超限拦截——渲染拦截横幅引导，不当作普通报错。
+      if (error instanceof APIError && error.status === 403) {
+        stopPhaseTransitionPolling();
+        setComplianceBlockReason(error.reason ?? "");
+        setBusy(false);
+        return;
+      }
       const recovered = recoverSession(error, applySessionSnapshot);
       let recoveredMessage = "";
       if (!recovered) {
@@ -2408,6 +2506,46 @@ export function App() {
     }
   }
 
+  // complianceBanner 是被合规门 403 拦截时的引导横幅（position:fixed，可在任意 return 内复用）。
+  // 仅『需实名』类拦截露出『去实名认证』按钮；宵禁/防沉迷只显示『知道了』。
+  const complianceBanner =
+    complianceBlockReason != null ? (
+      <ComplianceBlockedBanner
+        reason={complianceBlockReason}
+        onClose={() => setComplianceBlockReason(null)}
+        onGoRealname={() => {
+          setComplianceBlockReason(null);
+          setCompliancePanelOpen(true);
+        }}
+      />
+    ) : null;
+
+  // compliancePanelOverlay 是合规面板浮层（实名/生日登记 + 当前裁决），玩家可见，任意 return 内复用。
+  const compliancePanelOverlay = compliancePanelOpen ? (
+    <ComplianceGatePanel
+      accountId={accountUser?.id ?? ""}
+      onClose={() => setCompliancePanelOpen(false)}
+      onRequireLogin={() => {
+        setCompliancePanelOpen(false);
+        setStartMode("multiplayer");
+        setMessage("请先注册/登录账号，再进行实名认证。");
+      }}
+    />
+  ) : null;
+
+  // billingPanelOverlay 是商业化面板浮层（充值/会员/权益），玩家可见，任意 return 内复用。
+  const billingPanelOverlay = billingPanelOpen ? (
+    <BillingPanel
+      accountId={accountUser?.id ?? ""}
+      onClose={() => setBillingPanelOpen(false)}
+      onRequireLogin={() => {
+        setBillingPanelOpen(false);
+        setStartMode("multiplayer");
+        setMessage("请先注册/登录账号，再前往充值/会员。");
+      }}
+    />
+  ) : null;
+
   if (!session) {
     const hasResumeInput = duelJoinSessionID.trim() !== "" && duelJoinRoleToken.trim() !== "";
     return (
@@ -2641,6 +2779,16 @@ export function App() {
             </section>
           ) : null}
         </main>
+        {complianceBanner}
+        {compliancePanelOverlay}
+        {billingPanelOverlay}
+        {reportDialogOpen ? (
+          <ReportDialog
+            sessionId=""
+            reporter={accountUser?.display_name || accountUser?.username || ""}
+            onClose={() => setReportDialogOpen(false)}
+          />
+        ) : null}
       </div>
     );
   }
@@ -2971,6 +3119,47 @@ export function App() {
                   >
                     命运
                   </button>
+                  <button
+                    className={`action-button inline-action ${consentInboxOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setConsentInboxOpen((open) => !open)}
+                    disabled={!selectedUnitID}
+                    title={selectedUnitID ? "来意：看有没有别处的人想与这位角色发生牵连，由你替她拿主意" : "先选中一个角色，再查看其『来意』收件箱"}
+                  >
+                    来意
+                  </button>
+                  <button
+                    className={`action-button inline-action ${billingPanelOpen ? "action-button-primary" : ""}`}
+                    onClick={() => {
+                      setBillingPanelOpen((open) => !open);
+                      void trackFunnel("open_billing");
+                    }}
+                    title="充值 / 会员 / 已购权益"
+                  >
+                    充值
+                  </button>
+                  <button
+                    className={`action-button inline-action ${fieldBossModalOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setFieldBossModalOpen((open) => !open)}
+                    title="组队挑战野外强敌：勾选队员一同出战，按贡献分赃"
+                  >
+                    组队
+                  </button>
+                  <button
+                    className="action-button inline-action"
+                    onClick={() => setReportDialogOpen(true)}
+                    title="举报不当内容（可针对当前选中角色）"
+                  >
+                    举报
+                  </button>
+                  {developerMode ? (
+                    <button
+                      className={`action-button inline-action ${governancePanelOpen ? "action-button-primary" : ""}`}
+                      onClick={() => setGovernancePanelOpen((open) => !open)}
+                      title="运营/开发者：审计 · 举报管理台 · 隐私擦除"
+                    >
+                      治理台
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <div className="global-params-strip" aria-label="全局参数">
@@ -3414,6 +3603,152 @@ export function App() {
               initialUnitID={selectedUnitID}
               onClose={() => setFatePanelOpen(false)}
             />
+          ) : null}
+          {/* 跨玩家同意收件箱：scoped 到当前选中角色（SessionSnapshot 无 world_id，故不传 worldId——组件会隐藏『惊动世界』按钮，收件箱仍可用）。*/}
+          {showHUD && consentInboxOpen && selectedUnitID ? (
+            <ConsentInbox
+              unitId={selectedUnitID}
+              unitName={selectedUnit?.identity.name}
+              onClose={() => setConsentInboxOpen(false)}
+            />
+          ) : null}
+          {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}
+          {billingPanelOverlay}
+          {compliancePanelOverlay}
+          {/* 合规 403 拦截横幅（建局/推进被门拦时引导实名/告知宵禁/防沉迷）。*/}
+          {complianceBanner}
+          {/* 举报弹窗（玩家可见，不受 developer 门，可针对当前选中角色）。*/}
+          {reportDialogOpen ? (
+            <ReportDialog
+              sessionId={session.id}
+              targetUnitId={selectedUnitID ?? undefined}
+              reporter={accountUser?.display_name || accountUser?.username || ""}
+              onClose={() => setReportDialogOpen(false)}
+            />
+          ) : null}
+          {/* 运营/开发者：审计·举报管理台 + 隐私擦除（developer 门控）。*/}
+          {developerMode && governancePanelOpen ? (
+            <GovernancePanel
+              sessionId={session.id}
+              onClose={() => setGovernancePanelOpen(false)}
+              onOpenPrivacyErase={() => setPrivacyEraseOpen(true)}
+            />
+          ) : null}
+          {developerMode && privacyEraseOpen ? (
+            <PrivacyEraseDialog sessionId={session.id} onClose={() => setPrivacyEraseOpen(false)} />
+          ) : null}
+          {/* 组队 PvE（野外 Boss）结果弹层。*/}
+          {showHUD && fieldBossResult ? (
+            <>
+              <div
+                className="unit-detail-backdrop"
+                onClick={() => setFieldBossResult(null)}
+                aria-hidden="true"
+              />
+              <aside className="unit-detail-popover" role="dialog" aria-label="组队 PvE 结果">
+                <button
+                  type="button"
+                  className="unit-detail-close"
+                  onClick={() => setFieldBossResult(null)}
+                  aria-label="关闭组队结果"
+                >
+                  ×
+                </button>
+                <div className="unit-detail-hero">
+                  <div>
+                    <p className="card-kicker">组队 / 野外强敌</p>
+                    <h3>{fieldBossResult.Victory ? "组队告捷" : "组队折戟"}</h3>
+                    <p className="unit-detail-meta">
+                      威胁 {fieldBossResult.ThreatID || "未知"} · {fieldBossResult.Rounds} 回合 ·{" "}
+                      {(fieldBossResult.Members?.length ?? 0)} 人出战
+                    </p>
+                  </div>
+                </div>
+                {fieldBossResult.Members && fieldBossResult.Members.length > 0 ? (
+                  <div className="unit-detail-section">
+                    <span className="shop-label">各队员结算</span>
+                    {fieldBossResult.Members.map((member, index) => {
+                      const memberUnit = allUnits.find((u) => u.id === member.UnitID);
+                      const memberName = memberUnit?.identity.name ?? member.UnitID;
+                      return (
+                        <div key={`${member.UnitID}-${index}`} style={{ marginBottom: 8 }}>
+                          <p style={{ margin: 0 }}>
+                            <strong>{memberName}</strong> · {member.Outcome} · 贡献 {member.Contribution}
+                            {member.PenaltyLayer > 0 ? ` · 后果第 ${member.PenaltyLayer} 层` : ""}
+                          </p>
+                          {member.Awards && member.Awards.length > 0 ? (
+                            <div className="inventory-chip-list">
+                              {member.Awards.map((award, awardIndex) => (
+                                <span key={`${award.ItemID}-${awardIndex}`} className="inventory-chip">
+                                  {award.ItemID} ×{award.Quantity}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {member.InboxCard ? (
+                            <p style={{ margin: "2px 0 0", opacity: 0.85 }}>{member.InboxCard}</p>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </aside>
+            </>
+          ) : null}
+          {/* 组队 PvE 选人弹窗（多选队员→ resolveFieldBoss）。*/}
+          {showHUD && fieldBossModalOpen ? (
+            <>
+              <div
+                className="unit-detail-backdrop"
+                onClick={() => setFieldBossModalOpen(false)}
+                aria-hidden="true"
+              />
+              <aside className="unit-detail-popover" role="dialog" aria-label="组队出战选人">
+                <button
+                  type="button"
+                  className="unit-detail-close"
+                  onClick={() => setFieldBossModalOpen(false)}
+                  aria-label="关闭组队选人"
+                >
+                  ×
+                </button>
+                <div className="unit-detail-hero">
+                  <div>
+                    <p className="card-kicker">组队 / PvE</p>
+                    <h3>组队挑战野外强敌</h3>
+                    <p className="unit-detail-meta">勾选要结伴出战的队员，按贡献分赃；失败各担后果。</p>
+                  </div>
+                </div>
+                <div className="unit-detail-section">
+                  {controlledUnits.length === 0 ? (
+                    <p>当前没有可出战的队员。</p>
+                  ) : (
+                    controlledUnits.map((unit) => (
+                      <label key={unit.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={fieldBossSelectionIDs.includes(unit.id)}
+                          onChange={() => toggleFieldBossMember(unit.id)}
+                          disabled={fieldBossBusy}
+                        />
+                        <span>{unit.identity.name}（HP {unit.status.hp}）</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="action-button action-button-primary"
+                  disabled={fieldBossBusy || fieldBossSelectionIDs.length === 0}
+                  onClick={() => {
+                    void handleFieldBoss();
+                  }}
+                >
+                  {fieldBossBusy ? "结算中…" : `出战（${fieldBossSelectionIDs.length} 人）`}
+                </button>
+              </aside>
+            </>
           ) : null}
           {showHUD && eliteEncounterResult ? (
             <>

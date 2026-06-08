@@ -394,7 +394,7 @@ func (service *Service) executeDialogue(
 		fmt.Sprintf("我和 %s 说了几句。", target.DisplayName()),
 	))
 	replyPayload, result, interaction, ok := service.requestUnitDialogueReply(ctx, *state, byID, actor, target, actorLine)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	appendAIDialogue(state, *target, replyPayload.Reply, result)
 	if service != nil {
 		_ = service.rememberUnitWithSource(ctx, target, state.TurnState.Turn, replyPayload.Memory, "unit_dialogue_reply", 1)
@@ -498,7 +498,7 @@ func (service *Service) executeTrade(
 		appendLog(state, "trade_offer", offerText, actor.ID, target.ID)
 	}
 	consent, result, interaction, ok := service.requestTradeConsent(ctx, *state, byID, actor, target, decision)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	service.recordTradeConsentDialogue(ctx, state, target, consent, result)
 	if !ok || !consent.Accepted {
 		appendLog(state, "trade_rejected", tradeRejectedText(decision, target, consent), target.ID, actor.ID)

@@ -138,7 +138,8 @@ func (service *Service) resolveTurnRandomEvent(ctx context.Context, state *State
 			),
 		},
 	}
-	appendLLMInteraction(
+	service.appendLLMInteractionWithSpend(
+		ctx,
 		state,
 		buildLLMInteraction(
 			*state,
@@ -162,7 +163,7 @@ func (service *Service) resolveTurnRandomEvent(ctx context.Context, state *State
 		effectSummary,
 		decision,
 	)
-	appendLLMInteraction(state, narrationInteraction)
+	service.appendLLMInteractionWithSpend(ctx, state, narrationInteraction)
 
 	appendAIDialogue(state, *actor, narration.Bubble, narrationResult)
 	service.rememberUnitBestEffort(ctx, actor, state.TurnState.Turn, narration.Memory)

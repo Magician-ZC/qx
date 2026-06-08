@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/storage/dbdialect"
@@ -94,4 +96,36 @@ func (service *Service) SeedVillageBestEffort(ctx context.Context, sessionID str
 		log.Printf("seed village best-effort failed (session=%s faction=%s): %v; persisted %d", sessionID, factionID, err, len(villagers))
 	}
 	return len(villagers)
+}
+
+// mainVillageEnabled 读 QUNXIANG_MAIN_VILLAGE（true/1/yes/on 视为开），默认关 → seedVillageForSession no-op。
+// 主战局默认不播种 20 人关系网：避免对所有存量/默认建局链路强行造人（每局多落库 20 行 + 关系/锚），
+// 只有显式开启才在主局兑现命运开盒「她身边已有二十个有名有姓的人」承诺。与 onboarding 的 with_village 查询参数互不影响。
+func mainVillageEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_MAIN_VILLAGE"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// seedVillageForSession 把「主战局是否在玩家身边织 20 人出生关系网」的策略集中于一处：建局/组队的两条主局路径
+// （createSinglePlayerWithMapScript 非 draft 路径与 ApplyOpeningDraft）各调一行即可，避免漏播/口径漂移。
+// 仿 seedAmbientForNewUnit 的集中化 idiom：单人局只为玩家阵营织本局关系网（worldID 传空=不入世界，安全）。
+//
+// 纪律与不变量：
+//  1. flag-gated：QUNXIANG_MAIN_VILLAGE 关时（默认）整方法 no-op、零行为变化、零 DB 写——对默认建局链路无成本，
+//     也避免对存量局/重连重复造人。
+//  2. best-effort：复用 SeedVillageBestEffort 的吞错包装，任何失败只记日志，**绝不**中断或影响建局/组队。
+//  3. 确定性：seed 由建局 RandomSeed 派生（state.RandomSeed+1，与 onboarding /api/units/bootstrap?with_village=1 同口径），
+//     避免与玩家主单位撞种子；同一局重复调用是确定性一致的，但会新建行，故调用方须只在建局/组队各调一次。
+//
+// 注意：调用点应放在「玩家单位刚落库、紧邻 seedAmbientForUnits」处，让村民与玩家在同一建局事务边界内成形。
+func (service *Service) seedVillageForSession(ctx context.Context, state *State) {
+	if service == nil || state == nil || !mainVillageEnabled() {
+		return
+	}
+	// worldID 传空：单人局当前无世界，只织本局关系网（不强行 world.Create）。
+	_ = service.SeedVillageBestEffort(ctx, state.ID, state.PlayerFactionID, "", state.RandomSeed+1)
 }

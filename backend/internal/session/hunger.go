@@ -328,6 +328,90 @@ func (service *Service) applyStatusMutation(
 	return nil
 }
 
+// pendingStatusMutation 承载一次待批量提交的状态变更及其回写目标。
+// record 指向调用方持有的单位记录指针：批量应用后会用最终记录回写它，
+// 与逐次 applyStatusMutation 的 `*record = result.Record` 语义一致。
+type pendingStatusMutation struct {
+	record     *unit.Record
+	field      status.Field
+	delta      float64
+	reasonCode events.ReasonCode
+	reasonText string
+	// after 在该条变更的标准副作用（记录回写 / raw event / stat_change 日志）补齐之后立即执行，
+	// 用于复刻逐次调用时紧随状态变更的额外副作用（如 morale_shift 日志、暴怒授予），
+	// 从而保持与逐次路径完全一致的日志/事件交错顺序。可为 nil。
+	after func() error
+}
+
+// applyStatusMutationsBatch 把一组状态变更聚成一次 Mutator.ApplyBatch 提交，降低 DB 往返，
+// 同时严格复刻 applyStatusMutation 的副作用顺序（批应用后按入参顺序逐条回写记录指针、追加
+// raw event 与 stat_change 日志）。语义与逐次调用 applyStatusMutation 完全等价，仅 DB 写入被收敛。
+func (service *Service) applyStatusMutationsBatch(
+	ctx context.Context,
+	state *State,
+	pending []pendingStatusMutation,
+) error {
+	if len(pending) == 0 {
+		return nil
+	}
+
+	mutations := make([]status.Mutation, len(pending))
+	for i := range pending {
+		record := pending[i].record
+		mutations[i] = status.Mutation{
+			UnitID:     record.ID,
+			Turn:       state.TurnState.Turn,
+			Field:      pending[i].field,
+			Delta:      pending[i].delta,
+			ReasonCode: pending[i].reasonCode,
+			ReasonText: pending[i].reasonText,
+			Actors:     []string{record.ID},
+			Location:   fmt.Sprintf("hex_%d_%d", record.Status.PositionQ, record.Status.PositionR),
+		}
+	}
+
+	results, err := service.mutator.ApplyBatch(ctx, mutations)
+	if err != nil {
+		return err
+	}
+
+	// 结果按入参顺序对齐：逐条回写记录指针并补齐与逐次 Apply 等价的事件/日志副作用。
+	for i := range pending {
+		record := pending[i].record
+		result := results[i]
+		*record = result.Record
+		appendRawEvent(state, rawEventSpec{
+			source:       "status",
+			kind:         string(result.Payload.Field),
+			summary:      result.Payload.ReasonText,
+			actorUnitID:  record.ID,
+			targetUnitID: record.ID,
+			payload:      result.Payload,
+		})
+		appendLog(
+			state,
+			"stat_change",
+			fmt.Sprintf(
+				"%s 数值变动 %s %.2f (%.2f -> %.2f) [%s]",
+				record.DisplayName(),
+				result.Payload.Field,
+				result.Payload.Delta,
+				result.Payload.Before,
+				result.Payload.After,
+				result.Payload.ReasonCode,
+			),
+			record.ID,
+			record.ID,
+		)
+		if pending[i].after != nil {
+			if err := pending[i].after(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // turnHungerCost 计算单位在当前地形下的基础回合饥饿消耗。
 func turnHungerCost(snapshot world.MapSnapshot, record unit.Record) int {
 	base := 4

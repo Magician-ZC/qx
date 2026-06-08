@@ -471,6 +471,109 @@ export type PrivacyPurgeResult = {
   hall_entries_deleted: number;
   phase_snapshots_deleted: number;
   memories_fts_deleted: number;
+  // 与后端补齐的删除计数（详见 backend privacy purge 结果）。
+  llm_interactions_deleted?: number;
+  decision_traces_deleted?: number;
+  raw_events_deleted?: number;
+  wake_queue_deleted?: number;
+  decision_jobs_deleted?: number;
+};
+
+// ---- 商业化 / 合规 / 跨玩家 / PvE 组队 / 漏斗埋点（P2 端点的客户端类型）----
+
+// EncounterAward 是一次 elite/PvE 遭遇分到的一件战利品（与后端 encounter.Award 对齐，Go 默认大写键名）。
+export type EncounterAward = {
+  ItemID: string;
+  UnitID: string;
+  Quantity: number;
+  Reason: string;
+};
+
+// BillingSKU 是一个售卖项目，与后端 billing.SKU 对齐（json tag 蛇形）。
+export type BillingSKU = {
+  id: string;
+  kind: string; // subscription / one_time / consumable
+  name: string;
+  price_cents: number; // 最小货币单位（分）
+  period: string;
+  active: boolean;
+  created_at: string;
+};
+
+// BillingCharge 是一条计费流水，与后端 billing.Charge 对齐（purchase 返回）。
+export type BillingCharge = {
+  id: string;
+  account_id: string;
+  sku_id: string;
+  amount_cents: number;
+  provider: string;
+  receipt_ref: string;
+  status: string;
+  created_at: string;
+};
+
+// Entitlement 是某账户对某 SKU 的当前权益态，与后端 billing.Entitlement 对齐。
+export type Entitlement = {
+  account_id: string;
+  sku_id: string;
+  status: string; // active / expired / ...
+  granted_at: string;
+  expires_at: string;
+};
+
+// BillingQuota 是账户级 LLM 成本配额闸结果（true=未超额）。
+export type BillingQuota = {
+  allowed: boolean;
+};
+
+// ComplianceGate 是出海合规前置门裁决（未实名/宵禁/防沉迷）。
+export type ComplianceGate = {
+  allowed: boolean;
+  minor_mode: boolean;
+  reason: string;
+};
+
+// ConsentRequest 是一条跨玩家异步同意请求，与后端 session.ConsentRequest 对齐。
+export type ConsentRequest = {
+  id: string;
+  world_id: string;
+  actor_unit_id: string;
+  target_unit_id: string;
+  interaction: string;
+  tier: string;
+  status: string; // pending / accepted / rejected / expired
+  event_id: string;
+  created_at: string;
+  resolved_at?: string;
+};
+
+// FieldBossMemberOutcome 某队员在野外 Boss 组队遭遇中的结算。
+// 注意：后端 FieldBossMemberOutcome 无 json tag，键名为 Go 大写字段名。
+export type FieldBossMemberOutcome = {
+  UnitID: string;
+  Outcome: string; // contributed / fled / down
+  DamageDealt: number;
+  DamageTaken: number;
+  Contribution: number;
+  Awards: EncounterAward[] | null;
+  PenaltyLayer: number; // 失败时经分级闸落地的后果层，0=未触发
+  InboxCard: string; // 祖魂语气命运卡
+};
+
+// FieldBossResult 野外 Boss/组队遭遇的整体结算（后端 Go 大写键名，无 json tag）。
+export type FieldBossResult = {
+  ThreatID: string;
+  Victory: boolean;
+  Rounds: number;
+  Members: FieldBossMemberOutcome[] | null;
+};
+
+// LeadEvent 是漏斗埋点的提交载荷（POST /api/leads，无鉴权）。
+export type LeadEvent = {
+  kind: string;
+  vid: string;
+  email?: string;
+  source?: string;
 };
 
 export type AccountUser = {

@@ -12,6 +12,7 @@ import {
   subscribeSessionStream,
   type FateCard,
 } from "../session/api";
+import { computeFateCountdown, formatFateCountdown } from "./countdown";
 
 type Props = {
   sessionId: string;
@@ -78,10 +79,16 @@ export function FateView({ sessionId, unitId }: Props) {
         if (seenRef.current.has(key)) return;
         seenRef.current.add(key);
         const route = String(payload.route ?? "");
+        // WS payload 通常不含 expires_at/countdown_hours（后端只推 occurred_at 或更少）；
+        // 有就透传，没有则留空，由 computeFateCountdown 按 occurred_at + 48h 兜底。
         const card: FateCard = {
           kind: route === "pending" ? "pending" : "highlight",
           decision_id: payload.decision_id ? String(payload.decision_id) : undefined,
           narrative: cardText(payload),
+          occurred_at: payload.occurred_at ? String(payload.occurred_at) : undefined,
+          expires_at: payload.expires_at ? String(payload.expires_at) : undefined,
+          countdown_hours:
+            typeof payload.countdown_hours === "number" ? payload.countdown_hours : undefined,
         };
         setCards((prev) => [card, ...prev]);
       },
@@ -156,6 +163,7 @@ export function FateView({ sessionId, unitId }: Props) {
         <section className="fate-pending">
           <div className="fate-slot-title">有件关乎她的事，在等你拿个主意</div>
           <p className="fate-pending-text">{pending[0].narrative}</p>
+          <FateCountdownBar card={pending[0]} />
           <div className="fate-actions">
             <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "let_her", "由她去")}>
               由她去（信她）
@@ -214,6 +222,22 @@ export function FateView({ sessionId, unitId }: Props) {
       )}
     </div>
   );
+}
+
+// FateCountdownBar 渲染待决策卡的「拿主意倒计时」，每秒实时倒数；过期标灰、剩余 <6h 标红。
+// 无任何时间锚（feed 未给 countdown/expires，WS 也无 occurred_at）时不渲染。
+function FateCountdownBar({ card }: { card: FateCard }) {
+  // tick 仅用于驱动每秒重渲；实际剩余由 computeFateCountdown 按当前时刻实时计算。
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const cd = computeFateCountdown(card);
+  if (!cd.available) return null;
+  const cls = cd.expired ? "fate-countdown fate-countdown-expired" : cd.urgent ? "fate-countdown fate-countdown-urgent" : "fate-countdown";
+  return <div className={cls}>{formatFateCountdown(cd)}</div>;
 }
 
 function Bar({ label, value, max, tone }: { label: string; value: number; max: number; tone: string }) {

@@ -292,6 +292,9 @@ func (s *Service) getSKU(ctx context.Context, skuID string) (SKU, error) {
 // Purchase 执行一次购买：经 ReceiptVerifier 校验收据 → 校验过才写 iap_receipt(verified=1)+entitlement(active)+charge(captured)。
 // 收据校验**不通过**则只落 charge=failed 流水（审计留痕），返回错误。stub 默认恒通过（见 stubVerifier）。
 // receiptBlob 是平台收据原文（Apple/Google）；platform∈{apple,google,...}。金额取自 SKU.price_cents。
+//
+// 幂等：同一账户+SKU+非空 receipt_ref 的 captured 流水若已存在，直接返回既有 charge（不重复落账、不重复 grant）。
+// 防客户端重试 / 网关回放导致的重复扣账；receipt_ref 是平台返回的外部凭据（apple/google 的 transaction_id/orderId），天然唯一。
 func (s *Service) Purchase(ctx context.Context, accountID, skuID, platform, receiptBlob string) (Charge, error) {
 	if s.db == nil {
 		return Charge{}, fmt.Errorf("billing: nil db")
@@ -337,14 +340,46 @@ func (s *Service) Purchase(ctx context.Context, accountID, skuID, platform, rece
 		return charge, fmt.Errorf("billing purchase: receipt verification failed for platform %q", platform)
 	}
 
+	// 幂等闸：非空 receipt_ref 已有 captured 流水 → 复用既有 charge，不重复落账/不重复 grant。
+	// 空 receipt_ref（如某些 stub/降级路径）不是稳定幂等键，跳过去重照常落账。
+	if strings.TrimSpace(receiptRef) != "" {
+		if existing, found, dupErr := s.findCapturedChargeByReceipt(ctx, accountID, skuID, receiptRef); dupErr != nil {
+			return Charge{}, dupErr
+		} else if found {
+			// 既有权益视为已授（grantEntitlement 本身幂等，但此处直接短路避免无谓写）。
+			return existing, nil
+		}
+	}
+
 	// 校验通过：先授权益（active），再落 captured 流水。
-	if err := s.grantEntitlement(ctx, accountID, skuID, sku.Period, now); err != nil {
+	if err := s.grantEntitlement(ctx, accountID, skuID, sku.Kind, sku.Period, now); err != nil {
 		return Charge{}, err
 	}
 	if err := s.insertCharge(ctx, charge); err != nil {
 		return Charge{}, err
 	}
 	return charge, nil
+}
+
+// findCapturedChargeByReceipt 查同一账户+SKU+receipt_ref 是否已有 captured 流水（购买幂等键）。
+// 找到返回既有 charge 与 found=true；无则 found=false。receipt_ref 是平台外部凭据，天然唯一，作幂等键安全。
+// 取最早一条（created_at ASC）以保持「首次成功购买」语义稳定。
+func (s *Service) findCapturedChargeByReceipt(ctx context.Context, accountID, skuID, receiptRef string) (Charge, bool, error) {
+	var c Charge
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, account_id, sku_id, amount_cents, provider, receipt_ref, status, created_at
+		   FROM billing_charges
+		  WHERE account_id = ? AND sku_id = ? AND receipt_ref = ? AND status = 'captured'
+		  ORDER BY created_at ASC, id ASC LIMIT 1`,
+		accountID, skuID, receiptRef).
+		Scan(&c.ID, &c.AccountID, &c.SKUID, &c.AmountCents, &c.Provider, &c.ReceiptRef, &c.Status, &c.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Charge{}, false, nil
+		}
+		return Charge{}, false, err
+	}
+	return c, true, nil
 }
 
 // insertReceipt 写一条 IAP 收据存证。
@@ -367,20 +402,122 @@ func (s *Service) insertCharge(ctx context.Context, c Charge) error {
 	return err
 }
 
-// grantEntitlement 幂等授予/续期账户对某 SKU 的权益（status=active）。expires_at 由调用方按 period 计；此处留空（订阅续期逻辑接真网关时补）。
-func (s *Service) grantEntitlement(ctx context.Context, accountID, skuID, _period, now string) error {
+// grantEntitlement 幂等授予/续期账户对某 SKU 的权益（status=active）。
+//
+// expires_at 由本函数按 kind/period 计算：
+//   - 订阅类（kind 含 "subscription"/"订阅" 或 period 非空）→ 从 now 起按 period 推算到期时间（subscriptionExpiry）；
+//     续期（ON CONFLICT）时同步刷新 expires_at（按本次 now 续期，最简单可叠加策略由真网关续订逻辑后续接管）。
+//   - 一次性/消耗品（period 空且非订阅 kind）→ expires_at 留 NULL（永久权益）。
+//
+// expiry 为 nil 时写 SQL NULL（沿用原永久语义）；非 nil 时写定宽时间串（与 nowTimestamp 同格式，字典序==时间序）。
+func (s *Service) grantEntitlement(ctx context.Context, accountID, skuID, kind, period, now string) error {
+	expiry := subscriptionExpiry(kind, period, now) // nil=永久（一次性/消耗品）。
+	var expiresArg interface{}
+	if expiry != nil {
+		expiresArg = *expiry
+	} // 否则保持 nil → SQL NULL。
 	if dbdialect.IsMySQL(s.db) {
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO account_entitlements (account_id, sku_id, status, granted_at, expires_at) VALUES (?,?,?,?,?)
-			 ON DUPLICATE KEY UPDATE status=VALUES(status), granted_at=VALUES(granted_at)`,
-			accountID, skuID, "active", now, nil)
+			 ON DUPLICATE KEY UPDATE status=VALUES(status), granted_at=VALUES(granted_at), expires_at=VALUES(expires_at)`,
+			accountID, skuID, "active", now, expiresArg)
 		return err
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO account_entitlements (account_id, sku_id, status, granted_at, expires_at) VALUES (?,?,?,?,?)
-		 ON CONFLICT(account_id, sku_id) DO UPDATE SET status=excluded.status, granted_at=excluded.granted_at`,
-		accountID, skuID, "active", now, nil)
+		 ON CONFLICT(account_id, sku_id) DO UPDATE SET status=excluded.status, granted_at=excluded.granted_at, expires_at=excluded.expires_at`,
+		accountID, skuID, "active", now, expiresArg)
 	return err
+}
+
+// isSubscriptionSKU 判某 SKU 是否订阅类：kind 含 "subscription"/"订阅"，或 period 非空（有周期即按订阅计到期）。
+func isSubscriptionSKU(kind, period string) bool {
+	k := strings.ToLower(strings.TrimSpace(kind))
+	if strings.Contains(k, "subscription") || strings.Contains(k, "订阅") || strings.Contains(k, "subscribe") {
+		return true
+	}
+	return strings.TrimSpace(period) != ""
+}
+
+// subscriptionExpiry 按 kind/period 算订阅到期时间串（与 nowTimestamp 同格式）；非订阅或无法解析周期返回 nil（永久）。
+//
+// period 采用 ISO-8601 duration 子集（PRD 的 SKU.period 约定，如 "P1M"=1 月、"P7D"=7 天、"P1Y"=1 年、"P1W"=1 周）。
+// 解析失败（未知/空周期）但 kind 为订阅类时，回退默认 1 个月（保守给到期，避免订阅退化成永久）。
+func subscriptionExpiry(kind, period, now string) *string {
+	if !isSubscriptionSKU(kind, period) {
+		return nil
+	}
+	base, err := time.Parse("2006-01-02 15:04:05", strings.TrimSpace(now))
+	if err != nil {
+		base = time.Now().UTC()
+	}
+	d, ok := parseISOPeriod(period)
+	if !ok {
+		// 订阅类但周期不可解析 → 保守默认 1 个月，绝不退化成永久。
+		d = isoPeriod{months: 1}
+	}
+	exp := base.AddDate(d.years, d.months, d.days)
+	out := exp.UTC().Format("2006-01-02 15:04:05")
+	return &out
+}
+
+// isoPeriod 是 ISO-8601 duration 的本流程子集（仅年/月/日；周折算为 7 日）。
+type isoPeriod struct {
+	years  int
+	months int
+	days   int
+}
+
+// parseISOPeriod 解析 ISO-8601 duration 子集："P" 前缀 + 数字+单位（Y/M/W/D）。
+// 支持组合（如 "P1Y2M10D"、"P2W"）；不支持时间部分（T...）。成功返回 (period, true)，否则 (零值, false)。
+func parseISOPeriod(period string) (isoPeriod, bool) {
+	p := strings.ToUpper(strings.TrimSpace(period))
+	if len(p) < 2 || p[0] != 'P' {
+		return isoPeriod{}, false
+	}
+	body := p[1:]
+	var out isoPeriod
+	var num int
+	var hasNum, hasUnit bool
+	for _, r := range body {
+		switch {
+		case r >= '0' && r <= '9':
+			num = num*10 + int(r-'0')
+			hasNum = true
+		case r == 'Y':
+			if !hasNum {
+				return isoPeriod{}, false
+			}
+			out.years += num
+			num, hasNum, hasUnit = 0, false, true
+		case r == 'M':
+			if !hasNum {
+				return isoPeriod{}, false
+			}
+			out.months += num
+			num, hasNum, hasUnit = 0, false, true
+		case r == 'W':
+			if !hasNum {
+				return isoPeriod{}, false
+			}
+			out.days += num * 7
+			num, hasNum, hasUnit = 0, false, true
+		case r == 'D':
+			if !hasNum {
+				return isoPeriod{}, false
+			}
+			out.days += num
+			num, hasNum, hasUnit = 0, false, true
+		default:
+			// 含时间部分(T) 或未知字符 → 不支持。
+			return isoPeriod{}, false
+		}
+	}
+	// 末尾残留未消费数字（无单位）或全程无任何单位 → 无效。
+	if hasNum || !hasUnit {
+		return isoPeriod{}, false
+	}
+	return out, true
 }
 
 // ListEntitlements 列出某账户的全部权益（供 router/前端展示已购）。
@@ -420,15 +557,23 @@ func (s *Service) CheckQuota(ctx context.Context, accountID string) (bool, error
 		return true, nil
 	}
 	var spent, capCol sql.NullInt64
+	var bucket sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT spent_micro_usd, cap_micro_usd FROM account_llm_quota WHERE account_id = ?`, accountID).
-		Scan(&spent, &capCol)
+		`SELECT spent_micro_usd, cap_micro_usd, period_bucket FROM account_llm_quota WHERE account_id = ?`, accountID).
+		Scan(&spent, &capCol, &bucket)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// 从未消耗 → 放行。
 			return true, nil
 		}
 		return true, err
+	}
+	// 跨计费周期重置：存量 period_bucket 与当期不同时，该行 spent 属上一周期，本期视作 spent=0 放行。
+	// 否则「每期上限」对超额账户退化成「终生封禁」——撞顶一次后新周期即使零消费也被持续拦截（AddSpend 在
+	// 被锁账户走不到正成本累加，存量行的旧 bucket+over-cap spent 永远停在那里）。口径与 session.quotaPeriodBucket() 一致。
+	curBucket := time.Now().UTC().Format("2006-01")
+	if bucket.String != curBucket {
+		return true, nil
 	}
 	capVal := capCol.Int64
 	if capVal <= 0 {

@@ -15,6 +15,8 @@
 //   - access token 由可注入的 TokenSource 提供；默认 envTokenSource 从 env(GOOGLE_PLAY_ACCESS_TOKEN) 读。
 //     **生产应换成 service-account OAuth2**（golang.org/x/oauth2/google 的 JWTConfigFromJSON →
 //     androidpublisher scope → ts.Token()），env token 仅便于本地/测试注入；切勿在生产长用静态 token。
+//     本模块刻意不引入 oauth2 依赖（保持依赖面最小），仅提供 ServiceAccountTokenSource 扩展点接口
+//     与 ServiceAccountCredentialsPath/AndroidPublisherScope 约定，由外层装配处实现并注入（见下）。
 //
 // 本文件是**真实代码路径**（真的发 HTTP GET、真的解析 purchaseState/orderId），非 return true 的占位。
 package billing
@@ -76,6 +78,39 @@ func (s staticTokenSource) Token(_ context.Context) (string, error) {
 	}
 	return s.token, nil
 }
+
+// ServiceAccountTokenSource 是「生产 service-account OAuth2 token 源」的扩展点接口。
+//
+// 为何是接口扩展点而非内建实现：本模块**刻意不引入** golang.org/x/oauth2/google 依赖（保持依赖面最小、
+// 离线可构建）。生产部署应在外层（cmd/server 装配处）用 service-account 实现本接口并经
+// NewGoogleReceiptVerifier 的 tokenSource 参数 / Service.WithVerifier 注入，从而获得「JWT 自动签名 + 自动刷新」。
+//
+// 推荐的外层实现骨架（伪代码，需在引入 golang.org/x/oauth2 后落地）：
+//
+//	import (
+//	    "golang.org/x/oauth2"
+//	    "golang.org/x/oauth2/google"
+//	)
+//	// 1) 从 env(GOOGLE_APPLICATION_CREDENTIALS) 读 service-account JSON 路径并加载；
+//	// 2) google.JWTConfigFromJSON(saJSON, "https://www.googleapis.com/auth/androidpublisher")；
+//	// 3) cfg.TokenSource(ctx) → oauth2.ReuseTokenSource 缓存 + 自动刷新；
+//	// 4) 适配为本接口：Token(ctx) 调 ts.Token() 取 AccessToken。
+//
+// 适配为本模块 TokenSource：因签名兼容（均 Token(ctx)(string,error)），实现本接口即可直接当 TokenSource 传入。
+type ServiceAccountTokenSource interface {
+	TokenSource
+}
+
+// ServiceAccountCredentialsPath 返回生产应读取的 service-account JSON 凭据路径（env GOOGLE_APPLICATION_CREDENTIALS）。
+// 供外层装配 ServiceAccountTokenSource 时统一取值；本模块自身不解析凭据（不引入 oauth2 依赖），仅暴露约定。
+// 返回空表示未配置 → 外层应回退 envTokenSource（静态 token，仅限本地/测试）。
+func ServiceAccountCredentialsPath() string {
+	return strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+}
+
+// AndroidPublisherScope 是 Google Play Developer API 所需的 OAuth2 scope。
+// 供外层装配 service-account TokenSource 时引用（JWTConfigFromJSON 的 scope 参数），避免散落硬编码。
+const AndroidPublisherScope = "https://www.googleapis.com/auth/androidpublisher"
 
 // GoogleReceiptVerifier 是 Google Play 收据校验器（真实 HTTP 网关）。
 // 仅处理 platform=="google"；其它平台返回 ErrPlatformUnsupported（由 platformVerifier 选择器分派）。

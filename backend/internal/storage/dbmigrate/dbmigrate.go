@@ -92,6 +92,13 @@ var EventScopeColumns = []Column{
 	{Name: "tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "BIGINT NOT NULL DEFAULT 0"},
 }
 
+// SessionAccountColumn 给 single_player_sessions 补 account_id 列（账户成本闭环列级落地）：
+// State.AccountID 仅塞 state_json 无法按账户聚合/风控，故去规范化为可查询列。
+// nullable —— 兼容现网匿名旧局（建局前无账户的历史 session 留空），由迁移幂等补列、不改既有语义。
+var SessionAccountColumn = []Column{
+	{Name: "account_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+}
+
 // AgentQueueSessionColumn 给 region-runner 调度队列补 session_id 列（M7.3-real-0）：保留期清理按 session_id 收敛
 // （与其余旁路表口径一致、与 region 取值解耦）。两表（agent_wake_queue/agent_decision_jobs）共用此列定义。
 // 现网若已建过 626af1e 的无 session_id 旧表，靠本迁移补列（schema.sql 的新表已含此列，故 fresh 库幂等跳过）。

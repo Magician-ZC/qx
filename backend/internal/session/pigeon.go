@@ -80,7 +80,7 @@ func (service *Service) resolvePigeonDispatches(ctx context.Context, state *Stat
 		}
 		attachable := candidatePigeonAttachItems(*sender)
 		choice, result, interaction, err := service.generatePigeonChoice(ctx, *state, byID, *sender, targets, attachable)
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 		if err != nil {
 			appendLog(state, "pigeon_error", "我这回合先不放信鸽。", sender.ID, "")
 			continue

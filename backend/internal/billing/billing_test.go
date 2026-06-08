@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 )
@@ -206,6 +207,51 @@ func TestBillingQuotaResetsAcrossPeriod(t *testing.T) {
 	}
 }
 
+// TestBillingCheckQuotaUnlocksAcrossPeriod 验证「被锁账户跨周期解封」的纯 CheckQuota 路径（评审修复 be-quota-lockout-1）。
+// 真实锁死场景：账户在某历史周期超额 → CheckQuota 返 false → 后续 LLM 全走 budget_guardrail 兜底（成本=0）→
+// recordLLMSpendBestEffort no-op → AddSpend 永不以正成本被调用 → 存量行的旧 period_bucket+over-cap spent 永远停在那里。
+// 若 CheckQuota 不按当期 period_bucket 比较，新周期即使零消费也被持续拦截（终生封禁）。这里直接塞一条「历史周期已花爆」的行，
+// 当期（time.Now wall-clock，绝不等于 "2000-01"）应放行。
+func TestBillingCheckQuotaUnlocksAcrossPeriod(t *testing.T) {
+	ctx, db := newBillingDB(t)
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	svc := NewService(db)
+	if !svc.Enabled() {
+		t.Fatalf("flag=true 时应 enabled")
+	}
+
+	// 历史周期 "2000-01" 已花爆（spent 远超 cap），且永不可能等于当期 UTC 月份。
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO account_llm_quota (account_id, period_bucket, spent_micro_usd, cap_micro_usd, updated_at) VALUES (?,?,?,?,?)`,
+		"acc-stale", "2000-01", int64(9_999_999), DefaultCapMicroUSD, "2000-01-01 00:00:00"); err != nil {
+		t.Fatalf("塞历史周期配额失败: %v", err)
+	}
+	allowed, err := svc.CheckQuota(ctx, "acc-stale")
+	if err != nil {
+		t.Fatalf("CheckQuota 失败: %v", err)
+	}
+	if !allowed {
+		t.Fatalf("历史周期超额、当期零消费应放行（否则终生封禁），得到 allowed=false")
+	}
+
+	// 对照：同当期超额仍应拦截（确保没把闸彻底拆掉）。先按 AddSpend 走到当期 bucket，再花爆。
+	if err := svc.AddSpend(ctx, "acc-stale", quotaCurBucketForTest(), DefaultCapMicroUSD+1); err != nil {
+		t.Fatalf("当期 AddSpend 失败: %v", err)
+	}
+	allowed, err = svc.CheckQuota(ctx, "acc-stale")
+	if err != nil {
+		t.Fatalf("CheckQuota 失败: %v", err)
+	}
+	if allowed {
+		t.Fatalf("当期超额应拦截，得到 allowed=true")
+	}
+}
+
+// quotaCurBucketForTest 返回当期 UTC 月份键（与 CheckQuota / session.quotaPeriodBucket 同口径）。
+func quotaCurBucketForTest() string {
+	return time.Now().UTC().Format("2006-01")
+}
+
 // rejectVerifier 是一个恒拒绝的收据校验器，用于验证「校验失败」路径。
 type rejectVerifier struct{}
 
@@ -268,5 +314,130 @@ func TestBillingPurchaseUnknownSKU(t *testing.T) {
 	svc := NewService(db)
 	if _, err := svc.Purchase(ctx, "acc-1", "no-such-sku", "apple", "x"); err == nil {
 		t.Fatalf("购买未知 SKU 应返回错误")
+	}
+}
+
+// TestBillingPurchaseIdempotent 验证同一 receipt_ref 重复 POST 不重复落账/不重复授权益。
+// 用 StaticTokenSource 不相关；stub verifier 的 receipt_ref 含 blob 前缀 → 同 blob 必同 ref，构成幂等键。
+func TestBillingPurchaseIdempotent(t *testing.T) {
+	ctx, db := newBillingDB(t)
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	svc := NewService(db) // 默认 stubVerifier（flag QUNXIANG_IAP_REAL 未设）。
+
+	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-idem", Kind: "consumable", Name: "宝石包", PriceCents: 600, Period: "", Active: true}); err != nil {
+		t.Fatalf("UpsertSKU 失败: %v", err)
+	}
+
+	const blob = "STABLE_RECEIPT_BLOB_FOR_IDEMPOTENCY"
+	first, err := svc.Purchase(ctx, "acc-idem", "sku-idem", "apple", blob)
+	if err != nil {
+		t.Fatalf("首次 Purchase 失败: %v", err)
+	}
+	if first.Status != "captured" {
+		t.Fatalf("首次应 captured，得到 %q", first.Status)
+	}
+
+	second, err := svc.Purchase(ctx, "acc-idem", "sku-idem", "apple", blob)
+	if err != nil {
+		t.Fatalf("重复 Purchase 不应报错（幂等），得到: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("重复 Purchase 应复用既有 charge.ID=%q，得到 %q", first.ID, second.ID)
+	}
+
+	// 只应有一条 captured 流水（不重复落账）。
+	var chargeCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM billing_charges WHERE account_id = ? AND sku_id = ? AND status = 'captured'`,
+		"acc-idem", "sku-idem").Scan(&chargeCount); err != nil {
+		t.Fatalf("查 charge 数失败: %v", err)
+	}
+	if chargeCount != 1 {
+		t.Fatalf("幂等应只落 1 条 captured 流水，得到 %d", chargeCount)
+	}
+
+	// 只应有一条权益。
+	ents, err := svc.ListEntitlements(ctx, "acc-idem")
+	if err != nil {
+		t.Fatalf("ListEntitlements 失败: %v", err)
+	}
+	if len(ents) != 1 {
+		t.Fatalf("幂等应只有 1 条权益，得到 %d", len(ents))
+	}
+}
+
+// TestBillingSubscriptionExpiry 验证订阅类 SKU（period 非空）授权益时写非空 expires_at，且按周期推算正确；
+// 一次性/消耗品（period 空）expires_at 留空。
+func TestBillingSubscriptionExpiry(t *testing.T) {
+	ctx, db := newBillingDB(t)
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	svc := NewService(db)
+
+	// 订阅月卡（P1M）。
+	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-sub", Kind: "subscription", Name: "月卡", PriceCents: 3000, Period: "P1M", Active: true}); err != nil {
+		t.Fatalf("UpsertSKU 订阅失败: %v", err)
+	}
+	// 消耗品（无周期）。
+	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-con", Kind: "consumable", Name: "钻石", PriceCents: 100, Period: "", Active: true}); err != nil {
+		t.Fatalf("UpsertSKU 消耗品失败: %v", err)
+	}
+
+	if _, err := svc.Purchase(ctx, "acc-sub", "sku-sub", "apple", "SUB_RECEIPT"); err != nil {
+		t.Fatalf("订阅 Purchase 失败: %v", err)
+	}
+	if _, err := svc.Purchase(ctx, "acc-sub", "sku-con", "apple", "CON_RECEIPT"); err != nil {
+		t.Fatalf("消耗品 Purchase 失败: %v", err)
+	}
+
+	// 订阅应有非空 expires_at。
+	var subExpires string
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(expires_at, '') FROM account_entitlements WHERE account_id = ? AND sku_id = ?`,
+		"acc-sub", "sku-sub").Scan(&subExpires); err != nil {
+		t.Fatalf("查订阅 expires_at 失败: %v", err)
+	}
+	if subExpires == "" {
+		t.Fatalf("订阅类应写非空 expires_at，得到空")
+	}
+
+	// 消耗品 expires_at 应为空（永久）。
+	var conExpires string
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(expires_at, '') FROM account_entitlements WHERE account_id = ? AND sku_id = ?`,
+		"acc-sub", "sku-con").Scan(&conExpires); err != nil {
+		t.Fatalf("查消耗品 expires_at 失败: %v", err)
+	}
+	if conExpires != "" {
+		t.Fatalf("消耗品应 expires_at 留空（永久），得到 %q", conExpires)
+	}
+}
+
+// TestBillingParseISOPeriod 单测 ISO-8601 duration 子集解析（年/月/日/周组合 + 非法输入）。
+func TestBillingParseISOPeriod(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantOK  bool
+		y, m, d int
+	}{
+		{"P1M", true, 0, 1, 0},
+		{"P7D", true, 0, 0, 7},
+		{"P1Y", true, 1, 0, 0},
+		{"P2W", true, 0, 0, 14},
+		{"P1Y2M10D", true, 1, 2, 10},
+		{"", false, 0, 0, 0},
+		{"1M", false, 0, 0, 0},   // 缺 P 前缀。
+		{"P", false, 0, 0, 0},    // 空 body。
+		{"P1", false, 0, 0, 0},   // 缺单位。
+		{"PT1H", false, 0, 0, 0}, // 时间部分不支持。
+		{"PM", false, 0, 0, 0},   // 单位前无数字。
+	}
+	for _, c := range cases {
+		got, ok := parseISOPeriod(c.in)
+		if ok != c.wantOK {
+			t.Fatalf("parseISOPeriod(%q) ok=%v 期望 %v", c.in, ok, c.wantOK)
+		}
+		if ok && (got.years != c.y || got.months != c.m || got.days != c.d) {
+			t.Fatalf("parseISOPeriod(%q)=%+v 期望 y=%d m=%d d=%d", c.in, got, c.y, c.m, c.d)
+		}
 	}
 }

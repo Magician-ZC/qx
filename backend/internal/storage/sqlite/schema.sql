@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS ground_loot_drops (
 CREATE TABLE IF NOT EXISTS single_player_sessions (
   id TEXT PRIMARY KEY,
   state_json TEXT NOT NULL DEFAULT '{}',
+  account_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

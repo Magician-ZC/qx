@@ -64,3 +64,22 @@ func authedAccountID(accounts *account.Service, c *gin.Context) (string, bool) {
 	}
 	return user.ID, true
 }
+
+// softAccountID 软解析账户 ID：用于建局/合规门控这类「有 token 则归账、无 token 则匿名放行」的端点。
+// 与 authedAccountID 的区别：本函数**绝不写响应、绝不 Abort**——账户服务不可用 / token 缺失 / token 无效
+// 一律静默返回空字符串（匿名），由调用方决定匿名语义（建局匿名局、合规门匿名放行）。
+// 这样既能在玩家登录时贯穿 accountID（成本归账 / 合规门控），又不破坏未登录玩家的原型默认开放体验。
+func softAccountID(accounts *account.Service, c *gin.Context) string {
+	if accounts == nil || c == nil {
+		return ""
+	}
+	token := account.ExtractBearerToken(c.GetHeader("Authorization"))
+	if token == "" {
+		return ""
+	}
+	user, err := accounts.CurrentUser(c.Request.Context(), token)
+	if err != nil {
+		return ""
+	}
+	return user.ID
+}

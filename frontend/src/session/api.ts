@@ -4,9 +4,18 @@ import type {
   AccountLoginResult,
   AccountUser,
   AuditBundle,
+  BillingCharge,
+  BillingQuota,
+  BillingSKU,
+  ComplianceGate,
+  ConsentRequest,
   DialogueMessage,
   BattleUnit,
   DuelRoomStatus,
+  EncounterAward,
+  Entitlement,
+  FieldBossResult,
+  LeadEvent,
   ModerationReport,
   PrivacyEraseOptions,
   PrivacyEraseResult,
@@ -20,32 +29,47 @@ const API_BASE =
   import.meta.env.VITE_API_BASE_URL ??
   (import.meta.env.DEV ? "http://127.0.0.1:8080" : window.location.origin);
 const developerModeStorageKey = "qunxiang.developer.mode.v1";
+const accountTokenStorageKey = "qunxiang.account.token.v1";
 let sessionRoleToken = "";
+// opsToken 是运营态鉴权令牌（X-Ops-Token）：治理/审计/隐私/同意等 ops 端点携带。
+// 原型默认无 token，后端对缺头放行；运营态经 setOpsToken 注入后这些端点才带头。
+let opsToken = "";
+// accountToken 是账户登录令牌（Authorization: Bearer）。billing/compliance 端点强制；
+// 建局/advance-phase 软带（已登录才带，让后端归账+合规门控）。从 localStorage 恢复以跨刷新保活。
+let accountToken = "";
+try {
+  accountToken = window.localStorage.getItem(accountTokenStorageKey) ?? "";
+} catch {
+  accountToken = "";
+}
 export type DirectiveScope = "doctrine" | "task" | "order";
 
 type SessionStreamHandlers = {
   onSnapshot?: (snapshot: SessionSnapshot, meta: Record<string, unknown>) => void;
   onLog?: (entry: SessionLog) => void;
   onError?: (error: unknown) => void;
+  // onFateInbox 收到 fate_inbox 推送的原始 payload（整体透传，不裁字段）。
+  // 后端 WS payload 只含 unit_id/route/decision_id/narrative/relevance——**不含 expires_at/countdown_hours/occurred_at**。
+  // 故倒计时不能由 WS 直接取：收到推送后应调 getFateFeed(unitID) 拉最新 feed（pending 卡才带 expires_at/countdown_hours）。
   onFateInbox?: (payload: Record<string, unknown>) => void;
   onFateEcho?: (payload: Record<string, unknown>) => void;
 };
 
 // FateCard 是命运四槽界面的一张卡（高光/待决策/回响）。
+// expires_at/countdown_hours 仅 pending 卡随 feed 返回，供前端渲染倒计时；
+// 若来源（如 WS fate_inbox）只给 occurred_at，前端可按 occurred_at + 48h 自算。
 export type FateCard = {
   kind: "highlight" | "pending" | "echo";
   decision_id?: string;
   narrative: string;
   occurred_at?: string;
+  expires_at?: string;
+  countdown_hours?: number;
 };
 
 // EliteAward 是一次 elite/PvE 遭遇分到的一件战利品（与后端 encounter.Award 对齐，Go 默认大写键名）。
-export type EliteAward = {
-  ItemID: string;
-  UnitID: string;
-  Quantity: number;
-  Reason: string;
-};
+// 与 types.ts 的 EncounterAward 同构，保留旧名作别名供既有引用沿用。
+export type EliteAward = EncounterAward;
 
 // EliteEncounterResult 与后端 session.EliteEncounterResult 对齐（无 json tag，键名为 Go 字段名）。
 export type EliteEncounterResult = {
@@ -62,11 +86,17 @@ export type EliteEncounterResult = {
 
 export class APIError extends Error {
   session?: SessionSnapshot;
+  // HTTP 状态码（如 403 合规拦截 / 401 未授权），供上层精准分支。
+  status?: number;
+  // 合规门 403 时后端给出的 reason（宵禁/未实名/防沉迷超限），不被吞掉，供上层提示玩家。
+  reason?: string;
 
-  constructor(message: string, session?: SessionSnapshot) {
+  constructor(message: string, session?: SessionSnapshot, status?: number, reason?: string) {
     super(message);
     this.name = "APIError";
     this.session = session;
+    this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -80,13 +110,32 @@ function developerDebugEnabled(): boolean {
 
 export type BattleMapSizeID = "small" | "medium" | "large";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// RequestAuthOptions 控制本次请求的鉴权头注入策略（在 RequestInit 之外）。
+type RequestAuthOptions = {
+  // withOps=true 时携带 X-Ops-Token（取模块级 opsToken，空则不带——后端原型放行）。
+  withOps?: boolean;
+  // bearer="require" 强制带 Authorization: Bearer（无 token 仍发请求，由后端 401）；
+  // bearer="soft" 仅在已登录（accountToken 非空）时带；不传/为 false 时不带。
+  bearer?: "require" | "soft";
+};
+
+async function request<T>(path: string, init?: RequestInit, auth?: RequestAuthOptions): Promise<T> {
   const headers = new Headers(init?.headers ?? {});
   if (sessionRoleToken.trim() !== "") {
     headers.set("X-Session-Role-Token", sessionRoleToken.trim());
   }
   if (developerDebugEnabled()) {
     headers.set("X-Qunxiang-Debug", "1");
+  }
+  if (auth?.withOps && opsToken.trim() !== "") {
+    headers.set("X-Ops-Token", opsToken.trim());
+  }
+  // Authorization: Bearer 注入——require 总带（即便空，让后端给 401）；soft 仅已登录才带。
+  // 若调用方已在 init.headers 自带 Authorization（如账户 me/logout 显式传 token），不覆盖。
+  if (auth?.bearer && !headers.has("Authorization")) {
+    if (auth.bearer === "require" || (auth.bearer === "soft" && accountToken.trim() !== "")) {
+      headers.set("Authorization", `Bearer ${accountToken.trim()}`);
+    }
   }
   let response: Response;
   try {
@@ -114,27 +163,40 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     if (payload && typeof payload === "object") {
-      const data = payload as { error?: string; session?: SessionSnapshot };
-      throw new APIError(data.error ?? `${response.status} ${response.statusText}`, data.session);
+      const data = payload as { error?: string; reason?: string; session?: SessionSnapshot };
+      // 合规门 403 会带 {error, reason}——reason 透出给上层，绝不吞掉。
+      throw new APIError(
+        data.error ?? `${response.status} ${response.statusText}`,
+        data.session,
+        response.status,
+        typeof data.reason === "string" ? data.reason : undefined,
+      );
     }
     throw new APIError(
       typeof payload === "string" && payload.trim() ? payload : `${response.status} ${response.statusText}`,
+      undefined,
+      response.status,
     );
   }
 
   return payload as T;
 }
 
-async function unwrapSession(path: string, init?: RequestInit): Promise<SessionSnapshot> {
-  const response = await request<{ session: SessionSnapshot }>(path, init);
+async function unwrapSession(
+  path: string,
+  init?: RequestInit,
+  auth?: RequestAuthOptions,
+): Promise<SessionSnapshot> {
+  const response = await request<{ session: SessionSnapshot }>(path, init, auth);
   return response.session;
 }
 
 // createSinglePlayerSession 请求后端创建单人会话。
 export function createSinglePlayerSession(seed = Date.now(), unitCount = 5, mapSize: BattleMapSizeID = "small", fogOfWarEnabled = false, randomEventsEnabled = false): Promise<SessionSnapshot> {
+  // 软带 Bearer：已登录则后端归账+合规门控（未实名/宵禁/超限→403 {error,reason}）；未登录匿名放行。
   return unwrapSession(`/api/sessions/single-player?seed=${seed}&unit_count=${unitCount}&map_size=${encodeURIComponent(mapSize)}&fog_of_war=${fogOfWarEnabled ? "true" : "false"}&random_events=${randomEventsEnabled ? "true" : "false"}`, {
 	method: "POST",
-  });
+  }, { bearer: "soft" });
 }
 
 export async function createDuelSession(seed = Date.now(), unitCount = 5, mapSize: BattleMapSizeID = "small", fogOfWarEnabled = false, randomEventsEnabled = false, creatorRole: "player" | "enemy" = "player"): Promise<{
@@ -154,7 +216,7 @@ export async function createDuelSession(seed = Date.now(), unitCount = 5, mapSiz
     enemy_role_token: string;
     commander_faction_id: string;
     room_status?: DuelRoomStatus;
-}>(`/api/sessions/duel?seed=${seed}&unit_count=${unitCount}&map_size=${encodeURIComponent(mapSize)}&fog_of_war=${fogOfWarEnabled ? "true" : "false"}&random_events=${randomEventsEnabled ? "true" : "false"}&creator_role=${creatorRole}`, { method: "POST" });
+}>(`/api/sessions/duel?seed=${seed}&unit_count=${unitCount}&map_size=${encodeURIComponent(mapSize)}&fog_of_war=${fogOfWarEnabled ? "true" : "false"}&random_events=${randomEventsEnabled ? "true" : "false"}&creator_role=${creatorRole}`, { method: "POST" }, { bearer: "soft" });
 }
 
 export async function getSession(sessionID: string): Promise<{
@@ -220,6 +282,35 @@ export function setSessionRoleToken(token: string): void {
 // getSessionRoleToken 读取当前会话角色令牌。
 export function getSessionRoleToken(): string {
   return sessionRoleToken;
+}
+
+// setOpsToken 设置运营态鉴权令牌（X-Ops-Token）。传空清除（回到原型放行态）。
+export function setOpsToken(token: string): void {
+  opsToken = token.trim();
+}
+
+// getOpsToken 读取当前运营态鉴权令牌。
+export function getOpsToken(): string {
+  return opsToken;
+}
+
+// setAccountToken 设置账户登录令牌（Authorization: Bearer），并同步到 localStorage 跨刷新保活。传空清除（登出）。
+export function setAccountToken(token: string): void {
+  accountToken = token.trim();
+  try {
+    if (accountToken === "") {
+      window.localStorage.removeItem(accountTokenStorageKey);
+    } else {
+      window.localStorage.setItem(accountTokenStorageKey, accountToken);
+    }
+  } catch {
+    // localStorage 不可用（隐私模式等）时忽略——内存态仍生效。
+  }
+}
+
+// getAccountToken 读取当前账户登录令牌（已登录非空）。
+export function getAccountToken(): string {
+  return accountToken;
 }
 
 // websocketURL 把 API 地址转换为 WS 订阅地址。
@@ -521,10 +612,11 @@ export function confirmOpeningDraft(sessionID: string, units: BattleUnit[]): Pro
 }
 
 // advancePhase 请求推进当前阶段并返回最新快照。
+// 软带 Bearer：已登录则推进成功后累计防沉迷时长，且受合规门控（403 {error,reason}）；未登录匿名放行。
 export function advancePhase(sessionID: string): Promise<SessionSnapshot> {
   return unwrapSession(`/api/sessions/${encodeURIComponent(sessionID)}/advance-phase`, {
     method: "POST",
-  });
+  }, { bearer: "soft" });
 }
 
 export async function listTerrainCatalog(): Promise<TerrainDefinition[]> {
@@ -554,8 +646,11 @@ export async function submitModerationReport(
 }
 
 export async function getAuditBundle(sessionID: string, limit = 80): Promise<AuditBundle> {
+  // 审计包是高危只读端点（含完整 LLM prompt），套 X-Ops-Token（原型缺头放行）。
   const result = await request<{ audit: AuditBundle }>(
     `/api/sessions/${encodeURIComponent(sessionID)}/audit?limit=${limit}`,
+    undefined,
+    { withOps: true },
   );
   return result.audit;
 }
@@ -573,6 +668,7 @@ export async function eraseSessionPrivateData(
       },
       body: JSON.stringify(options),
     },
+    { withOps: true },
   );
 }
 
@@ -589,7 +685,7 @@ export async function purgeExpiredPrivateData(
       retention_days: retentionDays,
       limit,
     }),
-  });
+  }, { withOps: true });
   return response.result;
 }
 
@@ -598,26 +694,36 @@ export async function registerAccount(payload: {
   display_name?: string;
   password: string;
 }): Promise<{ user: AccountUser; auth: AccountLoginResult }> {
-  return request<{ user: AccountUser; auth: AccountLoginResult }>(`/api/accounts/register`, {
+  const result = await request<{ user: AccountUser; auth: AccountLoginResult }>(`/api/accounts/register`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
   });
+  // 注册即登录：同步 Bearer 令牌，使后续 billing/compliance/建局软带自动带上。
+  if (result.auth?.token) {
+    setAccountToken(result.auth.token);
+  }
+  return result;
 }
 
 export async function loginAccount(payload: {
   username: string;
   password: string;
 }): Promise<{ user: AccountUser; auth: AccountLoginResult }> {
-  return request<{ user: AccountUser; auth: AccountLoginResult }>(`/api/accounts/login`, {
+  const result = await request<{ user: AccountUser; auth: AccountLoginResult }>(`/api/accounts/login`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
   });
+  // 登录成功：同步 Bearer 令牌（模块级 + localStorage），billing/compliance 端点据此鉴权。
+  if (result.auth?.token) {
+    setAccountToken(result.auth.token);
+  }
+  return result;
 }
 
 export async function getCurrentAccount(token: string): Promise<AccountUser> {
@@ -631,11 +737,243 @@ export async function getCurrentAccount(token: string): Promise<AccountUser> {
 }
 
 export async function logoutAccount(token: string): Promise<boolean> {
-  const response = await request<{ ok: boolean }>(`/api/accounts/logout`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
+  try {
+    const response = await request<{ ok: boolean }>(`/api/accounts/logout`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    return response.ok;
+  } finally {
+    // 无论后端登出是否成功，本地一律清掉 Bearer 令牌（模块级 + localStorage）。
+    setAccountToken("");
+  }
+}
+
+// ---- 治理（运营态，X-Ops-Token）----
+
+// resolveModerationReport 运营处理一条举报（resolve/warn/ban）。返回脱敏会话快照 + 处理后的报告。
+// action 缺省走后端默认；report 不存在→404、action 非法→400（经 APIError.status 区分）。
+export async function resolveModerationReport(
+  sessionID: string,
+  reportID: string,
+  action?: "resolve" | "warn" | "ban",
+  note?: string,
+): Promise<{ session: SessionSnapshot; report: ModerationReport }> {
+  return request<{ session: SessionSnapshot; report: ModerationReport }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/reports/${encodeURIComponent(reportID)}/resolve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, note }),
     },
+    { withOps: true },
+  );
+}
+
+// ---- 跨玩家：异步同意闸 + 跨事件投递 ----
+
+// listPendingConsents 列出某 target 角色待处理的同意请求（其玩家可接受/拒绝）。运营态 X-Ops-Token。
+export async function listPendingConsents(unitID: string): Promise<ConsentRequest[]> {
+  const data = await request<{ pending?: ConsentRequest[] }>(
+    `/api/consent/pending/${encodeURIComponent(unitID)}`,
+    undefined,
+    { withOps: true },
+  );
+  return data.pending ?? [];
+}
+
+// resolveConsent 处理一条同意请求（accept=true 应用关系效果，false 不应用）。运营态 X-Ops-Token。
+export async function resolveConsent(reqID: string, accept: boolean): Promise<ConsentRequest> {
+  return request<ConsentRequest>(
+    `/api/consent/${encodeURIComponent(reqID)}/resolve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accept }),
+    },
+    { withOps: true },
+  );
+}
+
+// surfaceCrossEvents 主动把世界总线上牵涉某角色的跨玩家事件投进她的命运收件箱，返回被惊动条数。无鉴权。
+export async function surfaceCrossEvents(
+  worldID: string,
+  unitID: string,
+  limit?: number,
+): Promise<number> {
+  const qs = typeof limit === "number" && limit > 0 ? `?limit=${limit}` : "";
+  const data = await request<{ surfaced?: number }>(
+    `/api/worlds/${encodeURIComponent(worldID)}/units/${encodeURIComponent(unitID)}/cross-events/surface${qs}`,
+    { method: "POST" },
+  );
+  return data.surfaced ?? 0;
+}
+
+// ---- 商业化（Bearer 强制）----
+
+// listBillingSKUs 列出在售 SKU 目录。无鉴权（仅 QUNXIANG_BILLING_ENABLED 开时存在，关→404）。
+export async function listBillingSKUs(): Promise<BillingSKU[]> {
+  const data = await request<{ skus?: BillingSKU[] }>(`/api/billing/skus`);
+  return data.skus ?? [];
+}
+
+// purchaseSKU 购买一个 SKU（账户取自 Bearer token，忽略客户端传账户）。返回计费流水。
+export async function purchaseSKU(
+  skuID: string,
+  platform: string,
+  receipt: string,
+): Promise<BillingCharge> {
+  const data = await request<{ charge: BillingCharge }>(
+    `/api/billing/purchase`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku_id: skuID, platform, receipt }),
+    },
+    { bearer: "require" },
+  );
+  return data.charge;
+}
+
+// getBillingQuota 查询本账号 LLM 成本配额是否仍允许调用（true=未超额）。accountID 仅占位，实取自 token。
+export async function getBillingQuota(accountID: string): Promise<BillingQuota> {
+  return request<BillingQuota>(
+    `/api/billing/quota/${encodeURIComponent(accountID)}`,
+    undefined,
+    { bearer: "require" },
+  );
+}
+
+// listEntitlements 列出本账号已购权益（会员/单品）。accountID 仅占位，实取自 token。
+export async function listEntitlements(accountID: string): Promise<Entitlement[]> {
+  const data = await request<{ entitlements?: Entitlement[] }>(
+    `/api/billing/entitlements/${encodeURIComponent(accountID)}`,
+    undefined,
+    { bearer: "require" },
+  );
+  return data.entitlements ?? [];
+}
+
+// ---- 合规（Bearer 强制）----
+
+// verifyCompliance 登记实名（姓名+身份证号交后端核验，不落库）与生日（据生日刷新未成年模式）。账户取自 token。
+export async function verifyCompliance(payload: {
+  birthDate?: string;
+  name?: string;
+  idNumber?: string;
+}): Promise<boolean> {
+  const data = await request<{ ok: boolean }>(
+    `/api/compliance/verify`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        birth_date: payload.birthDate,
+        name: payload.name,
+        id_number: payload.idNumber,
+      }),
+    },
+    { bearer: "require" },
+  );
+  return data.ok;
+}
+
+// getComplianceGate 读合规前置门裁决（未实名/宵禁/防沉迷）。账户取自 token，accountID 仅占位。
+export async function getComplianceGate(accountID: string): Promise<ComplianceGate> {
+  return request<ComplianceGate>(
+    `/api/compliance/gate/${encodeURIComponent(accountID)}`,
+    undefined,
+    { bearer: "require" },
+  );
+}
+
+// reportPlaySeconds 累计本账号防沉迷在线时长（客户端按心跳/会话时长上报）。账户取自 token。
+export async function reportPlaySeconds(seconds: number): Promise<boolean> {
+  const data = await request<{ ok: boolean }>(
+    `/api/compliance/play-seconds`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds }),
+    },
+    { bearer: "require" },
+  );
+  return data.ok;
+}
+
+// ---- PvE 组队（无鉴权）----
+
+// resolveFieldBoss 触发一次野外 Boss/组队遭遇（多回合消耗战→按贡献分赃/分级惩罚→祖魂收件箱卡）。
+// 真实动作：会改动队员 HP/士气/钱包并写入命运收件箱。注意返回键名为 Go 大写字段名。
+export async function resolveFieldBoss(
+  sessionID: string,
+  unitIDs: string[],
+): Promise<FieldBossResult> {
+  const data = await request<{ encounter?: FieldBossResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/field-boss`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unit_ids: unitIDs }),
+    },
+  );
+  return (
+    data.encounter ?? {
+      ThreatID: "",
+      Victory: false,
+      Rounds: 0,
+      Members: null,
+    }
+  );
+}
+
+// ---- 漏斗埋点（无鉴权，best-effort）----
+
+// emitLead 向 /api/leads 提交一条留资/事件埋点。无鉴权；返回是否成功（best-effort）。
+export async function emitLead(payload: LeadEvent): Promise<boolean> {
+  const data = await request<{ ok?: boolean }>(`/api/leads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
-  return response.ok;
+  return data.ok ?? false;
+}
+
+// trackFunnel 是 emitLead 的轻量埋点包装：自动补 vid（匿名访客 ID，持久化 localStorage），并吞掉所有错误。
+// 埋点失败绝不抛——调用方可裸调 `void trackFunnel("cta_click")` 而无需 try/catch。
+export function trackFunnel(kind: string, props?: { email?: string; source?: string }): Promise<void> {
+  return emitLead({
+    kind,
+    vid: anonymousVisitorID(),
+    email: props?.email,
+    source: props?.source,
+  })
+    .then(() => undefined)
+    .catch(() => undefined);
+}
+
+const visitorIDStorageKey = "qunxiang.visitor.id.v1";
+
+// anonymousVisitorID 读取（或惰性生成并持久化）匿名访客 ID，用于漏斗去重统计。
+function anonymousVisitorID(): string {
+  try {
+    const existing = window.localStorage.getItem(visitorIDStorageKey);
+    if (existing && existing.trim() !== "") {
+      return existing;
+    }
+  } catch {
+    // localStorage 不可用：退回每次新建（仅本次会话有效）。
+  }
+  const generated =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `vid-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    window.localStorage.setItem(visitorIDStorageKey, generated);
+  } catch {
+    // 忽略持久化失败。
+  }
+  return generated;
 }

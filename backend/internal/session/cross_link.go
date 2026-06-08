@@ -19,6 +19,33 @@ import (
 
 const crossEventDefaultImportance = 6
 
+// crossSurfaceLimitPerBoundary 单个角色每个部署边界最多拉取/路由的跨玩家事件条数（防一边界刷爆收件箱）。
+const crossSurfaceLimitPerBoundary = 6
+
+// surfaceCrossEventsAtBoundary 在部署边界把世界总线上牵涉每个玩家单位的跨玩家事件桥接进其命运收件箱（读出侧触发）。
+// 这是「写入侧通、读出侧零触发」P0 断点的落点：SurfaceCrossEventsForCharacter 已实现但原先无人调用。
+// 守卫：WorldID 为空（未接入多世界）直接 no-op，避免对单库角色做无意义查询；对单人局也生效（不依赖 region-runner）。
+// 全程 best-effort：单角色失败只吞错跳过，绝不影响阶段推进；遍历用值拷贝，避免把指针留进闭包。
+func (service *Service) surfaceCrossEventsAtBoundary(ctx context.Context, state *State, units []unit.Record) {
+	if service == nil || service.db == nil || state == nil {
+		return
+	}
+	worldID := state.WorldID
+	if worldID == "" {
+		return // 未接入多世界：跨玩家总线无内容，跳过
+	}
+	for i := range units {
+		u := units[i]
+		if state.PlayerFactionID != "" && u.FactionID != state.PlayerFactionID {
+			continue // 只为本局玩家阵营单位拉取（敌方/野怪不进玩家命运层）
+		}
+		if u.Status.LifeState == unit.LifeStateDead {
+			continue
+		}
+		_, _ = service.SurfaceCrossEventsForCharacter(ctx, state.ID, worldID, &u, crossSurfaceLimitPerBoundary)
+	}
+}
+
 // RecordCrossInteraction 记录一次跨玩家交互：先用世界权威时钟发号（AdvanceTick），再把事件追加进世界总线。
 // 这是「谁先动手算谁的」的落地——tick 由世界时钟单调发放，保证全世界事件可全序仲裁。返回事件 ID。
 //

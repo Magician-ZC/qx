@@ -82,6 +82,11 @@ func Open(dsn string) (*sql.DB, error) {
 			return nil, err
 		}
 	}
+	// 账户成本闭环迁移：给 single_player_sessions 幂等补 account_id（nullable，兼容匿名旧局）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "single_player_sessions", dbmigrate.SessionAccountColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 

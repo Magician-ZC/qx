@@ -35,6 +35,9 @@ import (
 	"qunxiang/backend/internal/ws"
 )
 
+// advancePhasePlaySeconds 是一次成功推进阶段累计进防沉迷时长的粗略估算秒数（一个回合约 1 分钟）。
+const advancePhasePlaySeconds int64 = 60
+
 // Dependencies 聚合 Router 初始化所需的外部依赖。
 type Dependencies struct {
 	Config              config.Config
@@ -86,6 +89,18 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return false
 		}
 	}
+
+	// 商业化 / 合规服务上提到顶部，供 newSessionService 注入 SpendRecorder（账户级 LLM 成本闭环）
+	// 与 complianceGate 前置中间件复用。两者构造均轻量（仅持有 *sql.DB）；端点注册仍各自 flag-gate。
+	// billingEnabled 开时才构造 billingSvc 并注入 SpendRecorder（关时 nil → 账户级记账/配额全链路 no-op）。
+	// complianceSvc 无条件构造：compliance.Gate 内部已 flag 兜底（QUNXIANG_COMPLIANCE_ENABLED 关时恒放行），
+	// 故 complianceGate 中间件可无条件注册，关 flag 时零行为变化（绝不误伤匿名/未实名玩家）。
+	billingEnabled := envFlag("QUNXIANG_BILLING_ENABLED")
+	var billingSvc *billing.Service
+	if billingEnabled {
+		billingSvc = billing.NewService(deps.Store)
+	}
+	complianceSvc := compliance.NewService(deps.Store)
 
 	debugSnapshotRequested := func(c *gin.Context) bool {
 		if c == nil {
@@ -155,6 +170,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		// region-runner 启用时，建局/组队把玩家单位 seed 进离线调度（默认关→零成本，见 ambient_scheduling.go）。
 		service.SetAmbientSchedulingEnabled(deps.RegionRunnerEnabled)
 		service.SetReflexShortCircuit(deps.ReflexShortCircuit) // 降本：日常安静 tick 反射短路跳过 LLM（默认关）
+		// 账户级 LLM 成本闭环：billing 开启时注入 SpendRecorder（*billing.Service 结构满足 session.SpendRecorder）。
+		// newSessionService 是每请求新建 Service 的闭包，故每次新建都注入（billingSvc 提到闭包可捕获作用域）。
+		// billingSvc 为 nil（未开 flag）时不注入 → 账户级记账/配额前置拦截整体 no-op（nil 安全）。
+		if billingSvc != nil {
+			service.SetSpendRecorder(billingSvc)
+		}
 		return service
 	}
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
@@ -179,6 +200,44 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return "enemy", true
 		default:
 			return "player", true
+		}
+	}
+
+	// complianceGate 是出海合规前置门（P0 硬门槛）。挂在建局 / 推进阶段端点前：
+	//   1) softAccountID 软取账户——无 token / 解析失败 → 放行（匿名无法门控，绝不误伤原型默认开放）；
+	//   2) 非空账户 → complianceSvc.Gate 裁决：!Allowed → 403 + reason，并 best-effort 埋点 compliance_blocked；
+	//   3) Allowed && MinorMode → c.Set("minor_mode",true) 供下游分级（关闭恋爱生育 / 降暴力）。
+	// flag 关（QUNXIANG_COMPLIANCE_ENABLED）/ Gate 出错一律放行——compliance.Gate 内部已 flag 兜底（关时恒 Allowed）。
+	complianceGate := func() gin.HandlerFunc {
+		return func(c *gin.Context) {
+			accountID := softAccountID(deps.Accounts, c)
+			if accountID == "" {
+				c.Next()
+				return
+			}
+			verdict, err := complianceSvc.Gate(c.Request.Context(), accountID)
+			if err != nil {
+				// 门控出错绝不误伤：放行（错误已被吞，不影响主流程）。
+				c.Next()
+				return
+			}
+			if !verdict.Allowed {
+				// best-effort 埋点：合规拦截事件（失败绝不影响拦截本身）。
+				_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+					Stage: analytics.StageRetention,
+					Name:  analytics.EventComplianceBlocked,
+					Props: map[string]any{"account_id": accountID, "reason": verdict.Reason},
+				})
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+					"error":  "compliance gate blocked",
+					"reason": verdict.Reason,
+				})
+				return
+			}
+			if verdict.MinorMode {
+				c.Set("minor_mode", true)
+			}
+			c.Next()
 		}
 	}
 
@@ -447,7 +506,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		return parsed, true
 	}
 
-	router.POST("/api/sessions/single-player", func(c *gin.Context) {
+	router.POST("/api/sessions/single-player", complianceGate(), func(c *gin.Context) {
 		seed := time.Now().UTC().UnixNano()
 		if raw := c.Query("seed"); raw != "" {
 			parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -479,7 +538,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 
-		snapshot, err := newSessionService().CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogAndRandomEvents(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled)
+		// 软解析账户：有 Bearer token → 归账（成本闭环 / 配额拦截）；无 token / 失败 → 匿名空串（建局照常）。
+		accountID := softAccountID(deps.Accounts, c)
+		snapshot, err := newSessionService().CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -496,7 +557,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
-	router.POST("/api/sessions/duel", func(c *gin.Context) {
+	router.POST("/api/sessions/duel", complianceGate(), func(c *gin.Context) {
 		seed := time.Now().UTC().UnixNano()
 		if raw := c.Query("seed"); raw != "" {
 			parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -529,8 +590,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		creatorRole := normalizeDuelRole(c.Query("creator_role"))
 
+		// 软解析房主账户：有 Bearer token → 归账（成本闭环 / 配额拦截）；无 token / 失败 → 匿名空串（建局照常）。
+		accountID := softAccountID(deps.Accounts, c)
 		service := newSessionService()
-		snapshot, err := service.CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled)
+		snapshot, err := service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -915,6 +978,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 举报端点是治理敏感写接口（可任意构造举报，越权风险），套 opsTokenGuard（P2 安全修复）。
+	// 鉴权语义待改进：玩家举报本应改用账户/会话角色鉴权，当前依赖 opsTokenGuard 默认放行——
+	// 原型未配 QUNXIANG_OPS_TOKEN 时该 guard 放行，故前端无 ops token 的普通玩家仍可举报；
+	// 本波次刻意保持此鉴权模型不变（以免破坏既有测试），账户级举报鉴权留待后续波次。
 	router.POST("/api/sessions/:id/reports", opsTokenGuard(), func(c *gin.Context) {
 		var request struct {
 			Reporter string `json:"reporter"`
@@ -940,11 +1006,46 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// WS 广播给该局全部订阅客户端 → 必须脱敏（抹去 Reporter/Detail）防对线报复/敏感原文泄露；
+		// 与 PublicSnapshot 的快照脱敏同口径。点对点 HTTP 响应（下行返给提交者本人）保留原始 report。
 		broadcastSessionSnapshot("moderation_report", snapshot, map[string]any{
-			"report": report,
+			"report": session.RedactModerationReportForPublic(report),
 		})
 
 		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot), "report": report})
+	})
+
+	// 举报裁定闭环（运营动作，治理敏感写接口）：标记 Resolved + 按 action 对被举报单位经 StatusMutator 施加后果。
+	// action ∈ resolve|warn|ban（缺省 resolve）；note 可空。套 opsTokenGuard（与其它运营/审计端点同级鉴权）。
+	router.POST("/api/sessions/:id/reports/:reportId/resolve", opsTokenGuard(), func(c *gin.Context) {
+		var request struct {
+			Action string `json:"action"`
+			Note   string `json:"note"`
+		}
+		_ = c.ShouldBindJSON(&request)
+
+		snapshot, report, err := newSessionService().ResolveModerationReport(
+			c.Request.Context(),
+			c.Param("id"),
+			c.Param("reportId"),
+			request.Action,
+			request.Note,
+		)
+		if err != nil {
+			// report 不存在 → 404；其余（action 非法 / reportID 空 / 应用后果失败）→ 400。
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "was not found") {
+				status = http.StatusNotFound
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		// 同 submit：WS 广播脱敏（ops 裁定后仍会把 report 推给全部普通玩家订阅者，含举报人/详情→须抹去）；
+		// 点对点 HTTP 响应（返给 ops 本人）保留原始 report。
+		broadcastSessionSnapshot("moderation_resolution", snapshot, map[string]any{
+			"report": session.RedactModerationReportForPublic(report),
+		})
+		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "report": report})
 	})
 
 	// 审计包内含完整 LLM prompt（含玩家指令/角色记忆等敏感内容），是高危只读端点，套 opsTokenGuard（P2 安全修复）。
@@ -1020,7 +1121,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 
-	router.POST("/api/sessions/:id/advance-phase", func(c *gin.Context) {
+	router.POST("/api/sessions/:id/advance-phase", complianceGate(), func(c *gin.Context) {
 		service := newSessionService()
 		current, err := service.GetSnapshot(c.Request.Context(), c.Param("id"))
 		if err != nil {
@@ -1047,6 +1148,14 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			reason = "phase_advanced"
 		}
 		broadcastSessionSnapshot(reason, snapshot, nil)
+
+		// 防沉迷时长累计（best-effort，失败绝不影响推进）：仅在真正推进了阶段且玩家已登录时累计。
+		// 估算本回合约 60 秒（一个部署/执行回合的粗略时长）；compliance flag 关时 RecordPlaySeconds 内部 no-op。
+		if advanced {
+			if accountID := softAccountID(deps.Accounts, c); accountID != "" {
+				_ = complianceSvc.RecordPlaySeconds(c.Request.Context(), accountID, advancePhasePlaySeconds)
+			}
+		}
 
 		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot)})
 	})
@@ -1504,6 +1613,29 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"event_id": id})
 	})
 
+	// 主动把世界总线上牵涉某角色的跨玩家事件投进她的命运收件箱（读出侧投递的手动触发口）。真实动作。
+	// 先 GetByID 取该角色（sessionID 取自其落库的 SessionID），再调 SurfaceCrossEventsForCharacter，返回被惊动条数。
+	router.POST("/api/worlds/:worldId/units/:unitId/cross-events/surface", func(c *gin.Context) {
+		limit := 0
+		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				limit = v
+			}
+		}
+		record, err := unit.NewRepository(deps.Store).GetByID(c.Request.Context(), c.Param("unitId"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		surfaced, err := newSessionService().SurfaceCrossEventsForCharacter(
+			c.Request.Context(), record.SessionID, c.Param("worldId"), &record, limit)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"surfaced": surfaced})
+	})
+
 	// 投放一头世界Boss（全世界共享血池的协作目标）。
 	router.POST("/api/worlds/:worldId/bosses", func(c *gin.Context) {
 		var body struct {
@@ -1548,9 +1680,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 商业化端点（P2，flag QUNXIANG_BILLING_ENABLED；默认关→整组不注册，零行为变化）。
 	// SKU 目录只读；purchase 走 billing.Service（收据校验默认 stubVerifier）；quota 查 LLM 配额闸。
-	if envFlag("QUNXIANG_BILLING_ENABLED") {
-		billingSvc := billing.NewService(deps.Store)
-
+	// billingSvc 已在 NewRouter 顶部按 billingEnabled 构造（供 newSessionService 注入 SpendRecorder），此处复用。
+	if billingEnabled {
 		// 列出可售 SKU（会员/单品）——只读目录。
 		router.GET("/api/billing/skus", func(c *gin.Context) {
 			skus, err := billingSvc.ListSKUs(c.Request.Context())
@@ -1608,13 +1739,26 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			}
 			c.JSON(http.StatusOK, gin.H{"allowed": allowed})
 		})
+
+		// 列出本账号已购权益（会员/单品）。账户 ID 取自鉴权 token，忽略路径参数防越权读他人权益。
+		router.GET("/api/billing/entitlements/:accountId", func(c *gin.Context) {
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			entitlements, err := billingSvc.ListEntitlements(c.Request.Context(), accountID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"entitlements": entitlements})
+		})
 	}
 
 	// 合规端点（P2，flag QUNXIANG_COMPLIANCE_ENABLED；默认关→整组不注册，零行为变化）。
 	// verify 登记实名/生日；gate 做前置裁决（未实名/未成年宵禁/防沉迷时长超限→Allowed=false）。
+	// complianceSvc 已在 NewRouter 顶部无条件构造（供 complianceGate 前置中间件复用），此处复用。
 	if envFlag("QUNXIANG_COMPLIANCE_ENABLED") {
-		complianceSvc := compliance.NewService(deps.Store)
-
 		// 登记实名（真实姓名+身份证号交 RealnameVerifier 核验，绝不信任客户端 bool）与生日（据生日刷新未成年模式）。
 		// PII：name/id_number 仅用于核验、不落库、不入日志（VerifyRealnameWithIdentity 只落结果位）。
 		router.POST("/api/compliance/verify", func(c *gin.Context) {
@@ -1664,6 +1808,29 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"minor_mode": verdict.MinorMode,
 				"reason":     verdict.Reason,
 			})
+		})
+
+		// 累计本账号防沉迷在线时长（客户端按心跳/会话时长上报）。账户 ID 取自鉴权 token，忽略客户端伪造。
+		router.POST("/api/compliance/play-seconds", func(c *gin.Context) {
+			var body struct {
+				Seconds int64 `json:"seconds"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid play-seconds payload"})
+				return
+			}
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			if body.Seconds < 0 {
+				body.Seconds = 0
+			}
+			if err := complianceSvc.RecordPlaySeconds(c.Request.Context(), accountID, body.Seconds); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true})
 		})
 	}
 

@@ -126,7 +126,7 @@ func (service *Service) SetFactionDirective(
 			text,
 		)
 		intent = parsedIntent
-		appendLLMInteraction(&state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, &state, interaction)
 	}
 
 	if normalized := strings.TrimSpace(intent.NormalizedText); normalized != "" {

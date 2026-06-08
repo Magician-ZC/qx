@@ -19,15 +19,16 @@ type Category string
 
 // 常量定义区：集中声明该文件使用的共享配置。
 const (
-	CategoryCombat    Category = "combat_damage"
-	CategorySurvival  Category = "survival_consumption"
-	CategoryEmotion   Category = "emotion_event"
-	CategoryEconomy   Category = "economy_material"
-	CategoryRelation  Category = "relation_change"
-	CategoryCommand   Category = "command_response"
-	CategoryFate      Category = "fate_event"      // 命运流程事件（相关性命中/待决策入队等，非状态变更）
-	CategoryPlayer    Category = "player_action"   // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
-	CategoryLifecycle Category = "lifecycle_event" // 大世界生命周期（出生/死亡/复仇得偿/势力崩塌/人格漂移，沙盘 §8.7）
+	CategoryCombat     Category = "combat_damage"
+	CategorySurvival   Category = "survival_consumption"
+	CategoryEmotion    Category = "emotion_event"
+	CategoryEconomy    Category = "economy_material"
+	CategoryRelation   Category = "relation_change"
+	CategoryCommand    Category = "command_response"
+	CategoryFate       Category = "fate_event"      // 命运流程事件（相关性命中/待决策入队等，非状态变更）
+	CategoryPlayer     Category = "player_action"   // 玩家动作（接管/嘱咐等，可被 order_echo 回响引用）
+	CategoryLifecycle  Category = "lifecycle_event" // 大世界生命周期（出生/死亡/复仇得偿/势力崩塌/人格漂移，沙盘 §8.7）
+	CategoryGovernance Category = "governance"      // 治理处置（举报闭环：警告/封禁对被举报单位的状态后果，经 status.Mutator 落地）
 )
 
 // ReasonCode 类型定义用于统一该模块的数据表达。
@@ -77,6 +78,11 @@ const (
 	ReasonPersonalityDrift   ReasonCode = "PERSONALITY_DRIFT"
 	ReasonLoyaltyGain        ReasonCode = "LOYALTY_GAIN"
 	ReasonLoyaltyStrain      ReasonCode = "LOYALTY_STRAIN"
+
+	// 治理处置（举报闭环 ResolveModerationReport，经 status.Mutator 改保护字段并留痕）。
+	// MODERATION_WARNING：警告——对被举报单位小幅下调士气示警；MODERATION_BAN：封禁——重罚士气与忠诚。
+	ReasonModerationWarning ReasonCode = "MODERATION_WARNING"
+	ReasonModerationBan     ReasonCode = "MODERATION_BAN"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -124,6 +130,8 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonPersonalityDrift, Category: CategoryLifecycle, DisplayName: "性情流转", DefaultReasonText: "经历沉淀，她的性情悄然变了一些", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonLoyaltyGain, Category: CategoryRelation, DisplayName: "归心", DefaultReasonText: "因为某些经历，她更认同你了", StatDomains: []string{"loyalty"}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonLoyaltyStrain, Category: CategoryRelation, DisplayName: "离心", DefaultReasonText: "某些经历让她对你生了疏离", StatDomains: []string{"loyalty"}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonModerationWarning, Category: CategoryGovernance, DisplayName: "治理警告", DefaultReasonText: "因一桩举报被裁定示警，她的士气受了些影响", StatDomains: []string{"morale"}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonModerationBan, Category: CategoryGovernance, DisplayName: "治理封禁", DefaultReasonText: "因一桩举报被裁定封禁，她的士气与归属感重挫", StatDomains: []string{"morale", "loyalty"}, ImportanceMin: 7, ImportanceMax: 10},
 	}
 }
 

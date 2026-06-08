@@ -90,7 +90,7 @@ func (service *Service) tryRecruitUndercover(
 	byID := map[string]*unit.Record{candidate.ID: candidate, handler.ID: handler}
 	proposal := fmt.Sprintf("是否由 %s 自愿成为 %s 阵营的卧底/内线，并向 %s 回传情报。", candidate.DisplayName(), handler.FactionID, handler.DisplayName())
 	consent, result, interaction, ok := service.requestPairConsent(ctx, *state, byID, candidate, handler, proposal, "卧底招募、背叛原阵营、秘密情报合作或改变忠诚对象", "undercover_consent")
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if !ok || !consent.LeftAgree || !consent.RightAgree {
 		service.recordRomanceConsentDialogue(ctx, state, candidate, handler, consent, result)
 		appendLog(state, "intel_undercover_hold", romanceConsentHoldMessage(consent, candidate, handler), candidate.ID, handler.ID)

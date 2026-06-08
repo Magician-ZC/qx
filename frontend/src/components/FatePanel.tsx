@@ -13,6 +13,7 @@ import {
   subscribeSessionStream,
   type FateCard,
 } from "../session/api";
+import { computeFateCountdown, formatFateCountdown } from "../fate/countdown";
 
 type FateUnitOption = {
   id: string;
@@ -143,6 +144,53 @@ const toastStyle: React.CSSProperties = {
   color: "#cdd7e6",
   fontSize: 12,
 };
+// 待决策倒计时条（拿主意还剩多久）——自包含内联样式，不依赖 fate.css。
+const countdownBaseStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  margin: "8px 0 2px",
+  padding: "3px 10px",
+  borderRadius: 999,
+  fontSize: 11,
+  letterSpacing: 0.3,
+  color: "#e0c789",
+  background: "rgba(217, 188, 115, 0.12)",
+  border: "1px solid rgba(217, 188, 115, 0.3)",
+};
+const countdownUrgentStyle: React.CSSProperties = {
+  ...countdownBaseStyle,
+  color: "#ff9a8a",
+  background: "rgba(180, 84, 58, 0.18)",
+  border: "1px solid rgba(180, 84, 58, 0.5)",
+};
+const countdownExpiredStyle: React.CSSProperties = {
+  ...countdownBaseStyle,
+  color: "#9aa0ad",
+  background: "rgba(120, 120, 120, 0.12)",
+  border: "1px solid rgba(255,255,255,0.1)",
+};
+
+// FateCountdownBar 渲染待决策卡的「拿主意倒计时」，每秒实时倒数；过期标灰、剩余 <6h 标红。
+// 无任何时间锚（feed 未给 countdown/expires，WS 也无 occurred_at）时不渲染。
+function FateCountdownBar({ card }: { card: FateCard }) {
+  // tick 仅用于驱动每秒重渲；实际剩余由 computeFateCountdown 按当前时刻实时计算。
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const cd = computeFateCountdown(card);
+  if (!cd.available) return null;
+  const style = cd.expired ? countdownExpiredStyle : cd.urgent ? countdownUrgentStyle : countdownBaseStyle;
+  return (
+    <div style={style}>
+      <span aria-hidden>{cd.expired ? "⌛" : "⏳"}</span>
+      {formatFateCountdown(cd)}
+    </div>
+  );
+}
 
 function Bar({ label, value, max }: { label: string; value: number; max: number }) {
   const pct = Math.max(0, Math.min(100, (value / max) * 100));
@@ -212,10 +260,16 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
         if (seenRef.current.has(key)) return;
         seenRef.current.add(key);
         const route = String(payload.route ?? "");
+        // WS payload 通常不含 expires_at/countdown_hours（后端只推 occurred_at 或更少）；
+        // 有就透传，没有则留空，由 computeFateCountdown 按 occurred_at + 48h 兜底。
         const card: FateCard = {
           kind: route === "pending" ? "pending" : "highlight",
           decision_id: payload.decision_id ? String(payload.decision_id) : undefined,
           narrative: cardText(payload),
+          occurred_at: payload.occurred_at ? String(payload.occurred_at) : undefined,
+          expires_at: payload.expires_at ? String(payload.expires_at) : undefined,
+          countdown_hours:
+            typeof payload.countdown_hours === "number" ? payload.countdown_hours : undefined,
         };
         setCards((prev) => [card, ...prev]);
       },
@@ -301,6 +355,7 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
           <div style={slotTitleStyle}>有件关乎她的事，在等你拿个主意</div>
           <div style={pendingCardStyle}>
             <p style={{ margin: 0 }}>{pending[0].narrative}</p>
+            <FateCountdownBar card={pending[0]} />
             <div style={actionRowStyle}>
               <button
                 type="button"

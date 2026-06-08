@@ -105,6 +105,86 @@ type Service struct {
 	// 反射真短路开关（降本，由 main/router 按 QUNXIANG_REFLEX_SHORTCIRCUIT 注入，默认关）：开启后日常安静 tick 的单位决策
 	// 由反射层零成本落地、跳过 LLM（见 reflex_shadow.go）。默认关时退化为纯影子统计（reflex_shadow.skip_rate）。
 	reflexShortCircuit bool
+
+	// 账户级 LLM 成本记账器（由 main/router 按 QUNXIANG_BILLING_ENABLED 开时注入 billing.Service，默认 nil）：
+	// nil 安全——未注入时账户级记账/配额拦截整体 no-op，仅保留会话级预算护栏（llm_budget.go）。结构上由 SpendRecorder 接口约束，
+	// 刻意不在 session 包 import billing（避免循环依赖），仅由 Wire agent 注入。
+	spend SpendRecorder
+}
+
+// SpendRecorder 是账户级 LLM 成本记账器的最小接口（结构上由 billing.Service 满足，见 internal/billing/service.go）。
+// 刻意只声明 session 真正用到的两个方法，避免 session→billing 的包依赖：
+//   - AddSpend：把一次 LLM 成本（micro_usd）累加进账户当期配额（periodBucket=UTC "YYYY-MM"，跨月重置）。
+//   - CheckQuota：判账户当期是否仍在成本上限内（allowed=true 放行；false=超额）。
+type SpendRecorder interface {
+	AddSpend(ctx context.Context, accountID, periodBucket string, microUSD int64) error
+	CheckQuota(ctx context.Context, accountID string) (bool, error)
+}
+
+// SetSpendRecorder 注入账户级 LLM 成本记账器（Wire agent 在 QUNXIANG_BILLING_ENABLED 开时调用，传 billing.Service）。
+// 传 nil 等价于关闭账户级记账/配额拦截（向后兼容，零行为变化）。
+func (service *Service) SetSpendRecorder(r SpendRecorder) {
+	if service == nil {
+		return
+	}
+	service.spend = r
+}
+
+// recordLLMSpendBestEffort 把一次 LLM 交互的估算成本 best-effort 累加进账户级配额（设计 PRD §3.1 成本封顶）。
+// 纪律：①未注入记账器 / 账户为空 / 成本<=0 → 直接 no-op，对默认链路零成本；②吞错，账户记账绝不中断或影响模拟主循环。
+// 注意：CacheHit 回放在 buildLLMInteraction 处已把 EstimatedCost 归零，故此处天然不重复计费。
+func (service *Service) recordLLMSpendBestEffort(ctx context.Context, state *State, interaction LLMInteraction) {
+	if service == nil || service.spend == nil || state == nil {
+		return
+	}
+	accountID := strings.TrimSpace(state.AccountID)
+	if accountID == "" {
+		return
+	}
+	micro := int64(interaction.EstimatedCost * 1_000_000)
+	if micro <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_ = service.spend.AddSpend(ctx, accountID, quotaPeriodBucket(), micro)
+}
+
+// appendLLMInteractionWithSpend 是 appendLLMInteraction 的「带账户记账」变体：在同一 choke point 把会话级成本表
+// （accumulateLLMMetrics，内嵌于 appendLLMInteraction）与账户级配额（recordLLMSpendBestEffort）同口径累加。
+// 用于执行主循环内全部「真实花了钱」的 LLM 站点（combat_shake/reflection/social/romance/intelligence/interaction_actions/
+// narrative/pigeon/random_events/command_intent/legacy_hall 等），避免账户级配额相对会话级成本系统性低估（仅主决策入账）。
+// 纪律：recordLLMSpendBestEffort 自身 best-effort（未注入记账器/账户空/成本<=0/CacheHit 归零 → no-op），故对默认链路零行为变化。
+func (service *Service) appendLLMInteractionWithSpend(ctx context.Context, state *State, interaction LLMInteraction) {
+	appendLLMInteraction(state, interaction)
+	service.recordLLMSpendBestEffort(ctx, state, interaction)
+}
+
+// accountOverQuota 判当前会话所属账户是否已超 LLM 成本配额（true=超额，应阻断后续 LLM 调用）。
+// 纪律：未注入记账器 / 账户为空 → 不阻断（false）；CheckQuota 出错按 best-effort 放行（false，不误伤）。
+func (service *Service) accountOverQuota(ctx context.Context, state State) bool {
+	if service == nil || service.spend == nil {
+		return false
+	}
+	accountID := strings.TrimSpace(state.AccountID)
+	if accountID == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	allowed, err := service.spend.CheckQuota(ctx, accountID)
+	if err != nil {
+		return false
+	}
+	return !allowed
+}
+
+// llmBlocked 组合「会话级预算护栏」与「账户级配额超额」：任一命中即阻断本次 LLM 调用，走兜底路径。
+// 用于把 llm.go 各 GenerateJSON 站点的会话级护栏判定升级为「会话级 || 账户级」，复用既有 budgetGuardrail* 兜底，零新增降级逻辑。
+func (service *Service) llmBlocked(ctx context.Context, state State) bool {
+	return llmBudgetGuardrailActive(state) || service.accountOverQuota(ctx, state)
 }
 
 // NewServiceWithColdStore 初始化会话服务，统一挂接状态仓库、单位仓库和状态变更器。
@@ -181,7 +261,7 @@ func (service *Service) CreateSinglePlayer(ctx context.Context, seed int64) (Sna
 
 // CreateSinglePlayerWithMapScript 创建单人对局并初始化地图、天气、单位与回合状态。
 func (service *Service) CreateSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, BattlefieldSizeSmall, false, 3, ModeSinglePlayer, false, true)
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, BattlefieldSizeSmall, false, 3, ModeSinglePlayer, false, true, "")
 }
 
 // CreateSinglePlayerDraftWithMapScript 创建带开局选人阶段的单人对局。
@@ -205,8 +285,15 @@ func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountAndFog(
 }
 
 // CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogAndRandomEvents 创建带开局选人阶段的单人对局，并指定迷雾与随机事件开关。
+// 向后兼容入口：不带账户归属（匿名局），等价于账户级配额对其 no-op。
 func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogAndRandomEvents(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, true, unitCount, ModeSinglePlayer, fogOfWarEnabled, randomEventsEnabled)
+	return service.CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "")
+}
+
+// CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount 同上，但携带账户归属（accountID 空=匿名局，安全）。
+// router 软解析鉴权账户后调用本入口，把 accountID 写入 State.AccountID，供 LLM 成本闭环按账户记账与配额拦截。
+func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, true, unitCount, ModeSinglePlayer, fogOfWarEnabled, randomEventsEnabled, accountID)
 }
 
 // CreateDuelWithMapScriptAndUnitCount 创建双人对局，并由房主指定每方单位数。
@@ -226,10 +313,17 @@ func (service *Service) CreateDuelWithMapScriptSizeUnitCountAndFog(ctx context.C
 
 // CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents 创建双人对局，并由房主指定地图、人数、迷雾和随机事件开关。
 func (service *Service) CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, false, unitCount, ModeDuel, fogOfWarEnabled, randomEventsEnabled)
+	return service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "")
 }
 
-func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, draftMode bool, unitCount int, mode string, fogOfWarEnabled bool, randomEventsEnabled bool) (Snapshot, error) {
+// CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount 同上，并把房主账户 ID 贯穿到 State.AccountID，
+// 用于双人对局房主侧的 LLM 成本归账 / 配额拦截（与单人账户入口同口径）。accountID 为空 → 匿名局（账户级记账/配额 no-op）。
+// 旧同名方法委托本入口传 "" 保持向后兼容。
+func (service *Service) CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, false, unitCount, ModeDuel, fogOfWarEnabled, randomEventsEnabled, accountID)
+}
+
+func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, draftMode bool, unitCount int, mode string, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
 	if seed == 0 {
 		seed = time.Now().UTC().UnixNano()
 	}
@@ -250,6 +344,7 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	selectedMapSize := battlefieldSizeByID(mapSizeID)
 	state := State{
 		ID:                   sessionID,
+		AccountID:            strings.TrimSpace(accountID), // 本局账户归属（匿名/单机局为空，账户级成本配额对其 no-op）；随 state_json 落库
 		Mode:                 mode,
 		RandomSeed:           seed,
 		PlayerFactionID:      "player",
@@ -412,6 +507,12 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	// draft 模式此处 PlayerUnitIDs 尚空（单位在 ApplyOpeningDraft 才落库），故对 draft 自然 no-op、由组队完成时再 seed。
 	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
 
+	// 在主战局兑现命运开盒「她身边已有二十个有名有姓的人」承诺（QUNXIANG_MAIN_VILLAGE 关时 no-op，best-effort）。
+	// 仅非 draft 路径在此织村庄：draft 模式此处玩家单位尚未落库，由 ApplyOpeningDraft 组队完成时再 seed，避免漏播/重复。
+	if !draftMode {
+		service.seedVillageForSession(ctx, &state)
+	}
+
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}
@@ -544,6 +645,9 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 	ensureFactionRelations(&state)
 	// 组队完成、玩家单位刚落库 → seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op；best-effort）。
 	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
+	// 同步在主战局兑现命运开盒「她身边已有二十个有名有姓的人」承诺（QUNXIANG_MAIN_VILLAGE 关时 no-op，best-effort）。
+	// draft 路径的村庄播种唯一落点——createSinglePlayerWithMapScript 在 draft 模式跳过，此处补齐，避免漏播/重复。
+	service.seedVillageForSession(ctx, &state)
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return Snapshot{}, err
 	}
@@ -607,7 +711,7 @@ func (service *Service) TalkToUnit(ctx context.Context, sessionID string, unitID
 	appendDialogue(&state, playerLine)
 
 	replyPayload, result, interaction, err := service.generateDialogueReply(ctx, state, *record, message, byID)
-	appendLLMInteraction(&state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, &state, interaction)
 	if err != nil {
 		appendLog(&state, "dialogue_error", "我这回合没接上话。", record.ID, "")
 		replyPayload = fallbackDialogueReplyPayload(*record, message)
@@ -733,7 +837,9 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		if err := service.refreshSessionMemoryDecay(ctx, &state, units); err != nil {
 			return Snapshot{}, err
 		}
-		service.refreshThreats(ctx, &state, units) // 野外威胁刷新（surface-only，best-effort）
+		service.refreshThreats(ctx, &state, units)               // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
+		service.surfaceCrossEventsAtBoundary(ctx, &state, units) // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
+		service.scanAndMatch(ctx, &state, units)                 // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		appendSessionMetricsLog(&state)
 		units = nil
@@ -1429,7 +1535,7 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 				actorState.remainingAP,
 				false,
 			)
-			appendLLMInteraction(state, interaction)
+			service.appendLLMInteractionWithSpend(ctx, state, interaction)
 			if normalErr != nil {
 				appendLog(state, "decision_error", "我这回合没想好下一步。", actor.ID, "")
 				if !service.asyncExecution {
@@ -1825,7 +1931,7 @@ func (service *Service) emitActionNarrationBestEffort(
 		)
 		return
 	}
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	appendAIDialogue(state, *actor, payload.Bubble, result)
 	service.rememberUnitBestEffort(ctx, actor, state.TurnState.Turn, payload.Memory)
 	appendLog(
@@ -2930,25 +3036,32 @@ func (service *Service) applyCombatGroupDynamics(
 	hitReason := events.ReasonCombatHit
 	wasOneShot := targetDowned && targetHPBefore >= 70
 
+	// 聚合「攻击者击倒提振」与「冲击半径内每个友军士气受挫」为一次 ApplyBatch，收敛 DB 往返。
+	// 每条 mutation 的额外副作用（morale_shift 日志、挚友暴怒授予）经 after 闭包在该条标准副作用
+	// 之后立即执行，保持与逐次 applyStatusMutation 路径完全一致的日志/事件交错顺序。
+	shockMutations := make([]pendingStatusMutation, 0)
+
 	if targetDowned {
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			attacker,
-			status.FieldMorale,
-			0.08,
-			downReason,
-			fmt.Sprintf("我击倒了 %s，士气提振。", target.DisplayName()),
-		); err != nil {
-			return err
-		}
-		appendLog(
-			state,
-			"morale_shift",
-			fmt.Sprintf("我因成功击倒 %s，士气上升。", target.DisplayName()),
-			attacker.ID,
-			target.ID,
-		)
+		attackerRef := attacker
+		targetName := target.DisplayName()
+		attackerTargetID := target.ID
+		shockMutations = append(shockMutations, pendingStatusMutation{
+			record:     attacker,
+			field:      status.FieldMorale,
+			delta:      0.08,
+			reasonCode: downReason,
+			reasonText: fmt.Sprintf("我击倒了 %s，士气提振。", target.DisplayName()),
+			after: func() error {
+				appendLog(
+					state,
+					"morale_shift",
+					fmt.Sprintf("我因成功击倒 %s，士气上升。", targetName),
+					attackerRef.ID,
+					attackerTargetID,
+				)
+				return nil
+			},
+		})
 	}
 
 	shockRadius := 2
@@ -2988,36 +3101,44 @@ func (service *Service) applyCombatGroupDynamics(
 			continue
 		}
 
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			ally,
-			status.FieldMorale,
-			penalty,
-			reasonCode,
-			reasonText,
-		); err != nil {
-			return err
-		}
-		appendLog(
-			state,
-			"morale_shift",
-			fmt.Sprintf("我受到同伴战损冲击，士气变化 %.2f。", penalty),
-			ally.ID,
-			target.ID,
-		)
-		if bonded && grantCombatEffect(ally, combatEffectRage, state.TurnState.Turn+1) {
-			if err := service.units.Save(ctx, *ally); err != nil {
-				return err
-			}
-			appendLog(
-				state,
-				"rage",
-				"我因挚友受创陷入暴怒，攻击升高但防守会更冒险。",
-				ally.ID,
-				target.ID,
-			)
-		}
+		// 闭包捕获当前迭代变量（penalty / bonded / ally 指针），供批应用后回放副作用。
+		allyRef := ally
+		penaltyVal := penalty
+		bondedVal := bonded
+		shockTargetID := target.ID
+		shockMutations = append(shockMutations, pendingStatusMutation{
+			record:     ally,
+			field:      status.FieldMorale,
+			delta:      penalty,
+			reasonCode: reasonCode,
+			reasonText: reasonText,
+			after: func() error {
+				appendLog(
+					state,
+					"morale_shift",
+					fmt.Sprintf("我受到同伴战损冲击，士气变化 %.2f。", penaltyVal),
+					allyRef.ID,
+					shockTargetID,
+				)
+				if bondedVal && grantCombatEffect(allyRef, combatEffectRage, state.TurnState.Turn+1) {
+					if err := service.units.Save(ctx, *allyRef); err != nil {
+						return err
+					}
+					appendLog(
+						state,
+						"rage",
+						"我因挚友受创陷入暴怒，攻击升高但防守会更冒险。",
+						allyRef.ID,
+						shockTargetID,
+					)
+				}
+				return nil
+			},
+		})
+	}
+
+	if err := service.applyStatusMutationsBatch(ctx, state, shockMutations); err != nil {
+		return err
 	}
 
 	if !targetDowned {
@@ -3413,7 +3534,34 @@ func PublicSnapshot(snapshot Snapshot, includeDebug bool) Snapshot {
 	snapshot.LLMInteractions = publicLLMInteractions(snapshot.LLMInteractions)
 	snapshot.ActiveLLMCalls = publicActiveLLMInteractions(snapshot.ActiveLLMCalls)
 	snapshot.RawEventLog = redactRawEventLog(snapshot.RawEventLog)
+	snapshot.ModerationReports = redactModerationReports(snapshot.ModerationReports)
 	return snapshot
+}
+
+// RedactModerationReportForPublic 抹去单条举报记录里的隐私字段（Reporter 举报人、Detail 举报详情），返回脱敏副本。
+// 与 redactModerationReports（脱敏整张快照列表）同口径，供 WS 广播 extra 里携带的 report 在下发前先脱敏——
+// 否则 submit/resolve 广播会把举报人身份+详情原样推给该局**所有**订阅客户端，绕过 PublicSnapshot 的快照脱敏闸（隐私泄露）。
+// 注意：reporter/detail 的 JSON tag 无 omitempty，置空仍会序列化为 "" 而非省略，但已不含敏感原文。
+func RedactModerationReportForPublic(report ModerationReport) ModerationReport {
+	report.Reporter = ""
+	report.Detail = ""
+	return report
+}
+
+// redactModerationReports 抹去举报记录里的隐私字段（Reporter 举报人、Detail 举报详情），只对**非调试/非 ops** 客户端生效。
+// 这是「举报记录原样下发每个客户端」隐私漏洞的脱敏闸：普通玩家仍能看到「某单位/某类目下有 N 条举报、是否已处理」的事实
+// （UI 需要这些做提示），但拿不到是谁举报的、举报了什么细节——后者只在 includeDebug（qxdev/ops）路径保留全量。
+func redactModerationReports(reports []ModerationReport) []ModerationReport {
+	if len(reports) == 0 {
+		return reports
+	}
+	result := make([]ModerationReport, len(reports))
+	copy(result, reports)
+	for index := range result {
+		result[index].Reporter = "" // 抹去举报人身份（防对线报复）
+		result[index].Detail = ""   // 抹去举报详情（可能含被举报方/第三方的敏感原文）
+	}
+	return result
 }
 
 func publicActiveLLMInteractions(interactions []LLMInteraction) []LLMInteraction {

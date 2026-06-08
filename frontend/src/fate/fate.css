@@ -153,6 +153,45 @@
   color: #97825f;
 }
 
+/* 待决策倒计时条（拿主意还剩多久） */
+.fate-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 12px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #6b4a22;
+  background: rgba(160, 110, 50, 0.12);
+  border: 1px solid rgba(160, 110, 50, 0.3);
+}
+.fate-countdown::before {
+  content: "⏳";
+  font-size: 12px;
+}
+/* 剩余不足 6 小时：标红催促 */
+.fate-countdown-urgent {
+  color: #a83a28;
+  background: rgba(180, 84, 58, 0.14);
+  border-color: rgba(180, 84, 58, 0.45);
+  animation: fate-countdown-pulse 1.6s ease-in-out infinite;
+}
+/* 已过期：她已自行决断，灰调 */
+.fate-countdown-expired {
+  color: #8a7556;
+  background: rgba(120, 90, 50, 0.1);
+  border-color: rgba(120, 90, 50, 0.22);
+}
+.fate-countdown-expired::before {
+  content: "⌛";
+}
+@keyframes fate-countdown-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* 卡片 */
 .fate-card {
   background: rgba(255, 250, 240, 0.6);

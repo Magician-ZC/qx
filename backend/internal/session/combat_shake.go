@@ -64,7 +64,7 @@ func (service *Service) resolveCombatShake(
 	resolution.Triggered = true
 
 	choice, result, interaction, err := service.generateCombatShakeChoice(ctx, *state, byID, *actor, triggers)
-	appendLLMInteraction(state, interaction)
+	service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	if err != nil {
 		return resolution, err
 	}

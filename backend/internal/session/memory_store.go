@@ -241,7 +241,7 @@ func (service *Service) compactMemory2ForUnit(ctx context.Context, state *State,
 	}
 	summary, result, interaction := service.generateMemory2Compaction(ctx, *state, *record, startTurn, endTurn, rows)
 	if strings.TrimSpace(interaction.Kind) != "" {
-		appendLLMInteraction(state, interaction)
+		service.appendLLMInteractionWithSpend(ctx, state, interaction)
 	}
 	if strings.TrimSpace(summary) == "" {
 		return nil
