@@ -11,6 +11,7 @@ package session
 import (
 	"sync/atomic"
 
+	"qunxiang/backend/internal/ai"
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/unit"
 )
@@ -18,15 +19,45 @@ import (
 // HP 上限约定：本项目 HP 以 100 为上限（与 threat.go、status 阈值一致）。
 const reflexHPMaxConvention = 100
 
-// 进程级反射层影子遥测（跨所有会话累计）。
+// 进程级反射层影子/短路遥测（跨所有会话累计）。
 var (
-	reflexTotal     atomic.Int64 // 进入 LLM 决策路径的总次数
-	reflexCouldSkip atomic.Int64 // 其中反射层本可零成本处理、本可省下 LLM 的次数
+	reflexTotal          atomic.Int64 // 进入决策路径的总次数
+	reflexCouldSkip      atomic.Int64 // 其中反射层本可零成本处理、本可省下 LLM 的次数
+	reflexShortCircuited atomic.Int64 // 其中**真**短路、实际省下 LLM 的次数（reflexShortCircuit 开启时）
 )
 
-// ReflexStats 返回进程级累计：决策总数与反射层本可省下 LLM 的次数。
-func ReflexStats() (total int64, couldSkip int64) {
-	return reflexTotal.Load(), reflexCouldSkip.Load()
+// ReflexStats 返回进程级累计：决策总数、反射层本可省下 LLM 的次数、真短路实际省下的次数。
+func ReflexStats() (total int64, couldSkip int64, shortCircuited int64) {
+	return reflexTotal.Load(), reflexCouldSkip.Load(), reflexShortCircuited.Load()
+}
+
+// reflexShortCircuitApplies 判断本次决策是否可零成本反射短路、跳过 LLM：仅「日常安静 tick」
+// （反射层 NeedsLLM=false 且动作是 hold/continue）。安全反射（HP 危急撤退/进食等）**不短路**——
+// 高风险时点值得花 LLM，且把安全反射映射成丰富 payload 成本/风险高。供 generateUnitDecision 在开关开启时调用。
+func reflexShortCircuitApplies(state State, actor *unit.Record, targetIDs []string) bool {
+	if actor == nil {
+		return false
+	}
+	dec := decision.DefaultRouter().Route(buildReflexSituation(state, actor, targetIDs))
+	if dec.NeedsLLM {
+		return false
+	}
+	switch dec.Intent.Action {
+	case decision.ActionHold, decision.ActionContinue:
+		return true
+	default:
+		return false
+	}
+}
+
+// reflexShortCircuitResult 构造一次「反射短路」的非 LLM 结果（标记 provider/model 供审计，$0 成本）。
+func reflexShortCircuitResult() ai.CompletionResult {
+	return ai.CompletionResult{
+		Provider:     "reflex",
+		Model:        "shortcircuit",
+		UsedFallback: true,
+		Debug:        ai.CompletionDebug{FallbackCause: "reflex short-circuit: daily quiet tick, no LLM needed"},
+	}
 }
 
 // buildReflexSituation 从会话上下文构造反射层输入快照（纯函数，不依赖 DB/LLM）。

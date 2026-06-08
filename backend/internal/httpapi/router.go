@@ -41,6 +41,7 @@ type Dependencies struct {
 	Accounts            *account.Service
 	RegionRunner        RegionRunnerStats // 可空：大世界 region-runner 遥测（/healthz 暴露）
 	RegionRunnerEnabled bool              // region-runner 是否启用：决定建局/组队是否把单位 seed 进离线调度（M7.3-real-4b）
+	ReflexShortCircuit  bool              // 反射真短路是否启用（降本，QUNXIANG_REFLEX_SHORTCIRCUIT）
 }
 
 // RegionRunnerStats 是 region-runner 暴露遥测的最小接口（避免 httpapi 依赖 regionrunner 包）。
@@ -137,6 +138,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		service.SetAttributionEnforcement(true)
 		// region-runner 启用时，建局/组队把玩家单位 seed 进离线调度（默认关→零成本，见 ambient_scheduling.go）。
 		service.SetAmbientSchedulingEnabled(deps.RegionRunnerEnabled)
+		service.SetReflexShortCircuit(deps.ReflexShortCircuit) // 降本：日常安静 tick 反射短路跳过 LLM（默认关）
 		return service
 	}
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
@@ -178,7 +180,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			attrOOCRate = float64(attrOOC) / float64(attrTotal)
 		}
 
-		reflexTotal, reflexCouldSkip := session.ReflexStats()
+		reflexTotal, reflexCouldSkip, reflexShortCircuited := session.ReflexStats()
 		reflexSkipRate := 0.0
 		if reflexTotal > 0 {
 			reflexSkipRate = float64(reflexCouldSkip) / float64(reflexTotal)
@@ -204,11 +206,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"ooc":      attrOOC,
 				"ooc_rate": attrOOCRate,
 			},
-			// 反射层影子遥测：本可被纯代码反射层短路、本可省下的 LLM 调用比例（决策用 LLM、结算用代码）。
+			// 反射层遥测：could_skip=本可被反射层短路省下的 LLM；short_circuited=真短路实际省下的（QUNXIANG_REFLEX_SHORTCIRCUIT 开启时）。
 			"reflex_shadow": gin.H{
-				"total":      reflexTotal,
-				"could_skip": reflexCouldSkip,
-				"skip_rate":  reflexSkipRate,
+				"total":           reflexTotal,
+				"could_skip":      reflexCouldSkip,
+				"skip_rate":       reflexSkipRate,
+				"short_circuited": reflexShortCircuited,
+				"enabled":         deps.ReflexShortCircuit,
 			},
 		}
 

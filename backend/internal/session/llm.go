@@ -205,6 +205,17 @@ func (service *Service) generateUnitDecision(
 	remainingAP int,
 	defiant bool,
 ) (unitDecisionPayload, ai.CompletionResult, LLMInteraction, error) {
+	// 反射真短路（降本，flag-gated）：日常安静 tick（反射层 NeedsLLM=false 且 hold/continue）零成本落地、跳过 LLM
+	// 含 prompt 构造（省下 memory/relation 摘要的 DB 查询）。安全反射（HP 危急撤退）仍交 LLM。默认关时为纯影子统计。
+	if service.reflexShortCircuit && reflexShortCircuitApplies(state, actor, targetIDs) {
+		reflexTotal.Add(1)
+		reflexCouldSkip.Add(1)
+		reflexShortCircuited.Add(1)
+		payload := budgetGuardrailDecision(actor) // 保守待命/继续目标——安静 tick 无可决之事
+		result := reflexShortCircuitResult()
+		return payload, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, payload), "", "", result, "reflex_shortcircuit"), nil
+	}
+
 	systemPrompt := unitDecisionSystemPrompt()
 	candidates := buildDecisionCandidates(state, byID, actor, targetIDs, remainingAP)
 	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, *actor, 10)

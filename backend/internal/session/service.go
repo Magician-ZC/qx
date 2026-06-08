@@ -101,6 +101,10 @@ type Service struct {
 	// 离线自治调度开关（M7.3-real-4b，由 main/router 按 QUNXIANG_REGION_RUNNER_ENABLED 注入，默认关）：
 	// 关时建局/组队不写 units 作用域列、不入唤醒队列，使大世界 region-runner 这一 flag-gated 能力对默认链路零成本。
 	ambientSchedulingEnabled bool
+
+	// 反射真短路开关（降本，由 main/router 按 QUNXIANG_REFLEX_SHORTCIRCUIT 注入，默认关）：开启后日常安静 tick 的单位决策
+	// 由反射层零成本落地、跳过 LLM（见 reflex_shadow.go）。默认关时退化为纯影子统计（reflex_shadow.skip_rate）。
+	reflexShortCircuit bool
 }
 
 // NewServiceWithColdStore 初始化会话服务，统一挂接状态仓库、单位仓库和状态变更器。
@@ -126,6 +130,14 @@ func NewServiceWithColdStore(db *sql.DB, llm completionClient, coldStore *sql.DB
 // Broadcaster 向某会话的所有订阅客户端推送实时事件（*ws.Hub 结构上即满足，无需 session 依赖 ws）。
 type Broadcaster interface {
 	BroadcastSessionEvent(sessionID string, eventType string, payload any) int
+}
+
+// SetReflexShortCircuit 开启/关闭反射真短路（降本，main/router 按 QUNXIANG_REFLEX_SHORTCIRCUIT 注入）。
+func (service *Service) SetReflexShortCircuit(enabled bool) {
+	if service == nil {
+		return
+	}
+	service.reflexShortCircuit = enabled
 }
 
 // SetBroadcaster 注册实时广播器（用于命运收件箱/回响的 WS 实时推送）。

@@ -131,6 +131,8 @@ func main() {
 		RegionRunner: regionRunner,
 		// region-runner 启用时，建局/组队才把玩家单位 seed 进离线调度（M7.3-real-4b，默认关→零成本）。
 		RegionRunnerEnabled: regionRunnerEnabled,
+		// 反射真短路（降本，默认关）：日常安静 tick 的单位决策由反射层零成本落地、跳过 LLM。
+		ReflexShortCircuit: envBool("QUNXIANG_REFLEX_SHORTCIRCUIT"),
 	})
 
 	server := &http.Server{

@@ -9,11 +9,11 @@ import (
 )
 
 func TestReflexShadowCriticalCouldSkip(t *testing.T) {
-	t0, s0 := ReflexStats()
+	t0, s0, _ := ReflexStats()
 	actor := &unit.Record{ID: "u-crit"}
 	actor.Status.HP = 10 // < 25% of 100 → 反射撤退，即便有敌在视野/玩家在场也零成本保命
 	recordReflexShadow(State{}, actor, []string{"enemy"})
-	t1, s1 := ReflexStats()
+	t1, s1, _ := ReflexStats()
 	if t1 != t0+1 {
 		t.Fatalf("总数应 +1：%d -> %d", t0, t1)
 	}
@@ -23,12 +23,12 @@ func TestReflexShadowCriticalCouldSkip(t *testing.T) {
 }
 
 func TestReflexShadowWatchedCombatNotSkippable(t *testing.T) {
-	t0, s0 := ReflexStats()
+	t0, s0, _ := ReflexStats()
 	actor := &unit.Record{ID: "u-fight"}
 	actor.Status.HP = 90
 	actor.Status.InCombat = true
 	recordReflexShadow(State{}, actor, []string{"enemy"}) // 敌在视野 + 玩家在场 = 高光节点，应上 LLM
-	t1, s1 := ReflexStats()
+	t1, s1, _ := ReflexStats()
 	if t1 != t0+1 {
 		t.Fatalf("总数应 +1：%d -> %d", t0, t1)
 	}
@@ -38,13 +38,36 @@ func TestReflexShadowWatchedCombatNotSkippable(t *testing.T) {
 }
 
 func TestReflexShadowQuietTickCouldSkip(t *testing.T) {
-	t0, s0 := ReflexStats()
+	t0, s0, _ := ReflexStats()
 	actor := &unit.Record{ID: "u-quiet"}
 	actor.Status.HP = 80
 	actor.Status.Hunger = 80
 	recordReflexShadow(State{}, actor, nil) // 无敌可打、状态平稳 → 日常反射，零成本
-	t1, s1 := ReflexStats()
+	t1, s1, _ := ReflexStats()
 	if t1 != t0+1 || s1 != s0+1 {
 		t.Fatalf("安静 tick 应判可省 LLM：total %d->%d skip %d->%d", t0, t1, s0, s1)
+	}
+}
+
+func TestReflexShortCircuitApplies(t *testing.T) {
+	quiet := &unit.Record{ID: "u-quiet"}
+	quiet.Status.HP = 80
+	quiet.Status.Hunger = 80
+	if !reflexShortCircuitApplies(State{}, quiet, nil) {
+		t.Fatalf("安静 tick（hold/continue）应可短路跳过 LLM")
+	}
+	crit := &unit.Record{ID: "u-crit"} // HP 危急→flee 安全反射，不短路（高风险仍交 LLM）
+	crit.Status.HP = 10
+	if reflexShortCircuitApplies(State{}, crit, nil) {
+		t.Fatalf("HP 危急（撤退安全反射）不应短路，应交 LLM")
+	}
+	fight := &unit.Record{ID: "u-fight"} // 玩家目睹交战 NeedsLLM=true，不短路
+	fight.Status.HP = 90
+	fight.Status.InCombat = true
+	if reflexShortCircuitApplies(State{}, fight, []string{"enemy"}) {
+		t.Fatalf("交战高光节点不应短路")
+	}
+	if reflexShortCircuitApplies(State{}, nil, nil) {
+		t.Fatalf("nil actor 不应短路")
 	}
 }
