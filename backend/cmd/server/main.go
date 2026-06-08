@@ -59,6 +59,7 @@ func main() {
 	regionRunner := regionrunner.New(db, regionrunner.Config{
 		Enabled:     regionRunnerEnabled,
 		Apply:       envBool("QUNXIANG_REGION_RUNNER_APPLY"),
+		Threats:     envBool("QUNXIANG_REGION_RUNNER_THREATS"),
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
 	regionRunner.SetExecutionGuard(session.IsExecutionRunning) // 让位聚焦战斗：在战会话的单位由战斗循环管

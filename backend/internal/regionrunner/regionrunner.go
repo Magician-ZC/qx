@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"qunxiang/backend/internal/agentqueue"
+	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/scheduler"
 	"qunxiang/backend/internal/engine/status"
@@ -113,6 +114,7 @@ func ambientSaturated(record unit.Record, eff ambientEffect) bool {
 type Config struct {
 	Enabled      bool          // 是否启动（main 按 QUNXIANG_REGION_RUNNER_ENABLED 设）
 	Apply        bool          // false=shadow（只记日志，real-1）；true=真应用 L1 决策（real-2，QUNXIANG_REGION_RUNNER_APPLY）
+	Threats      bool          // 是否对 HOT 单位 roll PvE 威胁（QUNXIANG_REGION_RUNNER_THREATS，默认关；真遭遇还需注入 threatHandler）
 	TickInterval time.Duration // 真实时钟每隔多久跑一次调度 pass
 	TickSeconds  int64         // 1 个逻辑 tick = 多少真实秒（wake_at_tick 的时间单位）
 	Workers      int           // worker 池 goroutine 数
@@ -153,6 +155,7 @@ type stats struct {
 	foraged, rested, socialized, reflected                                int64 // real-2/4a 动作计数：觅食/休息/社交/反思
 	deferred, dropped, conflicted, settled                                int64 // 让位战斗/丢弃(逝者或删档)/乐观并发冲突退避/饱和空写短路
 	llmCalls, llmFallbacks                                                int64 // real-3：HOT 单位经 LLM 决策成功 / LLM 失败回退反射
+	threatsRolled, threatsEncountered, threatsFled, encounterErrors       int64 // PvE：roll 命中威胁/升级为遭遇/HP 危急撤退/真遭遇失败
 }
 
 // Runner 是 region-runner 引擎实例。
@@ -172,6 +175,11 @@ type Runner struct {
 	llmBudgetMicroUSD int64         // 进程级预算上限（micro-USD，0=不限）
 	llmSpentMicroUSD  int64         // 已花（atomic，micro-USD）
 	llmLatched        int32         // 预算耗尽闩（atomic，1=此后全转反射）
+
+	// PvE 接入（默认关；main 按 QUNXIANG_REGION_RUNNER_THREATS 开，threatHandler 由 PvE-2 注入，见 threat.go）。
+	threatsEnabled bool                                                      // 是否对 HOT 单位 roll 威胁
+	threatRouter   decision.Router                                           // 关键节点闸（HP 危急撤退 / StrategicFork 升级）
+	threatHandler  func(ctx context.Context, sessionID, unitID string) error // 真遭遇结算（nil=shadow 只计遥测）
 }
 
 // New 构造 region-runner。now 用 time.Now；execGuard 默认恒 false（无战斗让位，测试/未接 session 时）。
@@ -181,13 +189,15 @@ func New(db *sql.DB, cfg Config, log *slog.Logger) *Runner {
 	}
 	units := unit.NewRepository(db)
 	return &Runner{
-		db:        db,
-		cfg:       cfg.withDefaults(),
-		log:       log,
-		now:       time.Now,
-		units:     units,
-		mutator:   status.NewMutator(db, units),
-		execGuard: func(string) bool { return false },
+		db:             db,
+		cfg:            cfg.withDefaults(),
+		log:            log,
+		now:            time.Now,
+		units:          units,
+		mutator:        status.NewMutator(db, units),
+		execGuard:      func(string) bool { return false },
+		threatsEnabled: cfg.Threats,
+		threatRouter:   decision.DefaultRouter(),
 	}
 }
 
@@ -342,6 +352,10 @@ func (r *Runner) applyAmbientL1(ctx context.Context, job *agentqueue.DecisionJob
 	// 选动作（real-3）：当前 HOT 单位且 LLM 启用且预算未耗尽 → LLM 在觅食/休息/社交/反思间决；否则零成本反射
 	// decideAmbientReflex（LLM 任何失败也回退它）。再经下方饱和短路 + applyAction 落地（对 LLM/反射动作同等处理）。
 	currentTier := scheduler.ClassifyTier(tick, lastActive)
+	// PvE（默认关）：HOT 单位先 roll 威胁；命中则本次唤醒用于遭遇/规避（不再走日常 ambient）。见 threat.go。
+	if handled, tier := r.maybeEncounterThreat(ctx, job, record, currentTier, tick); handled {
+		return tier, true
+	}
 	action := r.chooseAmbientAction(ctx, record, currentTier)
 	// 饱和空写短路：动作把已达 clamp 边界的字段继续往界外推（如满意单位 morale 已 1.0 仍选反思）→ 写入是 before==after 空写。
 	// 跳过它（不落地/不计数/不升 HOT），按既有活跃度自然降温——否则会每 COLD 周期永久空写污染记忆环/事件表/遥测（评审 load-bearing）。
@@ -525,5 +539,12 @@ func (r *Runner) Stats() map[string]any {
 		"llm_fallbacks": atomic.LoadInt64(&r.st.llmFallbacks),
 		"llm_spent_usd": float64(atomic.LoadInt64(&r.llmSpentMicroUSD)) / 1e6,
 		"llm_latched":   atomic.LoadInt32(&r.llmLatched) == 1,
+		// PvE 遥测：threats_enabled 是否 roll 威胁；rolled 命中威胁次数；encountered 升级为遭遇；fled HP 危急撤退；
+		// encounter_errors 真遭遇失败（threatHandler 注入后才可能 >0；shadow 模式 encountered 计数但不真触发）。
+		"threats_enabled":     r.threatsEnabled,
+		"threats_rolled":      atomic.LoadInt64(&r.st.threatsRolled),
+		"threats_encountered": atomic.LoadInt64(&r.st.threatsEncountered),
+		"threats_fled":        atomic.LoadInt64(&r.st.threatsFled),
+		"encounter_errors":    atomic.LoadInt64(&r.st.encounterErrors),
 	}
 }
