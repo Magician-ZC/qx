@@ -172,24 +172,38 @@ func (service *Service) applyTurnHungerUpkeep(ctx context.Context, state *State,
 				record.ID,
 				"",
 			)
+			// 断粮致死统一收口到状态写入纪律：先经 Mutator 把 HP 归零并留痕事件，
+			// 再交由生命状态机 unit.ApplyFatalDamage 推进 lives / LifeState（受保护字段绝不直写）。
 			if record.Status.LifeState == unit.LifeStateActive {
-				record.Status.HP = 0
-				record.Status.LivesRemaining = 0
-				record.Status.LifeState = unit.LifeStateDead
-				record.Status.RecoveryTurns = 0
+				if record.Status.HP > 0 {
+					if err := service.applyStatusMutation(
+						ctx,
+						state,
+						record,
+						status.FieldHP,
+						-float64(record.Status.HP),
+						events.ReasonSurvivalHunger,
+						"我因断粮而力竭，生命归零。",
+					); err != nil {
+						return err
+					}
+				}
+				if err := unit.ApplyFatalDamage(record); err != nil {
+					return err
+				}
+				if err := service.units.Save(ctx, *record); err != nil {
+					return err
+				}
+				appendLog(
+					state,
+					"starvation_down",
+					"我因饥饿归零而死亡。",
+					record.ID,
+					"",
+				)
 			}
 		} else if record.Status.StarvationTurns != 0 {
 			record.Status.StarvationTurns = 0
-		}
-
-		if record.Status.Hunger == 0 {
-			appendLog(
-				state,
-				"starvation_down",
-				"我因饥饿归零而死亡。",
-				record.ID,
-				"",
-			)
 		}
 
 		if err := service.units.Save(ctx, *record); err != nil {

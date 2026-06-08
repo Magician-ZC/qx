@@ -396,3 +396,88 @@ CREATE TABLE IF NOT EXISTS fate_decision_resolutions (
   resolve_type TEXT NOT NULL,
   resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 商业化/合规/配额/region 租约（P2，flag-gated：QUNXIANG_BILLING_ENABLED/QUNXIANG_COMPLIANCE_ENABLED/QUNXIANG_REGION_LEASES）。
+-- 刻意不设 account/units 外键：账户与角色可能跨分片，归属完整性由业务层负责；金额一律存最小货币单位（cents/micro_usd）。
+
+-- 售卖项目（SKU）目录：kind 区分订阅/一次性/消耗品等，price_cents 为最小货币单位，active 为软上下架开关。
+CREATE TABLE IF NOT EXISTS billing_skus (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  price_cents INTEGER NOT NULL DEFAULT 0,
+  period TEXT NOT NULL DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_skus_active ON billing_skus(active);
+
+-- 账户权益：某账户对某 SKU 的当前权益态（status=active/expired/...），复合主键保证一账户一 SKU 一条。
+CREATE TABLE IF NOT EXISTS account_entitlements (
+  account_id TEXT NOT NULL,
+  sku_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '',
+  granted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at TEXT,
+  PRIMARY KEY (account_id, sku_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_entitlements_account ON account_entitlements(account_id);
+
+-- 计费流水：每次购买/扣款一条，append-only 审计；provider/receipt_ref 留外部网关凭据，amount_cents 为最小货币单位。
+CREATE TABLE IF NOT EXISTS billing_charges (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  sku_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT '',
+  receipt_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_charges_account ON billing_charges(account_id);
+CREATE INDEX IF NOT EXISTS idx_billing_charges_sku ON billing_charges(sku_id);
+
+-- IAP 收据：Apple/Google 原始收据存证，verified 为校验闩；receipt_blob 留原文供复核/补验。
+CREATE TABLE IF NOT EXISTS iap_receipts (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  receipt_blob TEXT NOT NULL DEFAULT '',
+  verified INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_iap_receipts_account ON iap_receipts(account_id);
+
+-- 账户 LLM 配额：按 period_bucket（计费周期）累计已花 micro_usd 与上限，一账户一条；CheckQuota 读它判是否放行。
+CREATE TABLE IF NOT EXISTS account_llm_quota (
+  account_id TEXT PRIMARY KEY,
+  period_bucket TEXT NOT NULL DEFAULT '',
+  spent_micro_usd INTEGER NOT NULL DEFAULT 0,
+  cap_micro_usd INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 账户合规态：实名/未成年模式/防沉迷（day_bucket 当日累计在线秒数）；compliance.Gate 读它判宵禁/时长。
+CREATE TABLE IF NOT EXISTS account_compliance (
+  account_id TEXT PRIMARY KEY,
+  birth_date TEXT NOT NULL DEFAULT '',
+  realname_verified INTEGER NOT NULL DEFAULT 0,
+  minor_mode INTEGER NOT NULL DEFAULT 0,
+  day_bucket TEXT NOT NULL DEFAULT '',
+  daily_play_seconds INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- region 租约：哪个 holder 持有某 region 至 expires_at（一 region 一条），region-runner 据此分片独占调度。
+CREATE TABLE IF NOT EXISTS region_leases (
+  region_id TEXT PRIMARY KEY,
+  holder TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_region_leases_expires ON region_leases(expires_at);

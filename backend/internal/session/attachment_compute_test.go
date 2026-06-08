@@ -19,8 +19,9 @@ func TestComputeAttachmentRisesWithCoCreation(t *testing.T) {
 
 	// 固定共鸣与在世，只改共创：处理她的待决策前后对比。
 	// 每次先 Surface 一条真实待决策再 resolve（用真 decisionID）——伪造 decisionID 现已被归属校验拒绝。
+	// 注意：命运 M2 每日待决策预算 ≤3（fate.go 防轰炸），同 owner 同日最多 3 条进待决策，故循环取 3。
 	before := service.ComputeAttachment(ctx, rec.ID, 0.5, 5)
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 3; i++ {
 		decisionID := surfacePendingDecisionFor(t, ctx, db, repo, service, rec, int64(100+i))
 		if err := service.ResolveFateDecision(ctx, "s1", rec.ID, decisionID, "intervene"); err != nil {
 			t.Fatalf("处理待决策失败: %v", err)

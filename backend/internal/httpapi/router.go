@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,10 @@ import (
 
 	"qunxiang/backend/internal/account"
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/analytics"
+	"qunxiang/backend/internal/billing"
 	"qunxiang/backend/internal/combat"
+	"qunxiang/backend/internal/compliance"
 	"qunxiang/backend/internal/config"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
@@ -71,6 +75,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		hub = ws.NewHub(deps.Logger)
 	}
 	duelAuth := newDuelSessionAuthStoreWithDB(deps.Store)
+
+	// envFlag 解析进程级开关：默认关 → 零行为变化；true/1/yes/on（不分大小写）视为开。
+	// 商业化 / 合规端点经此 flag-gate（未开启即整组不注册）。
+	envFlag := func(name string) bool {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
 
 	debugSnapshotRequested := func(c *gin.Context) bool {
 		if c == nil {
@@ -471,6 +486,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		broadcastSessionSnapshot("session_created", snapshot, nil)
 
+		// 漏斗埋点（best-effort，失败绝不影响建局）：会话创建 = 获客阶段事件。
+		_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+			Stage:     analytics.StageAcquisition,
+			Name:      analytics.EventSessionCreated,
+			SessionID: snapshot.ID,
+		})
+
 		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot)})
 	})
 
@@ -604,6 +626,14 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+
+		// 漏斗埋点（best-effort，失败绝不影响注册）：账户注册 = 获客阶段事件。
+		_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+			Stage: analytics.StageAcquisition,
+			Name:  analytics.EventAccountRegistered,
+			Props: map[string]any{"account_id": user.ID},
+		})
+
 		c.JSON(http.StatusCreated, gin.H{"user": user, "auth": login})
 	})
 
@@ -884,7 +914,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "reply": reply})
 	})
 
-	router.POST("/api/sessions/:id/reports", func(c *gin.Context) {
+	// 举报端点是治理敏感写接口（可任意构造举报，越权风险），套 opsTokenGuard（P2 安全修复）。
+	router.POST("/api/sessions/:id/reports", opsTokenGuard(), func(c *gin.Context) {
 		var request struct {
 			Reporter string `json:"reporter"`
 			UnitID   string `json:"unit_id"`
@@ -916,7 +947,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusCreated, gin.H{"session": publicForRequest(c, snapshot), "report": report})
 	})
 
-	router.GET("/api/sessions/:id/audit", func(c *gin.Context) {
+	// 审计包内含完整 LLM prompt（含玩家指令/角色记忆等敏感内容），是高危只读端点，套 opsTokenGuard（P2 安全修复）。
+	router.GET("/api/sessions/:id/audit", opsTokenGuard(), func(c *gin.Context) {
 		limit := 80
 		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
 			parsed, err := strconv.Atoi(raw)
@@ -935,7 +967,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"audit": audit})
 	})
 
-	router.POST("/api/sessions/:id/privacy/erase", func(c *gin.Context) {
+	// 不可逆数据擦除是高危写接口（可销毁任意会话的对话/记忆/审计），套 opsTokenGuard（P2 安全修复）。
+	router.POST("/api/sessions/:id/privacy/erase", opsTokenGuard(), func(c *gin.Context) {
 		var request struct {
 			EraseDialogue   bool `json:"erase_dialogue"`
 			EraseLLMDetails bool `json:"erase_llm_details"`
@@ -967,7 +1000,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "result": result})
 	})
 
-	router.POST("/api/privacy/purge", func(c *gin.Context) {
+	// 批量过期清理是高危写接口（可跨会话删除数据），套 opsTokenGuard（P2 安全修复）。
+	router.POST("/api/privacy/purge", opsTokenGuard(), func(c *gin.Context) {
 		var request struct {
 			RetentionDays int `json:"retention_days"`
 			Limit         int `json:"limit"`
@@ -1053,6 +1087,14 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+
+		// 漏斗埋点（best-effort，失败绝不影响 bootstrap）：角色创建 = 激活阶段事件。
+		_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+			Stage:     analytics.StageActivation,
+			Name:      analytics.EventCharacterCreated,
+			SessionID: sessionID,
+			UnitID:    record.ID,
+		})
 
 		response := gin.H{"unit": record}
 		// 兑现命运 onboarding「她身边已有二十个有名有姓的人」承诺：with_village 时附带 20 人关系网。
@@ -1503,6 +1545,122 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"strike": result})
 	})
+
+	// 商业化端点（P2，flag QUNXIANG_BILLING_ENABLED；默认关→整组不注册，零行为变化）。
+	// SKU 目录只读；purchase 走 billing.Service（收据校验默认 stubVerifier）；quota 查 LLM 配额闸。
+	if envFlag("QUNXIANG_BILLING_ENABLED") {
+		billingSvc := billing.NewService(deps.Store)
+
+		// 列出可售 SKU（会员/单品）——只读目录。
+		router.GET("/api/billing/skus", func(c *gin.Context) {
+			skus, err := billingSvc.ListSKUs(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"skus": skus})
+		})
+
+		// 购买（收据校验经 ReceiptVerifier，默认 stub 恒通过；真 Apple/Google 网关是 stub 边界）。
+		router.POST("/api/billing/purchase", func(c *gin.Context) {
+			var body struct {
+				SKUID    string `json:"sku_id"`
+				Platform string `json:"platform"`
+				Receipt  string `json:"receipt"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid purchase payload"})
+				return
+			}
+			// 账户 ID 取自鉴权 token（忽略客户端传入），防为他人账户伪造扣费/发放权益。
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			charge, err := billingSvc.Purchase(c.Request.Context(), accountID, body.SKUID, body.Platform, body.Receipt)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			// 漏斗埋点（best-effort，失败绝不影响购买）：营收阶段事件。
+			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+				Stage: analytics.StageRevenue,
+				Name:  analytics.EventPurchase,
+				Props: map[string]any{
+					"account_id":   accountID,
+					"sku_id":       body.SKUID,
+					"amount_cents": charge.AmountCents,
+				},
+			})
+			c.JSON(http.StatusCreated, gin.H{"charge": charge})
+		})
+
+		// 查询本账号的 LLM 配额是否仍允许调用（true=未超额）。账户 ID 取自鉴权 token，忽略路径参数。
+		router.GET("/api/billing/quota/:accountId", func(c *gin.Context) {
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			allowed, err := billingSvc.CheckQuota(c.Request.Context(), accountID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"allowed": allowed})
+		})
+	}
+
+	// 合规端点（P2，flag QUNXIANG_COMPLIANCE_ENABLED；默认关→整组不注册，零行为变化）。
+	// verify 登记实名/生日；gate 做前置裁决（未实名/未成年宵禁/防沉迷时长超限→Allowed=false）。
+	if envFlag("QUNXIANG_COMPLIANCE_ENABLED") {
+		complianceSvc := compliance.NewService(deps.Store)
+
+		// 登记实名状态与生日（实名前置 + 据生日刷新未成年模式）。
+		router.POST("/api/compliance/verify", func(c *gin.Context) {
+			var body struct {
+				BirthDate        string `json:"birth_date"`
+				RealnameVerified bool   `json:"realname_verified"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid verify payload"})
+				return
+			}
+			// 账户 ID 一律取自鉴权 token（忽略客户端传入），防越权为他人伪造实名/生日绕过合规门。
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			if bd := strings.TrimSpace(body.BirthDate); bd != "" {
+				if err := complianceSvc.SetBirthDate(c.Request.Context(), accountID, bd); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+			}
+			if err := complianceSvc.VerifyRealname(c.Request.Context(), accountID, body.RealnameVerified); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+
+		// 合规前置门裁决（未实名/宵禁/防沉迷）。账户 ID 取自鉴权 token，忽略路径参数防越权读他人状态。
+		router.GET("/api/compliance/gate/:accountId", func(c *gin.Context) {
+			accountID, ok := authedAccountID(deps.Accounts, c)
+			if !ok {
+				return
+			}
+			verdict, err := complianceSvc.Gate(c.Request.Context(), accountID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"allowed":    verdict.Allowed,
+				"minor_mode": verdict.MinorMode,
+				"reason":     verdict.Reason,
+			})
+		})
+	}
 
 	// C-15: client only sends input, server remains the authoritative state owner.
 	router.GET("/ws", hub.Handle)

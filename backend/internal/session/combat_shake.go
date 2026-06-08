@@ -136,13 +136,16 @@ func (service *Service) resolveCombatShake(
 			MoveMultiplier:   0.95,
 			AttackMultiplier: 1,
 		}
-		if grantCombatEffect(actor, combatEffectRage, state.TurnState.Turn+1) {
-			if err := service.units.Save(ctx, *actor); err != nil {
-				return resolution, err
-			}
-		}
-		target := nearestBattleReady(opposingIDs(*state, actor.FactionID), byID, actor)
+		// 用与主循环校验一致的「可见敌」集选目标——主循环 validateDecision 只认 visibleOpposingIDs（开雾时过滤视野外敌）；
+		// 若仍用全体 opposingIDs 选中视野外敌，攻击会被判非法降级 HOLD，而 rage 效果却已落库（评审 load-bearing 修复）。
+		target := nearestBattleReady(visibleOpposingIDs(*state, byID, actor), byID, actor)
 		if target != nil {
+			// 仅在确有可打的可见目标时才持久化 rage 效果，避免「效果入库却被降级待命」。
+			if grantCombatEffect(actor, combatEffectRage, state.TurnState.Turn+1) {
+				if err := service.units.Save(ctx, *actor); err != nil {
+					return resolution, err
+				}
+			}
 			decision := unitDecisionPayload{
 				Action:       DecisionActionAttack,
 				TargetUnitID: target.ID,
@@ -281,32 +284,32 @@ func hasRecentAllyDown(state State, byID map[string]*unit.Record, actor *unit.Re
 	return false
 }
 
-// retreatTargetCoord 根据最近威胁方向推导撤退目标坐标，并做边界裁剪。
+// retreatTargetCoord 推导撤退目标坐标：从 actor 的**相邻单格**中选离最近威胁最远、且在界内未被占的那一格。
+// 必须返回相邻格（distance==1）——否则覆写出的 Move 决策过不了 validateDecision 的 distance==1 约束会被降级为
+// HOLD，导致「该撤退的单位原地待命」（评审 load-bearing 修复）。无可退之相邻格则返回 false（retreat 分支保持 HOLD）。
 func retreatTargetCoord(state State, byID map[string]*unit.Record, actor *unit.Record) (world.Coord, bool) {
 	threat := nearestBattleReady(opposingIDs(state, actor.FactionID), byID, actor)
 	if threat == nil {
 		return world.Coord{}, false
 	}
-
-	dq := actor.Status.PositionQ - threat.Status.PositionQ
-	dr := actor.Status.PositionR - threat.Status.PositionR
-	target := world.Coord{
-		Q: actor.Status.PositionQ + dq*3,
-		R: actor.Status.PositionR + dr*3,
+	cur := world.Coord{Q: actor.Status.PositionQ, R: actor.Status.PositionR}
+	best := world.Coord{}
+	bestDist := -1
+	for _, c := range axialNeighbors(cur) {
+		if !inBounds(state.Map, c) || occupiedByAnother(byID, actor.ID, c) {
+			continue
+		}
+		// 离威胁越远越好（朝背离方向后撤一格）。
+		d := unit.HexDistance(c.Q, c.R, threat.Status.PositionQ, threat.Status.PositionR)
+		if d > bestDist {
+			bestDist = d
+			best = c
+		}
 	}
-	if target.Q < 0 {
-		target.Q = 0
+	if bestDist < 0 {
+		return world.Coord{}, false // 四周皆越界/被占，无处可退
 	}
-	if target.R < 0 {
-		target.R = 0
-	}
-	if target.Q >= state.Map.Width {
-		target.Q = state.Map.Width - 1
-	}
-	if target.R >= state.Map.Height {
-		target.R = state.Map.Height - 1
-	}
-	return target, true
+	return best, true
 }
 
 // inferEmotionalOverride 根据 shake 行为与触发器推断情绪覆写类型。

@@ -14,6 +14,7 @@ import {
   loginAccount,
   logoutAccount,
   registerAccount,
+  resolveEliteEncounter,
   setImmediateOrder,
   setSessionRoleToken,
   setGlobalDirective,
@@ -21,7 +22,9 @@ import {
   subscribeSessionStream,
   talkToUnit,
 } from "./session/api";
-import type { BattleMapSizeID } from "./session/api";
+import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
+import { FatePanel } from "./components/FatePanel";
+import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
   AccountUser,
@@ -447,6 +450,11 @@ export function App() {
   const deploymentIntroShownKeyRef = useRef("");
   const [unitDetailPopoverOpen, setUnitDetailPopoverOpen] = useState(false);
   const [tileDetailPopoverOpen, setTileDetailPopoverOpen] = useState(false);
+  // 命运四槽面板：开关 + 聚焦单位（默认跟随当前选中单位）。
+  const [fatePanelOpen, setFatePanelOpen] = useState(false);
+  // elite/PvE 遭遇：进行中的单位与最近一次结果（用于展示在事件流/弹层）。
+  const [eliteEncounterBusyUnitID, setEliteEncounterBusyUnitID] = useState("");
+  const [eliteEncounterResult, setEliteEncounterResult] = useState<EliteEncounterResult | null>(null);
   const [dialogueDraft, setDialogueDraft] = useState("");
   const [latestDialogueReply, setLatestDialogueReply] = useState("");
   const [terrainCatalog, setTerrainCatalog] = useState<TerrainDefinition[]>([]);
@@ -1719,6 +1727,36 @@ export function App() {
     setActivePanelID((current) => (current === panelID ? null : panelID));
   }
 
+  // handleEliteEncounter 触发一次单人 elite/PvE 遭遇（真实动作：改 HP/士气/钱包并落命运收件箱卡）。
+  async function handleEliteEncounter(unitID: string) {
+    const activeSession = sessionRef.current;
+    if (!activeSession || !unitID || eliteEncounterBusyUnitID) {
+      return;
+    }
+    setEliteEncounterBusyUnitID(unitID);
+    setMessage("她出门历练去了，前路未卜…");
+    try {
+      const result = await resolveEliteEncounter(activeSession.id, unitID);
+      setEliteEncounterResult(result);
+      const outcomeLabel =
+        result.Outcome === "defeated" ? "全身而退" : result.Outcome === "fled" ? "且战且退" : "负伤而归";
+      setMessage(`历练结束：${outcomeLabel}（${result.Rounds} 回合）。`);
+      // 刷新一次快照，让 HP/钱包等结算落地反映到界面。
+      try {
+        const latest = await getSession(activeSession.id);
+        if (latest.session.id === activeSession.id) {
+          applySessionSnapshot(latest.session);
+        }
+      } catch {
+        // 快照刷新失败不影响遭遇结果展示。
+      }
+    } catch (err) {
+      setMessage(`历练未能成行：${err instanceof APIError ? err.message : String(err)}`);
+    } finally {
+      setEliteEncounterBusyUnitID("");
+    }
+  }
+
   function handleReturnToMainMenu() {
     setSession(null);
     sessionRef.current = null;
@@ -2926,6 +2964,13 @@ export function App() {
                     </span>
                   </div>
                   <button className="action-button inline-action" onClick={() => handleFloatingPanelToggle("overview")}>概览</button>
+                  <button
+                    className={`action-button inline-action ${fatePanelOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setFatePanelOpen((open) => !open)}
+                    title="命运四槽：看你的人如今怎样、近来经历了什么、有没有事在等你拿主意"
+                  >
+                    命运
+                  </button>
                 </div>
               </div>
               <div className="global-params-strip" aria-label="全局参数">
@@ -3167,7 +3212,10 @@ export function App() {
               </div>
               <div className="unit-detail-section">
                 <span className="shop-label">最近想法 / 决策</span>
-                <p>{formatThoughtSummary(selectedThought, selectedDecision) || selectedDecision?.reasoning || "暂无可见想法。"}</p>
+                <p>{formatThoughtSummary(selectedThought, selectedDecision) || stripDefianceTrace(selectedDecision?.reasoning) || "暂无可见想法。"}</p>
+                {hasDefianceTrace(selectedDecision?.reasoning) ? (
+                  <DefianceCard reasoning={selectedDecision?.reasoning} />
+                ) : null}
               </div>
               <div className="unit-detail-section">
                 <span className="shop-label">装备与背包</span>
@@ -3236,6 +3284,17 @@ export function App() {
                 <button type="button" className="action-button action-button-secondary" onClick={() => handleOpenUnitDialogueModal(selectedUnit.id)}>打开交谈面板</button>
                 <button type="button" className="action-button action-button-secondary" onClick={() => setActivePanelID("inventory")}>打开背包面板</button>
                 <button type="button" className="action-button action-button-secondary" onClick={() => setActivePanelID("thoughts")}>打开情报面板</button>
+                {selectedUnit.faction_id === effectiveCommanderFactionID && selectedUnit.status.life_state === "active" ? (
+                  <button
+                    type="button"
+                    className="action-button action-button-secondary"
+                    disabled={eliteEncounterBusyUnitID === selectedUnit.id}
+                    onClick={() => void handleEliteEncounter(selectedUnit.id)}
+                    title="让她出门历练一次：多回合消耗战，胜则得战利品，败则负伤而归，结果落入命运收件箱"
+                  >
+                    {eliteEncounterBusyUnitID === selectedUnit.id ? "历练中…" : "遭遇 / 历练"}
+                  </button>
+                ) : null}
               </div>
             </aside>
             </>
@@ -3335,7 +3394,11 @@ export function App() {
                     key={entry.id}
                     className={`activity-feed-entry activity-feed-entry-${entry.tone}`}
                   >
-                    <p className="activity-feed-text">{entry.text}</p>
+                    {parseDefianceTrace(entry.text) ? (
+                      <DefianceCard reasoning={entry.text} />
+                    ) : (
+                      <p className="activity-feed-text">{entry.text}</p>
+                    )}
                     <span className="activity-feed-meta">
                       T{entry.turn} · {entry.phase ? phaseLabels[entry.phase] : "--"}
                     </span>
@@ -3343,6 +3406,73 @@ export function App() {
                 ))}
               </div>
             </aside>
+          ) : null}
+          {showHUD && fatePanelOpen && session ? (
+            <FatePanel
+              sessionId={session.id}
+              units={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
+              initialUnitID={selectedUnitID}
+              onClose={() => setFatePanelOpen(false)}
+            />
+          ) : null}
+          {showHUD && eliteEncounterResult ? (
+            <>
+              <div
+                className="unit-detail-backdrop"
+                onClick={() => setEliteEncounterResult(null)}
+                aria-hidden="true"
+              />
+              <aside className="unit-detail-popover" role="dialog" aria-label="历练结果">
+                <button
+                  type="button"
+                  className="unit-detail-close"
+                  onClick={() => setEliteEncounterResult(null)}
+                  aria-label="关闭历练结果"
+                >
+                  ×
+                </button>
+                <div className="unit-detail-hero">
+                  <div>
+                    <p className="card-kicker">遭遇 / 历练</p>
+                    <h3>
+                      {eliteEncounterResult.Outcome === "defeated"
+                        ? "全身而退"
+                        : eliteEncounterResult.Outcome === "fled"
+                          ? "且战且退"
+                          : "负伤而归"}
+                    </h3>
+                    <p className="unit-detail-meta">
+                      {eliteEncounterResult.Rounds} 回合 · 造成 {eliteEncounterResult.DamageDealt} · 承受{" "}
+                      {eliteEncounterResult.DamageTaken}
+                    </p>
+                  </div>
+                </div>
+                {eliteEncounterResult.Awards && eliteEncounterResult.Awards.length > 0 ? (
+                  <div className="unit-detail-section">
+                    <span className="shop-label">战利品</span>
+                    <div className="inventory-chip-list">
+                      {eliteEncounterResult.Awards.map((award, index) => (
+                        <span key={`${award.ItemID}-${index}`} className="inventory-chip">
+                          {award.ItemID} ×{award.Quantity}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {eliteEncounterResult.PenaltyLayer > 0 ? (
+                  <div className="unit-detail-section">
+                    <span className="shop-label">代价</span>
+                    <p>她受了挫，后果分级落到第 {eliteEncounterResult.PenaltyLayer} 层。</p>
+                  </div>
+                ) : null}
+                {eliteEncounterResult.InboxCard ? (
+                  <div className="unit-detail-section">
+                    <span className="shop-label">祖魂托梦</span>
+                    <p>{eliteEncounterResult.InboxCard}</p>
+                  </div>
+                ) : null}
+              </aside>
+            </>
           ) : null}
           {showHUD && developerMode ? (
             <>
@@ -4283,7 +4413,18 @@ export function App() {
                             <div className="command-summary">
                               <span className="shop-label">最近 AI 决策</span>
                               <strong>{selectedDecision ? formatDecision(selectedDecision, session) : ""}</strong>
-                              {selectedDecision ? <p className="summary-note">{selectedDecision.reasoning}</p> : null}
+                              {selectedDecision ? (
+                                hasDefianceTrace(selectedDecision.reasoning) ? (
+                                  <>
+                                    {stripDefianceTrace(selectedDecision.reasoning) ? (
+                                      <p className="summary-note">{stripDefianceTrace(selectedDecision.reasoning)}</p>
+                                    ) : null}
+                                    <DefianceCard reasoning={selectedDecision.reasoning} />
+                                  </>
+                                ) : (
+                                  <p className="summary-note">{selectedDecision.reasoning}</p>
+                                )
+                              ) : null}
                             </div>
 
                             <div className="command-summary">

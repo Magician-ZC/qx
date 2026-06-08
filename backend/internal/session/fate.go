@@ -32,6 +32,13 @@ const (
 	// 保住既有路由），日常琐事才把分往下压。下限保证「单因子退化」不会让本该牵动她的事被误杀（回归来源）。
 	fateIrreversibilityFloor = 0.70 // 不可逆度阻尼下限：再「可逆」的事也保留七成命运分
 	fateEmotionFloor         = 0.70 // 情绪强度阻尼下限：情绪缺省（EmotionWeight=0）时不应清零命运
+
+	// M2 防轰炸三条（设计宪法 §4.2「硬规则」）。
+	fatePendingDailyBudget = 3              // 每自然日进「待决策」的命运节点上限：溢出降级高光卡，绝不轰炸玩家。
+	fatePendingTTL         = 48 * time.Hour // 待决策倒计时 TTL：occurred_at + 此值即过期，到期按宪章兜底（§4.2 过期兜底）。
+
+	// 过期兜底的缺省宪章动作（§4.2「过期兜底」）：玩家没回来 → 默认放手让她自己选，再补一张回响卡。
+	fateExpiryDefaultResolve = "let_her"
 )
 
 // FateEvent 是一条可能与某角色命运相关的世界事件。
@@ -61,6 +68,10 @@ type FateInboxItem struct {
 	DecisionID string
 	Narrative  string
 	OccurredAt string
+	// 过期倒计时（M2 防轰炸②，设计宪法 §4.2）：ExpiresAt = occurred_at + fatePendingTTL（RFC3339）。
+	// CountdownHours 是「距过期还剩几小时」（向下取整、已过期为 0），纯函数派生、确定性，供前端渲染倒计时条。
+	ExpiresAt      string `json:"expires_at"`
+	CountdownHours int    `json:"countdown_hours"`
 }
 
 // buildRelevanceAnchors 从角色的对外关系构造相关性锚（当前=关系锚；geo/redline/goal 待世界化接入）。
@@ -148,6 +159,12 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	// 高 stakes 事件取≈1（不衰减 careRelevance、与单因子退化等价、保住既有路由），日常琐事才被压低降档。
 	fateScore := fateIrreversibility(ev) * rel * fateEmotionIntensity(ev)
 	route := relevance.RouteFor(fateScore)
+	// M2 防轰炸①：每自然日进「待决策」的命运节点 ≤ fatePendingDailyBudget（设计宪法 §4.2）。
+	// 路由到待决策前查当天该 owner 的 PENDING_DECISION 计数，已达预算则**降级为高光卡**（RouteHighlight）而非
+	// 待决策——绝不把溢出的命运节点继续堆给玩家。查不到/出错时保守放行（best-effort，不阻断既有路由）。
+	if route == relevance.RoutePending && service.pendingBudgetExhausted(ctx, owner.ID) {
+		route = relevance.RouteHighlight
+	}
 	out := FateRouting{Route: route, Relevance: fateScore}
 	if route == relevance.RouteAutonomous {
 		return out, nil
@@ -199,11 +216,44 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	return out, nil
 }
 
-// OpenFateInbox 返回某角色未被处理的待决策（命运收件箱）。
+// pendingBudgetExhausted 判断某 owner 当天（UTC 自然日）进「待决策」的命运节点是否已达 fatePendingDailyBudget。
+// occurred_at 以 RFC3339Nano（UTC）写入，故同一 UTC 日的事件共享 "YYYY-MM-DD" 前缀；用 [dayStart, nextDayStart)
+// 字符串区间过滤即可按日计数——双驱动安全、不依赖任何 SQL 日期函数、确定性。出错保守返回 false（放行）。
+func (service *Service) pendingBudgetExhausted(ctx context.Context, ownerID string) bool {
+	if service == nil || service.db == nil || ownerID == "" {
+		return false
+	}
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	lo := dayStart.Format(time.RFC3339Nano)
+	hi := dayStart.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	var count int
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM events
+		 WHERE actor_unit_id = ? AND reason_code = ? AND occurred_at >= ? AND occurred_at < ?`,
+		ownerID, string(events.ReasonPendingDecision), lo, hi,
+	).Scan(&count); err != nil {
+		return false // best-effort：查询失败不阻断路由，保守放行
+	}
+	return count >= fatePendingDailyBudget
+}
+
+// OpenFateInbox 返回某角色未被处理的待决策（命运收件箱），每条带过期倒计时（M2 防轰炸②）。
+// 打开收件箱时还会做 M2 防轰炸③「过期兜底」：把**超期未决**的 PENDING 按宪章兜底（默认 let_her）自动关掉并补回响卡，
+// best-effort、失败不阻断（详见 reclaimExpiredPending）。打开动作本身 best-effort 埋点 EventInboxOpened（留存阶段）。
 func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]FateInboxItem, error) {
 	if service == nil || service.db == nil {
 		return nil, fmt.Errorf("open fate inbox: missing db")
 	}
+	// 埋点（best-effort）：「打开收件箱」是留存阶段的关键动作；EventInboxOpened 由 analytics 包统一登记。
+	_ = analytics.Emit(ctx, service.db, analytics.Event{
+		Stage: analytics.StageRetention, Name: analytics.EventInboxOpened,
+		UnitID: unitID,
+	})
+	// M2 防轰炸③：先把超期未决的 PENDING 按宪章兜底关掉（best-effort，错误不阻断本次打开）。
+	service.reclaimExpiredPending(ctx, unitID)
+
 	resolved, err := service.resolvedDecisionIDs(ctx, unitID)
 	if err != nil {
 		return nil, err
@@ -234,7 +284,13 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 		if payload.DecisionID == "" || resolved[payload.DecisionID] {
 			continue
 		}
-		items = append(items, FateInboxItem{DecisionID: payload.DecisionID, Narrative: payload.Narrative, OccurredAt: occurredAt})
+		items = append(items, FateInboxItem{
+			DecisionID:     payload.DecisionID,
+			Narrative:      payload.Narrative,
+			OccurredAt:     occurredAt,
+			ExpiresAt:      fateExpiresAt(occurredAt),
+			CountdownHours: fateCountdownHours(occurredAt),
+		})
 	}
 	return items, rows.Err()
 }
@@ -245,6 +301,9 @@ type FateFeedItem struct {
 	DecisionID string `json:"decision_id"` // pending 时可处理
 	Narrative  string `json:"narrative"`
 	OccurredAt string `json:"occurred_at"`
+	// 仅 pending 卡有意义（M2 防轰炸②）：过期时间与剩余小时数，让首屏待决策卡显示倒计时。高光/回响卡置零。
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	CountdownHours int    `json:"countdown_hours,omitempty"`
 }
 
 // OpenFateFeed 返回某角色命运四槽的最近卡片（高光 + 未决待决策 + 回响），按时间倒序。供前端首屏渲染。
@@ -288,6 +347,8 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 			}
 			item.Kind = "pending"
 			item.DecisionID = payload.DecisionID
+			item.ExpiresAt = fateExpiresAt(occurredAt) // M2②：仅待决策卡带倒计时
+			item.CountdownHours = fateCountdownHours(occurredAt)
 		case string(events.ReasonEchoLink):
 			item.Kind = "echo"
 		default:
@@ -332,6 +393,71 @@ func fateConsequencesFor(resolveType string) []fateConsequence {
 		}
 	}
 }
+
+// fateConsequenceLayer 是 M3 后果分级闸（设计宪法 §4.3/§4.6）：在 fateConsequencesFor 的基础后果上叠一层
+// 「牵挂调节」——返回经 attachment（牵挂等级 [0,100]）幅度调节后的后果。**单调**：牵挂越高，「urge 越界干预」
+// 的 loyalty 代价越大（祖魂替她做主，她在乎你越深、被越界时的芥蒂越深，对齐宪法「不可逆需牵挂建立后才开放」）。
+// 正向后果（let_her/acknowledge 的暖意）不随牵挂膨胀，避免「越牵挂越能薅好处」；只放大「越界干预的代价」。
+// 纯函数、确定性、可测；仍只输出既有 reason-code、由调用方经 status.Mutator 落地。
+func fateConsequenceLayer(resolveType string, attachment float64) []fateConsequence {
+	base := fateConsequencesFor(resolveType)
+	// 牵挂归一到 [0,1]，并夹到 [0,100] 量级（ComputeAttachment 的值域）。
+	a := attachment / 100.0
+	if a < 0 {
+		a = 0
+	}
+	if a > 1 {
+		a = 1
+	}
+	// 越界干预（urge）的 loyalty 代价随牵挂线性放大：a=0 取 1.0×，a=1 取 fateUrgeCostMaxScale×（单调不减）。
+	urgeScale := 1.0 + a*(fateUrgeCostMaxScale-1.0)
+	out := make([]fateConsequence, len(base))
+	copy(out, base)
+	if isUrgeResolve(resolveType) {
+		for i := range out {
+			// 只放大「越界代价」那一项（loyalty 负向）；正向的「暂时打起精神」不放大。
+			if out[i].Field == status.FieldLoyalty && out[i].Delta < 0 {
+				out[i].Delta *= urgeScale
+			}
+		}
+	}
+	return out
+}
+
+const fateUrgeCostMaxScale = 2.0 // urge 越界 loyalty 代价在满牵挂时的最大放大倍数（a=1 → 2×，单调）。
+
+// isUrgeResolve 判断处理方式是否属于「玩家越界督促/替她做主」一类（与 fateConsequencesFor 的 urge 分支同义词集对齐）。
+func isUrgeResolve(resolveType string) bool {
+	switch strings.ToLower(strings.TrimSpace(resolveType)) {
+	case "urge", "intervene", "push", "command":
+		return true
+	default:
+		return false
+	}
+}
+
+// fateReasonIsIrreversibleClass 判断一条命运事件的 reason-code 是否属于「不可逆类」（死亡/叛变/pinned 永久丢失）。
+// 对齐 §4.3 层3 与 encounter 的 D0-D3 硬锁不可逆精神：这类命运在高牵挂下**拒绝**自动 let_her 兜底，必须显式停在玩家手里。
+func fateReasonIsIrreversibleClass(code events.ReasonCode) bool {
+	switch code {
+	case events.ReasonCombatDown, // 倒地濒死/阵亡
+		events.ReasonCharacterDied,   // 角色死亡
+		events.ReasonRelationBetray,  // 背叛/叛变
+		events.ReasonFactionCollapse: // 势力崩塌（覆水难收的大变故）
+		return true
+	default:
+		return false
+	}
+}
+
+// fateRefusesAutoLetHer 判断「过期兜底」是否应**拒绝**对该 PENDING 自动 let_her——
+// 不可逆类命运 且 牵挂达到不可逆解锁线（≥fateIrreversibleAttachmentGate）时为真：此时绝不替玩家放手，
+// 而是把它继续留在收件箱，等玩家显式处理（对齐宪法 §4.3「不可逆需牵挂建立后开放」+ D0-D3 硬锁不可逆）。
+func fateRefusesAutoLetHer(code events.ReasonCode, attachment float64) bool {
+	return fateReasonIsIrreversibleClass(code) && attachment >= fateIrreversibleAttachmentGate
+}
+
+const fateIrreversibleAttachmentGate = 70.0 // 不可逆后果的牵挂解锁线（§4.3 层3 牵挂≥70），到线即拒绝自动兜底。
 
 // ResolveFateDecision 处理一条待决策：先**校验归属 + 原子抢占去重**，唯一赢家才经 status.Mutator 对该角色
 // 施加真实后果（可复算、留痕），再写 DECISION_RESOLVED 标记（让它出箱）。
@@ -386,9 +512,11 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	})
 
 	// 4) 真后果：赢家才经 Mutator 改 morale/loyalty（字段级 clamp + 标准化事件留痕，可被复算）。
+	// M3 后果分级闸：先算该角色的牵挂等级，再用 fateConsequenceLayer 据牵挂调节后果幅度（urge 越界代价随牵挂单调放大）。
+	attachment := service.attachmentForUnit(ctx, unitID)
 	var consequenceErr error
 	if service.mutator != nil {
-		for _, c := range fateConsequencesFor(resolveType) {
+		for _, c := range fateConsequenceLayer(resolveType, attachment) {
 			if _, err := service.mutator.Apply(ctx, status.Mutation{
 				UnitID:     unitID,
 				Turn:       0, // 待决策在回合循环外处理，turn 用 0 标记
@@ -404,6 +532,133 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 		}
 	}
 	return consequenceErr
+}
+
+// attachmentForUnit 估算某角色当前的牵挂等级 [0,100]（M3 后果分级闸的输入）。best-effort：
+// 载入单位取其忠诚（共鸣项）喂 ComputeAttachment；载入失败返回 0（无放大，退回基础后果，保守）。
+// 在回合循环外调用，无 turn 上下文，daysAlive 项以 BornTurn 不可知 → 传 0（牵挂主由忠诚/共创驱动）。
+func (service *Service) attachmentForUnit(ctx context.Context, unitID string) float64 {
+	if service == nil || service.units == nil || unitID == "" {
+		return 0
+	}
+	rec, err := service.units.GetByID(ctx, unitID)
+	if err != nil {
+		return 0
+	}
+	return service.ComputeAttachment(ctx, unitID, rec.Status.Loyalty, 0)
+}
+
+// expiredPendingRow 是一条「超期未决」的待决策，过期兜底据此自动关掉它。
+type expiredPendingRow struct {
+	SessionID  string
+	DecisionID string
+	ReasonCode events.ReasonCode
+	OccurredAt string
+}
+
+// reclaimExpiredPending 是 M2 防轰炸③「过期兜底」（设计宪法 §4.2）：把某 owner 超过 fatePendingTTL 仍未处理的 PENDING
+// 按宪章兜底（默认 let_her）自动关掉，并补一张「你没回来，于是她自己做了选择」回响卡。**全程 best-effort**——任何一步
+// 失败都跳过该条、绝不阻断收件箱打开。M3 守门：不可逆类命运（死亡/叛变/pinned 丢失）在高牵挂下**拒绝**自动 let_her，
+// 留在收件箱等玩家显式处理（对齐 D0-D3 硬锁不可逆）。
+func (service *Service) reclaimExpiredPending(ctx context.Context, unitID string) {
+	if service == nil || service.db == nil || unitID == "" {
+		return
+	}
+	now := time.Now().UTC()
+	resolved, err := service.resolvedDecisionIDs(ctx, unitID)
+	if err != nil {
+		return // 查不到已处理集合则不冒进兜底（保守）
+	}
+	rows, err := service.db.QueryContext(
+		ctx,
+		`SELECT session_id, payload_json, occurred_at FROM events
+		 WHERE actor_unit_id = ? AND reason_code = ?`,
+		unitID, string(events.ReasonPendingDecision),
+	)
+	if err != nil {
+		return
+	}
+	expired := make([]expiredPendingRow, 0)
+	for rows.Next() {
+		var sessionID sql.NullString
+		var payloadJSON, occurredAt string
+		if err := rows.Scan(&sessionID, &payloadJSON, &occurredAt); err != nil {
+			rows.Close()
+			return
+		}
+		if !fateIsExpired(occurredAt, now) {
+			continue
+		}
+		var payload struct {
+			DecisionID string `json:"decision_id"`
+			Reason     string `json:"reason"`
+		}
+		_ = json.Unmarshal([]byte(payloadJSON), &payload)
+		if payload.DecisionID == "" || resolved[payload.DecisionID] {
+			continue // 空 ID 或已处理：跳过
+		}
+		expired = append(expired, expiredPendingRow{
+			SessionID:  sessionID.String,
+			DecisionID: payload.DecisionID,
+			ReasonCode: events.ReasonCode(payload.Reason),
+			OccurredAt: occurredAt,
+		})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return
+	}
+	if len(expired) == 0 {
+		return
+	}
+
+	// M3 守门用的牵挂只算一次（同一 owner 共用）。
+	attachment := service.attachmentForUnit(ctx, unitID)
+	for _, p := range expired {
+		// 不可逆类 + 高牵挂：拒绝自动兜底，留在收件箱等玩家显式处理（绝不替玩家放手不可逆的命运）。
+		if fateRefusesAutoLetHer(p.ReasonCode, attachment) {
+			continue
+		}
+		// 按宪章兜底：默认 let_her（你没回来 → 放手让她自己选）。失败则跳过该条（best-effort）。
+		if err := service.ResolveFateDecision(ctx, p.SessionID, unitID, p.DecisionID, fateExpiryDefaultResolve); err != nil {
+			continue
+		}
+		// 补回响卡：「你没回来，于是她自己做了选择」。锚定刚写下的 DECISION_RESOLVED 事件——它是一条真实存在、
+		// 可被 loadRecentPlayerActions 引用的玩家动作事件（兜底也算「为她拿了主意」），满足 SurfaceEcho 的真实前因约束。
+		priorEventID, ok := service.resolvedDecisionEventID(ctx, unitID, p.DecisionID)
+		if !ok {
+			continue
+		}
+		_, _ = service.SurfaceEcho(ctx, p.SessionID, unitID, priorEventID, "她没有等到你回来，于是自己做了选择。", -0.2)
+	}
+}
+
+// resolvedDecisionEventID 按 (unitID, decisionID) 查该决策刚写下的 DECISION_RESOLVED 事件 id（过期兜底回响卡的锚点）。
+// 该事件类型在 loadRecentPlayerActions 的引用集合内，故可被 SurfaceEcho 合法引用。双驱动安全、不依赖 JSON 函数。
+func (service *Service) resolvedDecisionEventID(ctx context.Context, unitID, decisionID string) (string, bool) {
+	rows, err := service.db.QueryContext(
+		ctx,
+		`SELECT id, payload_json FROM events WHERE actor_unit_id = ? AND reason_code = ? AND payload_json LIKE ?`,
+		unitID, string(events.ReasonDecisionResolved), "%"+decisionID+"%",
+	)
+	if err != nil {
+		return "", false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, payloadJSON string
+		if err := rows.Scan(&id, &payloadJSON); err != nil {
+			return "", false
+		}
+		var payload struct {
+			DecisionID string `json:"decision_id"`
+		}
+		_ = json.Unmarshal([]byte(payloadJSON), &payload)
+		if payload.DecisionID == decisionID {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // pendingDecisionOwner 按 decisionID 查权威 PENDING_DECISION 事件，返回其归属单位（owner）。
@@ -542,6 +797,61 @@ func absFloat(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+// parseOccurredAt 把 events.occurred_at（RFC3339Nano，偶有秒级 RFC3339）解析成 time.Time。
+// 解析失败返回零值 + false（调用方据此跳过倒计时/兜底，绝不 panic）。纯函数、确定性。
+func parseOccurredAt(occurredAt string) (time.Time, bool) {
+	occurredAt = strings.TrimSpace(occurredAt)
+	if occurredAt == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, occurredAt); err == nil {
+		return t.UTC(), true
+	}
+	// 兜底：某些写入路径用 "2006-01-02 15:04:05"（claimFateDecision 等），也认一下。
+	if t, err := time.Parse("2006-01-02 15:04:05", occurredAt); err == nil {
+		return t.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// fateExpiresAt 计算一条待决策的过期时刻 = occurred_at + fatePendingTTL（RFC3339Nano）。
+// occurred_at 不可解析时返回空串（前端据此不显示倒计时）。纯函数、确定性（设计宪法 §4.2 倒计时）。
+func fateExpiresAt(occurredAt string) string {
+	t, ok := parseOccurredAt(occurredAt)
+	if !ok {
+		return ""
+	}
+	return t.Add(fatePendingTTL).Format(time.RFC3339Nano)
+}
+
+// fateCountdownHours 计算「距过期还剩几小时」（相对 now，向下取整、已过期或不可解析为 0）。
+// 纯逻辑核心抽到 fateCountdownHoursAt 便于测试注入固定 now。
+func fateCountdownHours(occurredAt string) int {
+	return fateCountdownHoursAt(occurredAt, time.Now().UTC())
+}
+
+// fateCountdownHoursAt 是 fateCountdownHours 的可注入 now 版本（测试用），确定性。
+func fateCountdownHoursAt(occurredAt string, now time.Time) int {
+	t, ok := parseOccurredAt(occurredAt)
+	if !ok {
+		return 0
+	}
+	remaining := t.Add(fatePendingTTL).Sub(now.UTC())
+	if remaining <= 0 {
+		return 0
+	}
+	return int(remaining.Hours())
+}
+
+// fateIsExpired 判断一条待决策是否已超过 fatePendingTTL（相对 now）。occurred_at 不可解析 → 视为未过期（保守不兜底）。
+func fateIsExpired(occurredAt string, now time.Time) bool {
+	t, ok := parseOccurredAt(occurredAt)
+	if !ok {
+		return false
+	}
+	return !now.UTC().Before(t.Add(fatePendingTTL))
 }
 
 // fateIrreversibility 估一条事件的「不可逆度」∈ [fateIrreversibilityFloor,1]（设计宪法 §4.2 因子一）。

@@ -39,6 +39,27 @@ export type FateCard = {
   occurred_at?: string;
 };
 
+// EliteAward 是一次 elite/PvE 遭遇分到的一件战利品（与后端 encounter.Award 对齐，Go 默认大写键名）。
+export type EliteAward = {
+  ItemID: string;
+  UnitID: string;
+  Quantity: number;
+  Reason: string;
+};
+
+// EliteEncounterResult 与后端 session.EliteEncounterResult 对齐（无 json tag，键名为 Go 字段名）。
+export type EliteEncounterResult = {
+  ThreatID: string;
+  Outcome: string; // defeated / fled / down
+  Rounds: number;
+  DamageDealt: number;
+  DamageTaken: number;
+  Contribution: number;
+  Awards: EliteAward[] | null;
+  PenaltyLayer: number; // 失败时实际落地的后果层（0=未触发）
+  InboxCard: string; // 祖魂语气的命运收件箱卡
+};
+
 export class APIError extends Error {
   session?: SessionSnapshot;
 
@@ -393,10 +414,44 @@ export async function getUnitStatus(unitID: string): Promise<Record<string, unkn
 }
 
 // bootstrapCharacter 快速创建一个角色（捏人 onboarding 用）。
-export async function bootstrapCharacter(name: string, sessionID: string, factionID = "player"): Promise<Record<string, unknown> | null> {
-  const qs = `name=${encodeURIComponent(name)}&session_id=${encodeURIComponent(sessionID)}&faction_id=${encodeURIComponent(factionID)}`;
+// withVillage=true 时附带 with_village=1，兑现「她身边已有二十个有名有姓的人」的 onboarding 承诺。
+export async function bootstrapCharacter(
+  name: string,
+  sessionID: string,
+  factionID = "player",
+  withVillage = false,
+): Promise<Record<string, unknown> | null> {
+  let qs = `name=${encodeURIComponent(name)}&session_id=${encodeURIComponent(sessionID)}&faction_id=${encodeURIComponent(factionID)}`;
+  if (withVillage) {
+    qs += `&with_village=1`;
+  }
   const data = await request<{ unit?: Record<string, unknown> }>(`/api/units/bootstrap?${qs}`, { method: "POST" });
   return data.unit ?? null;
+}
+
+// resolveEliteEncounter 触发一次单人 elite/PvE 遭遇（多回合消耗战→战利品分赃或分级惩罚→祖魂收件箱卡）。
+// 这是真实动作：会改动该角色的 HP/士气/钱包并写入命运收件箱。
+export async function resolveEliteEncounter(
+  sessionID: string,
+  unitID: string,
+): Promise<EliteEncounterResult> {
+  const data = await request<{ encounter?: EliteEncounterResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/elite-encounter`,
+    { method: "POST" },
+  );
+  return (
+    data.encounter ?? {
+      ThreatID: "",
+      Outcome: "down",
+      Rounds: 0,
+      DamageDealt: 0,
+      DamageTaken: 0,
+      Contribution: 0,
+      Awards: null,
+      PenaltyLayer: 0,
+      InboxCard: "",
+    }
+  );
 }
 
 // setPlayerDirective 向后端提交玩家方针（兼容旧接口）。

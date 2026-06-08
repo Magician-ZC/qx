@@ -1443,10 +1443,26 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 			decision = normalDecision
 			result = normalResult
 
+			// 高压情绪覆写：仅战斗就绪且触发器命中时，combat_shake 才会改写本次决策。
+			// 触发失败（LLM/规则）按未触发处理，best-effort，绝不中断主循环；确定性由内部 FNV 掷骰保证。
+			shakeResolution, shakeErr := service.resolveCombatShake(ctx, state, byID, actor)
+			if shakeErr != nil {
+				appendLog(state, "shake_skip", "我心里一阵翻涌，但还是照原计划行事。", actor.ID, "")
+				shakeResolution = combatShakeResolution{
+					Modifiers: actionModifiers{MoveMultiplier: 1, AttackMultiplier: 1},
+				}
+			}
+			if shakeResolution.Triggered {
+				if shakeResolution.OverrideDecision != nil {
+					decision = *shakeResolution.OverrideDecision
+				}
+				decision = applyCombatShakeOverlay(decision, shakeResolution)
+			}
+
 			compliance := resolveDirectiveCompliance(*state, byID, actor, decision)
 			logDirectiveCompliance(state, actor, byID, compliance)
 			defiantAction := isDefiantAction(compliance)
-			modifiers := combineActionModifiers(compliance.Modifiers, hungerActionModifiers(*actor))
+			modifiers := combineActionModifiers(compliance.Modifiers, hungerActionModifiers(*actor), shakeResolution.Modifiers)
 			if actor.Status.Hunger < 30 {
 				appendLog(state, "hunger_penalty", "我因饥饿而行动效率下降。", actor.ID, "")
 			}

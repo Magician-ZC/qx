@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +16,14 @@ import (
 
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/storage/dbmigrate"
+)
+
+// 连接池默认上限（沙盘 §11.2「②连接硬顶」「立即可做的高 ROI 改动③」：MySQL SetMaxOpenConns(8) 调到 64–128）。
+// 原 8/8 在玩家扎堆同 region 时是第二瓶颈（仅次于巨型 state_json）；提到 64 open / 16 idle 给读/写/WS 留并发空间。
+// open 可由 env QUNXIANG_MYSQL_MAX_OPEN 覆盖（如压测调参）；idle 取 open 的 1/4（夹在 [1, open]）。
+const (
+	defaultMySQLMaxOpenConns = 64
+	mysqlMaxOpenConnsEnv     = "QUNXIANG_MYSQL_MAX_OPEN"
 )
 
 //go:embed schema.sql
@@ -32,10 +42,17 @@ func Open(dsn string) (*sql.DB, error) {
 	}
 	dbdialect.Register(db, dbdialect.DialectMySQL)
 
-	db.SetConnMaxLifetime(0)
-	db.SetConnMaxIdleTime(15 * time.Minute)
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(8)
+	// 连接池调优（沙盘 §11.2 立即可做高 ROI③）：open 上限提到 64（env 可覆盖），idle 取 open 的 1/4，
+	// 并设有限 lifetime（原 SetConnMaxLifetime(0) = 永不过期，长寿连接易踩中间件/MySQL wait_timeout 静默断连）。
+	maxOpen := resolveMySQLMaxOpenConns()
+	maxIdle := maxOpen / 4
+	if maxIdle < 1 {
+		maxIdle = 1
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -66,6 +83,20 @@ func Open(dsn string) (*sql.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// resolveMySQLMaxOpenConns 解析连接池 open 上限：env QUNXIANG_MYSQL_MAX_OPEN 为正整数时覆盖，否则用默认 64。
+// 非法/非正值（空、负、零、非数字）一律回退默认，保证永不把池压成不可用的 ≤0。
+func resolveMySQLMaxOpenConns() int {
+	raw := strings.TrimSpace(os.Getenv(mysqlMaxOpenConnsEnv))
+	if raw == "" {
+		return defaultMySQLMaxOpenConns
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultMySQLMaxOpenConns
+	}
+	return n
 }
 
 func applySchema(ctx context.Context, db *sql.DB) error {

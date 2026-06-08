@@ -50,7 +50,8 @@ export function FateApp() {
     setError("");
     try {
       const sessionId = (window.crypto?.randomUUID?.() ?? `fate_${Date.now()}`);
-      const unit = await bootstrapCharacter(trimmed, sessionId, "player");
+      // withVillage=true：onboarding 触发 SeedVillage，兑现「她身边已有二十个有名有姓的人」。
+      const unit = await bootstrapCharacter(trimmed, sessionId, "player", true);
       const unitId = unit ? String((unit as Record<string, unknown>).id ?? "") : "";
       if (!unitId) throw new Error("未能创建角色");
 

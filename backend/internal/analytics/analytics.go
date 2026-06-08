@@ -31,6 +31,14 @@ const (
 	EventDecisionResolved = "decision_resolved"
 	EventIntervention     = "player_intervention"
 	EventReturnVisit      = "return_visit"
+	// P1 漏斗补全：注册/开盒契约完成/收件箱打开/状态卡查看/分享/付费/合规拦截。
+	EventAccountRegistered = "account_registered"
+	EventCharterCompleted  = "charter_completed"
+	EventInboxOpened       = "inbox_opened"
+	EventStatusCardViewed  = "status_card_viewed"
+	EventShareInitiated    = "share_initiated"
+	EventPurchase          = "purchase"
+	EventComplianceBlocked = "compliance_blocked"
 )
 
 // Event 是一条漏斗埋点。

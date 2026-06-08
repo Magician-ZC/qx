@@ -11,6 +11,8 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
+
+	"qunxiang/backend/internal/account"
 )
 
 // opsEnvVar 是操作者令牌的环境变量名；为空字符串视为“未配置”，中间件放行。
@@ -40,4 +42,25 @@ func opsTokenGuard() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// authedAccountID 从 Authorization Bearer token 解析出**权威**账户 ID，用于 compliance/billing 这类
+// 「只能操作自己账户」的端点——一律忽略客户端请求体/路径里传入的 account_id，杜绝越权为他人伪造实名/扣费
+// （评审 load-bearing 修复）。账户服务不可用 / token 缺失 / token 无效时，已写好 503/401 响应并返回 ok=false。
+func authedAccountID(accounts *account.Service, c *gin.Context) (string, bool) {
+	if accounts == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account service is unavailable"})
+		return "", false
+	}
+	token := account.ExtractBearerToken(c.GetHeader("Authorization"))
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
+		return "", false
+	}
+	user, err := accounts.CurrentUser(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+		return "", false
+	}
+	return user.ID, true
 }

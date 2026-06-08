@@ -33,9 +33,14 @@ func Open(path string) (*sql.DB, error) {
 	}
 	dbdialect.Register(db, dbdialect.DialectSQLite)
 
-	db.SetConnMaxLifetime(0)
-	db.SetMaxIdleConns(1)
+	// SQLite 连接池：**保持单连接**（沙盘 §11.2「②连接硬顶」语境）。
+	// SetMaxOpenConns(1) 不是性能保守，而是 WAL 模式单写者约束的必然：modernc.org/sqlite 同库并发写会 SQLITE_BUSY/锁竞争，
+	// 单连接把写串行化交给 database/sql 池本身（最稳、最可预测），故此处**故意不调高**——多实例扩展靠切 MySQL，不靠多开 SQLite 连接。
+	// 仅把 idle/lifetime 设为有限值便于连接健康回收（单连接下影响小，但对齐 MySQL 侧策略、避免长寿连接持锁假死）。
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

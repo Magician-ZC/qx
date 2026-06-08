@@ -344,3 +344,82 @@ CREATE TABLE IF NOT EXISTS fate_decision_resolutions (
   resolve_type VARCHAR(32) NOT NULL,
   resolved_at VARCHAR(64) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 商业化/合规/配额/region 租约（P2，flag-gated）。无 account/units 外键（跨分片）；金额一律最小货币单位（cents/micro_usd）。
+
+-- 售卖项目（SKU）目录：kind 区分订阅/一次性/消耗品，price_cents 最小货币单位，active 软上下架。
+CREATE TABLE IF NOT EXISTS billing_skus (
+  id VARCHAR(191) PRIMARY KEY,
+  kind VARCHAR(64) NOT NULL DEFAULT '',
+  name VARCHAR(191) NOT NULL DEFAULT '',
+  price_cents BIGINT NOT NULL DEFAULT 0,
+  period VARCHAR(32) NOT NULL DEFAULT '',
+  active TINYINT NOT NULL DEFAULT 1,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_billing_skus_active (active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 账户权益：账户对 SKU 的当前权益态，复合主键保证一账户一 SKU 一条。
+CREATE TABLE IF NOT EXISTS account_entitlements (
+  account_id VARCHAR(191) NOT NULL,
+  sku_id VARCHAR(191) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT '',
+  granted_at VARCHAR(64) NOT NULL DEFAULT '',
+  expires_at VARCHAR(64) NULL,
+  PRIMARY KEY (account_id, sku_id),
+  INDEX idx_account_entitlements_account (account_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 计费流水：每次购买/扣款一条，append-only 审计；amount_cents 最小货币单位。
+CREATE TABLE IF NOT EXISTS billing_charges (
+  id VARCHAR(191) PRIMARY KEY,
+  account_id VARCHAR(191) NOT NULL,
+  sku_id VARCHAR(191) NOT NULL,
+  amount_cents BIGINT NOT NULL DEFAULT 0,
+  provider VARCHAR(64) NOT NULL DEFAULT '',
+  receipt_ref VARCHAR(191) NOT NULL DEFAULT '',
+  status VARCHAR(32) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_billing_charges_account (account_id),
+  INDEX idx_billing_charges_sku (sku_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- IAP 收据：Apple/Google 原始收据存证，verified 校验闩；receipt_blob 留原文供复核/补验。
+CREATE TABLE IF NOT EXISTS iap_receipts (
+  id VARCHAR(191) PRIMARY KEY,
+  account_id VARCHAR(191) NOT NULL,
+  platform VARCHAR(32) NOT NULL DEFAULT '',
+  receipt_blob LONGTEXT NOT NULL,
+  verified TINYINT NOT NULL DEFAULT 0,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_iap_receipts_account (account_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 账户 LLM 配额：按 period_bucket 累计已花 micro_usd 与上限，一账户一条；CheckQuota 读它判放行。
+CREATE TABLE IF NOT EXISTS account_llm_quota (
+  account_id VARCHAR(191) PRIMARY KEY,
+  period_bucket VARCHAR(32) NOT NULL DEFAULT '',
+  spent_micro_usd BIGINT NOT NULL DEFAULT 0,
+  cap_micro_usd BIGINT NOT NULL DEFAULT 0,
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 账户合规态：实名/未成年模式/防沉迷（day_bucket 当日累计在线秒数）；compliance.Gate 读它判宵禁/时长。
+CREATE TABLE IF NOT EXISTS account_compliance (
+  account_id VARCHAR(191) PRIMARY KEY,
+  birth_date VARCHAR(32) NOT NULL DEFAULT '',
+  realname_verified TINYINT NOT NULL DEFAULT 0,
+  minor_mode TINYINT NOT NULL DEFAULT 0,
+  day_bucket VARCHAR(32) NOT NULL DEFAULT '',
+  daily_play_seconds BIGINT NOT NULL DEFAULT 0,
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- region 租约：holder 持有某 region 至 expires_at（一 region 一条），region-runner 据此分片独占调度。
+CREATE TABLE IF NOT EXISTS region_leases (
+  region_id VARCHAR(191) PRIMARY KEY,
+  holder VARCHAR(191) NOT NULL DEFAULT '',
+  expires_at VARCHAR(64) NULL,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_region_leases_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
