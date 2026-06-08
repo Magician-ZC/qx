@@ -368,3 +368,21 @@ CREATE TABLE IF NOT EXISTS social_object_members (
   joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (object_id, unit_id)
 );
+
+-- 跨玩家七种交互的异步同意请求（consent_gate 三档，§2.3）：高后果交互（联姻/复仇/开战/结盟/反目）需对方角色自治同意，
+-- 落 pending 待 resolve；超时按 charter 兜底。unilateral 交互不入此表（立即成立）。无 units 外键（跨界角色）。
+CREATE TABLE IF NOT EXISTS consent_requests (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  actor_unit_id TEXT NOT NULL,
+  target_unit_id TEXT NOT NULL,
+  interaction TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  event_id TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_consent_requests_target ON consent_requests(target_unit_id, status);
+CREATE INDEX IF NOT EXISTS idx_consent_requests_status ON consent_requests(status, created_at);

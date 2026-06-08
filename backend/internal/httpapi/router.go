@@ -280,6 +280,48 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"social_objects": objs})
 	})
 
+	// 七种交互（跨玩家，§2.3）：POST 记录并按 consent 档路由（单方立即应用/高后果建待决同意请求）。
+	router.POST("/api/worlds/:worldId/seven-interactions", func(c *gin.Context) {
+		var body struct {
+			ActorID     string `json:"actor_id"`
+			TargetID    string `json:"target_id"`
+			Interaction string `json:"interaction"`
+			Importance  int    `json:"importance"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+		res, err := newSessionService().RecordSevenInteraction(c.Request.Context(), strings.TrimSpace(c.Param("worldId")),
+			body.ActorID, body.TargetID, session.SevenInteraction(body.Interaction), body.Importance)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	})
+	// consent_gate：列出某角色的待决同意请求 / 处理一条（接受=应用关系效果，拒绝=不应用）。
+	router.GET("/api/consent/pending/:unitId", func(c *gin.Context) {
+		reqs, err := newSessionService().ListPendingConsents(c.Request.Context(), strings.TrimSpace(c.Param("unitId")))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"pending": reqs})
+	})
+	router.POST("/api/consent/:reqId/resolve", func(c *gin.Context) {
+		var body struct {
+			Accept bool `json:"accept"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		req, err := newSessionService().ResolveConsentRequest(c.Request.Context(), strings.TrimSpace(c.Param("reqId")), body.Accept)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, req)
+	})
+
 	router.GET("/api/world/terrains", func(c *gin.Context) {
 		if err := world.SeedTerrainCatalog(c.Request.Context(), deps.Store); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

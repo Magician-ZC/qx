@@ -25,6 +25,9 @@ const (
 	KindGift            EventKind = "CROSS_GIFT"          // 馈赠/交易
 	KindAttack          EventKind = "CROSS_ATTACK"        // 攻击别家角色
 	KindAlliance        EventKind = "CROSS_ALLIANCE"      // 结盟
+	KindAcquaint        EventKind = "CROSS_ACQUAINT"      // 结识（七种交互，§2.3）
+	KindMarriage        EventKind = "CROSS_MARRIAGE"      // 联姻（七种交互）
+	KindVengeance       EventKind = "CROSS_VENGEANCE"     // 复仇（七种交互）
 	KindWorldBossStrike EventKind = "WORLD_BOSS_STRIKE"   // 对世界Boss的一次出手
 	KindWorldBossDown   EventKind = "WORLD_BOSS_DEFEATED" // 世界Boss被讨平（全服可见）
 )

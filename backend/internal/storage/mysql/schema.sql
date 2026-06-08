@@ -322,3 +322,18 @@ CREATE TABLE IF NOT EXISTS social_object_members (
   joined_at VARCHAR(64) NOT NULL DEFAULT '',
   PRIMARY KEY (object_id, unit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS consent_requests (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  actor_unit_id VARCHAR(191) NOT NULL,
+  target_unit_id VARCHAR(191) NOT NULL,
+  interaction VARCHAR(32) NOT NULL,
+  tier VARCHAR(32) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  event_id VARCHAR(191) NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  resolved_at VARCHAR(64) NULL,
+  INDEX idx_consent_requests_target (target_unit_id, status),
+  INDEX idx_consent_requests_status (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
