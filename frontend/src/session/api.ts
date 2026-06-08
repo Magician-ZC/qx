@@ -14,16 +14,20 @@ import type {
   DialogueMessage,
   BattleUnit,
   DuelRoomStatus,
+  DungeonResult,
   EncounterAward,
   Entitlement,
+  ExperimentFunnelReport,
   FieldBossResult,
   LeadEvent,
   LeadsFunnelData,
   LLMInteraction,
   ModerationReport,
+  NorthStarReport,
   PrivacyEraseOptions,
   PrivacyEraseResult,
   PrivacyPurgeResult,
+  ProductFunnelReport,
   SessionLog,
   SessionSnapshot,
   TerrainDefinition,
@@ -33,6 +37,14 @@ import type {
 // 这些类型在 types.ts 定义（单一真相源，严格对齐后端字段），并从 api 模块再导出，
 // 让消费方可统一从 './session/api' 取 wrapper 与其返回/载荷类型（World Boss / Ops 看板 / 血仇）。
 export type { WorldBossStrikeResult, CostDashboardData, LeadsFunnelData, BloodFeudEntry } from "./types";
+// 副本（dungeon）与 Ops 三报表（产品漏斗 / 北极星 / A/B 实验）的返回类型，供面板消费方统一从 './session/api' 取。
+export type {
+  DungeonResult,
+  DungeonFloorResult,
+  ProductFunnelReport,
+  NorthStarReport,
+  ExperimentFunnelReport,
+} from "./types";
 
 const API_BASE =
   import.meta.env.VITE_API_BASE_URL ??
@@ -948,6 +960,37 @@ export async function resolveFieldBoss(
   );
 }
 
+// runDungeon 跑通一次多层副本（逐层确定性消耗战→通关分赃 / 败北分级惩罚→各队员祖魂收件箱卡）。
+// 真实动作：会改参战队员 HP/士气/钱包并写入命运收件箱。注意返回键名为 Go 大写字段名（DungeonResult 无 json tag）。
+// FloorResults/Awards 与 Contribution/PenaltyLayer/InboxCards 可能为 null（未通关 / 缺失），消费方需判空。
+export async function runDungeon(
+  sessionID: string,
+  unitIDs: string[],
+  floors: number,
+): Promise<DungeonResult> {
+  const data = await request<{ dungeon?: DungeonResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/dungeon`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unit_ids: unitIDs, floors }),
+    },
+  );
+  return (
+    data.dungeon ?? {
+      DungeonID: "",
+      Floors: 0,
+      FloorsClear: 0,
+      Outcome: "wiped",
+      FloorResults: null,
+      Awards: null,
+      Contribution: null,
+      PenaltyLayer: null,
+      InboxCards: null,
+    }
+  );
+}
+
 // ---- 世界 Boss：全世界共享血池的异步协作 PvE（POST，无 ops 守卫）----
 
 // spawnWorldBoss 在某世界投放一头世界 Boss（name 必填、hp 须为正且不超后端上限）。返回 boss ID。
@@ -1023,6 +1066,27 @@ export async function fetchCostDashboard(days = 30): Promise<CostDashboardData> 
 // fetchLeadsFunnel 读假门转化漏斗（按 kind 计数 + 唯一访客）。后端裸返回 LeadsFunnelData。
 export async function fetchLeadsFunnel(): Promise<LeadsFunnelData> {
   return request<LeadsFunnelData>(`/api/ops/leads-funnel`, undefined, { withOps: true });
+}
+
+// fetchProductFunnel 读 AARRR 产品漏斗（按事件/阶段计数 + 去重会话）。days 缺省/<=0 视为全量。后端裸返回 ProductFunnelReport（不解包）。
+export async function fetchProductFunnel(days?: number): Promise<ProductFunnelReport> {
+  const qs = typeof days === "number" ? `?days=${days}` : "";
+  return request<ProductFunnelReport>(`/api/ops/product-funnel${qs}`, undefined, { withOps: true });
+}
+
+// fetchNorthStar 读北极星指标（收件箱处理率 / 分享 / 付费 / 回访 / 惊喜命中率·OOC 率）。days 缺省/<=0 视为全量。后端裸返回 NorthStarReport（不解包）。
+export async function fetchNorthStar(days?: number): Promise<NorthStarReport> {
+  const qs = typeof days === "number" ? `?days=${days}` : "";
+  return request<NorthStarReport>(`/api/ops/north-star${qs}`, undefined, { withOps: true });
+}
+
+// fetchExperiment 读某实验按 ab_bucket 拆分的漏斗（key 回显查询入参、桶名本身编码实验）。days 缺省/<=0 视为全量。后端裸返回 ExperimentFunnelReport（不解包）。
+export async function fetchExperiment(key: string, days?: number): Promise<ExperimentFunnelReport> {
+  let qs = `?key=${encodeURIComponent(key)}`;
+  if (typeof days === "number") {
+    qs += `&days=${days}`;
+  }
+  return request<ExperimentFunnelReport>(`/api/ops/experiment${qs}`, undefined, { withOps: true });
 }
 
 // ---- 漏斗埋点（无鉴权，best-effort）----

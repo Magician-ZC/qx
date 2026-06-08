@@ -36,6 +36,7 @@ import ConsentInbox from "./components/ConsentInbox";
 import WorldBossPanel from "./components/WorldBossPanel";
 import { BloodFeudPanel } from "./components/BloodFeudPanel";
 import { OpsDashboard } from "./components/OpsDashboard";
+import DungeonPanel from "./components/DungeonPanel";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -492,6 +493,8 @@ export function App() {
   const [worldBossOpen, setWorldBossOpen] = useState(false);
   // 运营看板（cost-dashboard + leads-funnel，developer 门控）。
   const [opsDashboardOpen, setOpsDashboardOpen] = useState(false);
+  // 副本面板（多层 PvE，QUNXIANG_DUNGEON 默认关时后端报错→面板提示未启用）。
+  const [dungeonOpen, setDungeonOpen] = useState(false);
   const [dialogueDraft, setDialogueDraft] = useState("");
   const [latestDialogueReply, setLatestDialogueReply] = useState("");
   const [terrainCatalog, setTerrainCatalog] = useState<TerrainDefinition[]>([]);
@@ -3182,6 +3185,13 @@ export function App() {
                     组队
                   </button>
                   <button
+                    className={`action-button inline-action ${dungeonOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setDungeonOpen((open) => !open)}
+                    title="多层副本：勾选队员逐层推进，通关按贡献分赃、败北分级惩罚（需后端开启 QUNXIANG_DUNGEON）"
+                  >
+                    副本
+                  </button>
+                  <button
                     className="action-button inline-action"
                     onClick={() => setReportDialogOpen(true)}
                     title="举报不当内容（可针对当前选中角色）"
@@ -3688,6 +3698,14 @@ export function App() {
           {/* 运营看板：跨会话成本 + 假门转化漏斗（developer 门控）。*/}
           {developerMode && opsDashboardOpen ? (
             <OpsDashboard onClose={() => setOpsDashboardOpen(false)} />
+          ) : null}
+          {/* 多层副本（玩家可达；后端 QUNXIANG_DUNGEON 关时面板提示未启用）。*/}
+          {showHUD && dungeonOpen && session ? (
+            <DungeonPanel
+              sessionID={session.id}
+              partyCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
+              onClose={() => setDungeonOpen(false)}
+            />
           ) : null}
           {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}
           {billingPanelOverlay}

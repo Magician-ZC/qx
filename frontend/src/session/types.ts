@@ -636,6 +636,71 @@ export type WorldBossStrikeResult = {
   BroadcastCard: string; // 讨平广播的祖魂语气卡（仅结算者填充）
 };
 
+// DungeonFloorResult 是一次副本中单层的结算（与后端 session.DungeonFloorResult 对齐，无 json tag，键名为 Go 大写字段名）。
+export type DungeonFloorResult = {
+  Floor: number;
+  IsBoss: boolean; // 末层 boss
+  ThreatName: string;
+  Outcome: string; // cleared / fled / wiped
+  Rounds: number;
+  DamageDealt: number;
+  DamageTaken: number;
+};
+
+// DungeonResult 是一次多层副本的整体结算（与后端 session.DungeonResult 对齐，无 json tag，键名为 Go 大写字段名）。
+// FloorResults/Awards 为切片（可空 null）；Contribution/PenaltyLayer/InboxCards 为 map（按单位 ID 索引，可空 null）。
+export type DungeonResult = {
+  DungeonID: string;
+  Floors: number; // 计划层数
+  FloorsClear: number; // 实际通关层数
+  Outcome: string; // cleared / fled / wiped
+  FloorResults: DungeonFloorResult[] | null; // 逐层结果
+  Awards: EncounterAward[] | null; // 总分赃（仅通关）
+  Contribution: Record<string, number> | null; // 各参战单位累计贡献分
+  PenaltyLayer: Record<string, number> | null; // 败北时各单位经分级闸落地的后果层
+  InboxCards: Record<string, string> | null; // 各参战单位的祖魂语气命运卡
+};
+
+// ProductFunnelReport 是 AARRR 漏斗的窗口聚合（GET /api/ops/product-funnel，运营态 X-Ops-Token）。
+// 严格对齐后端 analytics.FunnelReport 的 json tag（蛇形）。since_days<=0=全量。
+export type ProductFunnelReport = {
+  since_days: number;
+  by_event: Record<string, number>; // 事件名 -> 计数
+  by_stage: Record<string, number>; // 漏斗阶段 -> 计数
+  distinct_sessions: number; // 窗口内去重 session 数
+  generated_at: string;
+};
+
+// NorthStarReport 是北极星指标的窗口聚合（GET /api/ops/north-star，运营态 X-Ops-Token）。
+// 严格对齐后端 analytics.NorthStarReport 的 json tag（蛇形）。处理率/惊喜率分母为 0 时后端返回 0。
+export type NorthStarReport = {
+  since_days: number;
+  sessions_created: number;
+  characters_created: number;
+  decision_pending: number;
+  decision_resolved: number;
+  inbox_process_rate: number; // resolved/pending；分母 0 -> 0
+  share_initiated: number;
+  purchases: number;
+  return_visits: number;
+  fate_react_expected: number; // 意料之中
+  fate_react_surprise: number; // 有点意外但合理 = 命中惊喜
+  fate_react_ooc: number; // 太离谱 = 疑似失格
+  surprise_hit_rate: number; // surprise/(expected+surprise+ooc)；分母 0 -> 0
+  ooc_rate: number; // ooc/(expected+surprise+ooc)；分母 0 -> 0
+  generated_at: string;
+};
+
+// ExperimentFunnelReport 是某实验按 ab_bucket 拆分的漏斗（GET /api/ops/experiment，运营态 X-Ops-Token）。
+// 严格对齐后端 analytics.ExperimentReport 的 json tag（蛇形）：experiment 回显查询入参；
+// by_bucket 为 ab_bucket -> (event_name -> 计数) 的二维 map。
+export type ExperimentFunnelReport = {
+  experiment: string; // 实验标识（=查询入参，回显便于核对）
+  since_days: number;
+  by_bucket: Record<string, Record<string, number>>; // ab_bucket -> (event_name -> 计数)
+  generated_at: string;
+};
+
 export type AccountUser = {
   id: string;
   username: string;

@@ -58,6 +58,28 @@ type RegionRunnerStats interface {
 	Stats() map[string]any
 }
 
+// billingEntitlementAdapter 把 *billing.Service 适配成 session.EntitlementChecker（叙事密度 perk 用）：
+// 取账户全部权益、过滤 Status=active、返回 SKUID 列表（基元 []string，session 侧据 SKUID 命名约定判 perk）。
+// 这样 session 包无需 import billing（避免循环依赖），与 SpendRecorder 注入同纪律。
+type billingEntitlementAdapter struct{ svc *billing.Service }
+
+func (a billingEntitlementAdapter) ActiveEntitlementSKUs(ctx context.Context, accountID string) ([]string, error) {
+	if a.svc == nil {
+		return nil, nil
+	}
+	ents, err := a.svc.ListEntitlements(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	skus := make([]string, 0, len(ents))
+	for _, e := range ents {
+		if strings.EqualFold(strings.TrimSpace(e.Status), "active") {
+			skus = append(skus, e.SKUID)
+		}
+	}
+	return skus, nil
+}
+
 // NewRouter 组装 HTTP 路由、会话服务与实时推送链路。
 func NewRouter(deps Dependencies) *gin.Engine {
 	router := gin.New()
@@ -178,6 +200,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		// billingSvc 为 nil（未开 flag）时不注入 → 账户级记账/配额前置拦截整体 no-op（nil 安全）。
 		if billingSvc != nil {
 			service.SetSpendRecorder(billingSvc)
+			// 叙事密度 perk：注入账户权益查询器（适配 *billing.Service→session.EntitlementChecker，避免 session import billing）。
+			service.SetEntitlementChecker(billingEntitlementAdapter{svc: billingSvc})
 		}
 		return service
 	}

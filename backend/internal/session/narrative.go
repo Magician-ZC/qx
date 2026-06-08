@@ -798,6 +798,10 @@ func (service *Service) generateBattleReport(
 		"你是《群像》里的单位 %s。请用第一人称写一段本回合战报，长度 150-300 字，强调你如何依据环境、性格和记忆自主行动。只返回 JSON。",
 		narrator.DisplayName(),
 	)
+	// 叙事密度付费档（PRD §3.6，反 P2W：只增描写详略、不改结果）：会员账户的战报更丰富细腻。默认账户/匿名局无 perk=今日行为。
+	if hint := service.narrativeDensityHint(service.narrativeDensityPerk(ctx, state.AccountID)); hint != "" {
+		systemPrompt = systemPrompt + " " + hint
+	}
 	userPrompt := buildBattleReportPrompt(service, ctx, state, byID, narrator)
 	if llmBudgetGuardrailActive(state) {
 		payload := fallbackBattleReportPayload(state, byID, narrator)

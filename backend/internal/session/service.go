@@ -117,6 +117,10 @@ type Service struct {
 	// nil 安全——未注入时账户级记账/配额拦截整体 no-op，仅保留会话级预算护栏（llm_budget.go）。结构上由 SpendRecorder 接口约束，
 	// 刻意不在 session 包 import billing（避免循环依赖），仅由 Wire agent 注入。
 	spend SpendRecorder
+
+	// 账户权益查询器（由 main/router 按 QUNXIANG_BILLING_ENABLED 开时注入 billing.Service 的适配器，默认 nil）：
+	// nil 安全——未注入时叙事密度 perk 整体 no-op（narrativeDensityPerk 恒 false）。mirror spend SpendRecorder，刻意不 import billing。
+	entitlements EntitlementChecker
 }
 
 // SpendRecorder 是账户级 LLM 成本记账器的最小接口（结构上由 billing.Service 满足，见 internal/billing/service.go）。
