@@ -8,9 +8,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+// occurredAtLayout 是 product_events.occurred_at 的写入布局（UTC、空格分隔秒级，字典序=时间序）。
+// 必须与 analytics_query.go 的 queryTimeLayout 一致——否则窗口过滤 occurred_at > cutoff 会错位。
+// 显式写入（而非依赖列默认值）：sqlite 默认 CURRENT_TIMESTAMP 恰好同格式，但 mysql schema 默认 ''（空串），
+// 不显式写会导致 MySQL 上所有 occurred_at='' < cutoff、windowed 查询恒空（对抗评审 medium）。
+const occurredAtLayout = "2006-01-02 15:04:05"
 
 // Stage 是 AARRR 漏斗阶段。
 type Stage string
@@ -81,11 +88,13 @@ func Emit(ctx context.Context, execer Execer, ev Event) error {
 	if err != nil {
 		return fmt.Errorf("analytics marshal props: %w", err)
 	}
+	// 显式写 occurred_at（双方言统一为 UTC 字典序时间串）——否则 MySQL 列默认 '' 会让 windowed 读端恒空。
+	occurredAt := time.Now().UTC().Format(occurredAtLayout)
 	// 维度列（user_id/ab_bucket/client_ts/app_version）由 schema agent 建；旧调用方不传=NULL（nullable 兜底）。
 	if _, err := execer.ExecContext(ctx, `
-		INSERT INTO product_events (id, stage, event_name, session_id, unit_id, properties_json, user_id, ab_bucket, client_ts, app_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		uuid.NewString(), string(ev.Stage), ev.Name, nullable(ev.SessionID), nullable(ev.UnitID), string(encoded),
+		INSERT INTO product_events (id, stage, event_name, session_id, unit_id, properties_json, occurred_at, user_id, ab_bucket, client_ts, app_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		uuid.NewString(), string(ev.Stage), ev.Name, nullable(ev.SessionID), nullable(ev.UnitID), string(encoded), occurredAt,
 		nullable(ev.UserID), nullable(ev.ABBucket), nullable(ev.ClientTS), nullable(ev.AppVersion)); err != nil {
 		return fmt.Errorf("analytics insert: %w", err)
 	}

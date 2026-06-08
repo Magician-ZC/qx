@@ -268,8 +268,12 @@ export function DungeonPanel({ sessionID, partyCandidates, onClose }: Props) {
         setOk(`撤退（已攻克 ${res.FloorsClear}/${res.Floors} 层）。`);
       }
     } catch (e) {
-      // QUNXIANG_DUNGEON 关时后端报错，提示副本未启用。
-      if (e instanceof APIError && (e.status === 404 || e.status === 403 || e.status === 501)) {
+      // QUNXIANG_DUNGEON 关时后端对 ErrDungeonDisabled 返回 400 且 message 含「未启用」——据此判未启用
+      // （后端 dungeon 端点对所有错误统一 400，故按 message 判定比按 status 更准）。
+      const disabled =
+        e instanceof APIError &&
+        (e.status === 404 || e.status === 403 || e.status === 501 || (e.message ?? "").includes("未启用"));
+      if (disabled) {
         setErr(`副本未启用：${errText(e)}`);
       } else {
         setErr(`下副本失败：${errText(e)}`);

@@ -1763,7 +1763,11 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 			compliance := resolveDirectiveCompliance(*state, byID, actor, decision)
 			logDirectiveCompliance(state, actor, byID, compliance)
 			// 忠诚负反馈闭环（§5.7「越按越不听」，best-effort）：强令违心→离心、顺其本心→归心，经 Mutator 落地。
-			_ = service.settleLoyaltyFromCompliance(ctx, state, actor, compliance)
+			// 仅在本回合首个 AP 动作结算一次：执行主循环对 AP=N 的单位一回合处理 N 次，若每动作都结算会按 AP 数翻倍漂移，
+			// 破坏「速率∝玩家按了几次」语义。actionIndex==1 即本回合首动作（service.go:1708 置 1、随后递增）。
+			if actorState.actionIndex == 1 {
+				_ = service.settleLoyaltyFromCompliance(ctx, state, actor, compliance)
+			}
 			defiantAction := isDefiantAction(compliance)
 			modifiers := combineActionModifiers(compliance.Modifiers, hungerActionModifiers(*actor), shakeResolution.Modifiers)
 			if actor.Status.Hunger < 30 {

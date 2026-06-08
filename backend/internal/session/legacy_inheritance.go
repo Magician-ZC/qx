@@ -55,6 +55,8 @@ func (service *Service) inheritLegacyItems(ctx context.Context, state *State, de
 	}
 
 	// 3) 把遗物追加进继承人背包（标记 IsLegacy，确保后续仍可继续传承；保留 SoulBound 不可交易性）。
+	// 设计声明：传家遗物**刻意豁免** BackpackCapacity 上限——遗物是叙事/传承资产、数量天然稀少，宁可超额保全也不丢弃
+	// （区别于普通战利品走 unit.AddBackpackItem 的容量校验）。遗物不进装备栏、不影响 RecalculateDerivedStats。
 	transferred := 0
 	for _, stack := range legacyItems {
 		stack.IsLegacy = true // 已成传家遗物：继承后仍是遗物，可继续向下传承
@@ -98,6 +100,9 @@ func (service *Service) inheritLegacyItems(ctx context.Context, state *State, de
 func collectInheritableItems(record unit.Record) []unit.ItemStack {
 	out := make([]unit.ItemStack, 0, 4)
 	for _, stack := range record.Inventory.Backpack {
+		if stack.ItemID == "" {
+			continue // 跳过空槽幽灵物，避免把空 ItemID 计入传承（与 loot_inheritor 防御一致）
+		}
 		if stack.IsLegacy || stack.SoulBound {
 			out = append(out, stack)
 		}
@@ -110,6 +115,9 @@ func collectInheritableItems(record unit.Record) []unit.ItemStack {
 	sort.Strings(slots)
 	for _, slot := range slots {
 		stack := record.Inventory.Equipment[slot]
+		if stack.ItemID == "" {
+			continue
+		}
 		if stack.IsLegacy || stack.SoulBound {
 			out = append(out, stack)
 		}

@@ -242,7 +242,12 @@ func (service *Service) runDungeonFloor(ctx context.Context, run *dungeonRun, fl
 		}
 	}
 
-	// 回合耗尽未破：视作未能拿下本层（按全灭口径终止，走败北惩罚）。
+	// 回合耗尽未破：若已有队员撤退，按「撤退保利」口径终止（保留已得 loot、不施败北惩罚），与 anyActive==false 分支同口径；
+	// 否则才按全灭走败北惩罚（对抗评审 low：此前一律硬判 wiped 会让本应保利的撤退局误吃惩罚）。
+	if service.dungeonAnyFled(run) {
+		floorRes.Outcome = "fled"
+		return floorRes, "fled", nil
+	}
 	floorRes.Outcome = "wiped"
 	return floorRes, "wiped", nil
 }

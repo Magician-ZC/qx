@@ -560,6 +560,7 @@ type State struct {
 	ID                   string             `json:"id"`
 	AccountID            string             `json:"account_id,omitempty"` // 本局所属账户（空=匿名/单机局，账户级成本配额对其 no-op）；随 state_json 持久化，供 LLM 成本闭环按账户记账与配额拦截
 	MinorMode            bool               `json:"minor_mode,omitempty"` // 本局是否未成年模式（建局时由 compliance.Gate 裁定落库）：开启则全程关闭恋爱·生育、降露骨暴力叙事；随 state_json 持久化，断线重连/推进自动带回，匿名/成年局默认 false 零影响
+	CrossSurfaceWatermark map[string]int    `json:"cross_surface_watermark,omitempty"` // 每角色已浮现到的跨玩家事件 world_tick 水位线：部署边界仅浮现 tick 大于水位线的新跨玩家事件，防同一事件每回合重复刷命运卡（共享世界默认开后必需的去重）
 	WorldID              string             `json:"world_id,omitempty"`   // 本局所属世界（空=未接入多世界；接入后实战交互自动写世界总线）
 	Mode                 string             `json:"mode"`
 	RandomSeed           int64              `json:"random_seed"`

@@ -34,6 +34,9 @@ func (service *Service) surfaceCrossEventsAtBoundary(ctx context.Context, state 
 	if worldID == "" {
 		return // 未接入多世界：跨玩家总线无内容，跳过
 	}
+	if state.CrossSurfaceWatermark == nil {
+		state.CrossSurfaceWatermark = map[string]int{}
+	}
 	for i := range units {
 		u := units[i]
 		if state.PlayerFactionID != "" && u.FactionID != state.PlayerFactionID {
@@ -42,7 +45,13 @@ func (service *Service) surfaceCrossEventsAtBoundary(ctx context.Context, state 
 		if u.Status.LifeState == unit.LifeStateDead {
 			continue
 		}
-		_, _ = service.SurfaceCrossEventsForCharacter(ctx, state.ID, worldID, &u, crossSurfaceLimitPerBoundary)
+		// 按水位线去重：只浮现 world_tick 大于该角色上次浮现到的新跨玩家事件，并推进水位线——
+		// 否则共享世界默认开后，同一条 cross_event 会每个部署边界被重复翻成命运卡，淹没收件箱（对抗评审 high）。
+		since := state.CrossSurfaceWatermark[u.ID]
+		_, newWatermark, _ := service.surfaceCrossEventsForCharacterSince(ctx, state.ID, worldID, &u, crossSurfaceLimitPerBoundary, since)
+		if newWatermark > since {
+			state.CrossSurfaceWatermark[u.ID] = newWatermark
+		}
 	}
 }
 
@@ -86,24 +95,38 @@ func (service *Service) RecordCrossInteraction(ctx context.Context, worldID stri
 // SurfaceCrossEventsForCharacter 拉取世界总线上牵涉该角色的跨玩家事件，逐条按相关性投进她的命运收件箱。
 // 返回被实际惊动（进高光卡/待决策）的条数。limit<=0 时取默认。
 func (service *Service) SurfaceCrossEventsForCharacter(ctx context.Context, sessionID string, worldID string, character *unit.Record, limit int) (int, error) {
+	surfaced, _, err := service.surfaceCrossEventsForCharacterSince(ctx, sessionID, worldID, character, limit, 0)
+	return surfaced, err
+}
+
+// surfaceCrossEventsForCharacterSince 同 SurfaceCrossEventsForCharacter，但只浮现 world_tick > sinceTick 的新跨玩家事件，
+// 并返回本次见到的最大 world_tick（供调用方推进水位线、去重防重复刷卡）。sinceTick=0 等价于不去重（公开方法/ops 路径用）。
+func (service *Service) surfaceCrossEventsForCharacterSince(ctx context.Context, sessionID string, worldID string, character *unit.Record, limit int, sinceTick int) (int, int, error) {
 	if service == nil || service.db == nil || character == nil {
-		return 0, fmt.Errorf("surface cross events: missing dependencies")
+		return 0, sinceTick, fmt.Errorf("surface cross events: missing dependencies")
 	}
 	crossEvents, err := worldbus.ListForCharacter(ctx, service.db, worldID, character.ID, limit)
 	if err != nil {
-		return 0, err
+		return 0, sinceTick, err
 	}
 	surfaced := 0
+	maxTick := sinceTick
 	for _, ce := range crossEvents {
+		if ce.WorldTick <= sinceTick {
+			continue // 已浮现过（tick 不大于水位线），跳过——防同一事件每边界重复刷卡
+		}
+		if ce.WorldTick > maxTick {
+			maxTick = ce.WorldTick
+		}
 		routing, err := service.SurfaceFateEvent(ctx, sessionID, character, crossEventToFate(ce, character.ID))
 		if err != nil {
-			return surfaced, err
+			return surfaced, maxTick, err
 		}
 		if routing.Route != relevance.RouteAutonomous {
 			surfaced++
 		}
 	}
-	return surfaced, nil
+	return surfaced, maxTick, nil
 }
 
 // crossEventToFate 把一条跨玩家事件从「她」的视角翻译成命运事件。

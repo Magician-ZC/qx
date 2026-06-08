@@ -219,7 +219,23 @@ func mandateAllowsInteraction(mandates []string, interactionName string) bool {
 		return false
 	}
 	for _, m := range mandates {
-		if strings.Contains(m, name) {
+		if !strings.Contains(m, name) {
+			continue
+		}
+		// 否定型授权是设计允许的合法写法（types.go：「勿与某派结仇」与「可代我结盟」并列）。
+		// 含否定词的 mandate 即便点名该交互也绝不放行自治同意——否则「勿与某派结盟」因含「结盟」子串被误判放行（对抗评审 medium）。
+		if mandateHasNegation(m) {
+			return false // 显式否决：宁可不自动同意（留待玩家/超时），也不违背玩家禁令
+		}
+		return true
+	}
+	return false
+}
+
+// mandateHasNegation 判某条社交授权是否含否定/禁止语义（保守：含任一否定词即视为否定型，不参与自治放行）。
+func mandateHasNegation(mandate string) bool {
+	for _, neg := range []string{"勿", "不", "禁", "别", "拒", "莫", "毋"} {
+		if strings.Contains(mandate, neg) {
 			return true
 		}
 	}
