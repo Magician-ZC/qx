@@ -23,6 +23,7 @@ import (
 	"qunxiang/backend/internal/engine/turns"
 	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/session"
+	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -249,6 +250,35 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
 	registerLeadEndpoints(router, deps.Store)
+
+	// 社会客体撮合（跨玩家，§2.2）：POST 用 MatchScore 四因子 + arbitration 确定性择人绑进社会客体；GET 列出某世界的社会客体。
+	router.POST("/api/worlds/:worldId/social-objects", func(c *gin.Context) {
+		worldID := strings.TrimSpace(c.Param("worldId"))
+		var body struct {
+			Kind       string                   `json:"kind"`
+			Label      string                   `json:"label"`
+			Slots      int                      `json:"slots"`
+			Candidates []session.MatchCandidate `json:"candidates"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+		objectID, chosen, err := newSessionService().MatchIntoSocialObject(c.Request.Context(), worldID, body.Kind, body.Label, body.Candidates, body.Slots)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"object_id": objectID, "chosen": chosen})
+	})
+	router.GET("/api/worlds/:worldId/social-objects", func(c *gin.Context) {
+		objs, err := socialobject.ListByWorld(c.Request.Context(), deps.Store, strings.TrimSpace(c.Param("worldId")))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"social_objects": objs})
+	})
 
 	router.GET("/api/world/terrains", func(c *gin.Context) {
 		if err := world.SeedTerrainCatalog(c.Request.Context(), deps.Store); err != nil {

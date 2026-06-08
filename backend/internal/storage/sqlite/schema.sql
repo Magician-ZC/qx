@@ -348,3 +348,23 @@ CREATE TABLE IF NOT EXISTS fake_door_leads (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fake_door_leads_kind ON fake_door_leads(kind, created_at);
+
+-- 社会客体 + 成员（跨玩家撮合，设计 §2.2）：MatchScore 四因子打分 + arbitration 择人后绑定。无 units 外键（跨界角色）。
+CREATE TABLE IF NOT EXISTS social_objects (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_objects_world ON social_objects(world_id, kind);
+
+CREATE TABLE IF NOT EXISTS social_object_members (
+  object_id TEXT NOT NULL,
+  unit_id TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 0,
+  joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (object_id, unit_id)
+);

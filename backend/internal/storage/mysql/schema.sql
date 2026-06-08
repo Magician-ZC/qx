@@ -304,3 +304,21 @@ CREATE TABLE IF NOT EXISTS fake_door_leads (
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_fake_door_leads_kind (kind, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS social_objects (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  kind VARCHAR(64) NOT NULL,
+  label VARCHAR(255) NOT NULL DEFAULT '',
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_social_objects_world (world_id, kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS social_object_members (
+  object_id VARCHAR(191) NOT NULL,
+  unit_id VARCHAR(191) NOT NULL,
+  score DOUBLE NOT NULL DEFAULT 0,
+  joined_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (object_id, unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

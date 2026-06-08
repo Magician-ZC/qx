@@ -65,6 +65,9 @@ const (
 	// 回响：本次自治选择被归因到一条真实的过往玩家动作（「因为你上次…，所以这次…」，宪法 §6.2）。
 	ReasonEchoLink ReasonCode = "ECHO_LINK"
 
+	// 社会客体撮合：某角色被 MatchScore+arbitration 确定性撮合进一个社会客体（组队/结盟/市集…，§2.2）。流程事件，非状态变更。
+	ReasonSocialObjectBind ReasonCode = "SOCIAL_OBJECT_BIND"
+
 	// 大世界生命周期（沙盘 §8.7）。CHARACTER_DIED / LOYALTY_GAIN / LOYALTY_STRAIN 改保护字段、经 status.Mutator；
 	// 其余（出生/复仇得偿/势力崩塌/人格漂移）是流程事件，经 EmitProcessEvent 留痕（人格漂移非保护状态字段，不走 Mutator）。
 	ReasonCharacterBorn      ReasonCode = "CHARACTER_BORN"
@@ -113,6 +116,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonDecisionResolved, Category: CategoryFate, DisplayName: "决断已下", DefaultReasonText: "一件待决策的事有了着落", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonPlayerIntervention, Category: CategoryPlayer, DisplayName: "玩家接管", DefaultReasonText: "你直接为她拿了一次主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
 		{Code: ReasonEchoLink, Category: CategoryPlayer, DisplayName: "回响", DefaultReasonText: "因为你上次的选择，这次她做了不一样的事", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 9},
+		{Code: ReasonSocialObjectBind, Category: CategoryFate, DisplayName: "撮合入局", DefaultReasonText: "命运把她和另几个人牵到了一处", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCharacterBorn, Category: CategoryLifecycle, DisplayName: "新生", DefaultReasonText: "一个新生命降临到这个世界", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCharacterDied, Category: CategoryLifecycle, DisplayName: "陨落", DefaultReasonText: "一个角色的生命走到了尽头", StatDomains: []string{"lives_remaining"}, ImportanceMin: 8, ImportanceMax: 10},
 		{Code: ReasonVengeanceFulfilled, Category: CategoryLifecycle, DisplayName: "夙愿得偿", DefaultReasonText: "她了结了一桩萦绕已久的恩怨", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
