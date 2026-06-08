@@ -8,9 +8,39 @@ import (
 	"strings"
 	"testing"
 
+	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/villageseed"
 	"qunxiang/backend/internal/world"
 )
+
+// TestIsSeededVillagerRecord 锁定村庄幂等指纹：中文性别=村民；wanderer(玩家)/child(孩子)/空=非村民；出身原型=村民。
+// 回归点：孩子 Lineage="child" 曾因 lineage!=wanderer 被误判为村民，会让「只生过孩子」的局永久跳过织村（对抗评审 low 修复）。
+func TestIsSeededVillagerRecord(t *testing.T) {
+	cases := []struct {
+		name    string
+		gender  string
+		lineage string
+		want    bool
+	}{
+		{"村民·中文性别", "女", "边境猎户", true},
+		{"村民·中文性别男·空原型", "男", "", true},
+		{"玩家主单位·英文性别·wanderer", "female", "wanderer", false},
+		{"孩子·英文性别·child", "male", "child", false},
+		{"普通单位·英文性别·空原型", "male", "", false},
+		{"出身原型·英文性别", "male", "流亡铁匠", true},
+	}
+	for _, tc := range cases {
+		rec := &unit.Record{}
+		rec.Identity.Gender = tc.gender
+		rec.Identity.Lineage = tc.lineage
+		if got := isSeededVillagerRecord(rec); got != tc.want {
+			t.Fatalf("%s: isSeededVillagerRecord(gender=%q,lineage=%q)=%v，期望 %v", tc.name, tc.gender, tc.lineage, got, tc.want)
+		}
+	}
+	if isSeededVillagerRecord(nil) {
+		t.Fatalf("nil 记录应判为非村民")
+	}
+}
 
 func TestSeedVillagePersists(t *testing.T) {
 	db, repo, service := newThreatTestService(t)

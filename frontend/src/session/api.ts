@@ -7,8 +7,10 @@ import type {
   BillingCharge,
   BillingQuota,
   BillingSKU,
+  BloodFeudEntry,
   ComplianceGate,
   ConsentRequest,
+  CostDashboardData,
   DialogueMessage,
   BattleUnit,
   DuelRoomStatus,
@@ -16,6 +18,8 @@ import type {
   Entitlement,
   FieldBossResult,
   LeadEvent,
+  LeadsFunnelData,
+  LLMInteraction,
   ModerationReport,
   PrivacyEraseOptions,
   PrivacyEraseResult,
@@ -23,7 +27,12 @@ import type {
   SessionLog,
   SessionSnapshot,
   TerrainDefinition,
+  WorldBossStrikeResult,
 } from "./types";
+
+// 这些类型在 types.ts 定义（单一真相源，严格对齐后端字段），并从 api 模块再导出，
+// 让消费方可统一从 './session/api' 取 wrapper 与其返回/载荷类型（World Boss / Ops 看板 / 血仇）。
+export type { WorldBossStrikeResult, CostDashboardData, LeadsFunnelData, BloodFeudEntry } from "./types";
 
 const API_BASE =
   import.meta.env.VITE_API_BASE_URL ??
@@ -53,6 +62,8 @@ type SessionStreamHandlers = {
   // 故倒计时不能由 WS 直接取：收到推送后应调 getFateFeed(unitID) 拉最新 feed（pending 卡才带 expires_at/countdown_hours）。
   onFateInbox?: (payload: Record<string, unknown>) => void;
   onFateEcho?: (payload: Record<string, unknown>) => void;
+  // onLlmInteraction 收到 llm_interaction 推送（后端推的是裸 interaction 对象，二层解包后即 LLMInteraction）。
+  onLlmInteraction?: (interaction: LLMInteraction) => void;
 };
 
 // FateCard 是命运四槽界面的一张卡（高光/待决策/回响）。
@@ -65,6 +76,9 @@ export type FateCard = {
   occurred_at?: string;
   expires_at?: string;
   countdown_hours?: number;
+  // choices 仅 pending 卡随 feed 返回（后端 buildFateChoices，omitempty）：玩家可选的处理分支，
+  // resolve_class 即传给 resolveFateDecision 的 resolveType。
+  choices?: { id: string; label: string; resolve_class: string }[];
 };
 
 // EliteAward 是一次 elite/PvE 遭遇分到的一件战利品（与后端 encounter.Award 对齐，Go 默认大写键名）。
@@ -420,6 +434,11 @@ export function subscribeSessionStream(sessionID: string, handlers: SessionStrea
       }
       if (type === "fate_inbox") {
         handlers.onFateInbox?.(payload);
+        return;
+      }
+      if (type === "llm_interaction") {
+        // 后端推的是裸 interaction 对象，payload 已二层解包即 LLMInteraction。
+        handlers.onLlmInteraction?.(payload as LLMInteraction);
         return;
       }
       if (type === "fate_echo") {
@@ -927,6 +946,83 @@ export async function resolveFieldBoss(
       Members: null,
     }
   );
+}
+
+// ---- 世界 Boss：全世界共享血池的异步协作 PvE（POST，无 ops 守卫）----
+
+// spawnWorldBoss 在某世界投放一头世界 Boss（name 必填、hp 须为正且不超后端上限）。返回 boss ID。
+// regionID 可选（分片定位）。真实动作：写 world_bosses 表；world 必须已注册否则 400。
+export async function spawnWorldBoss(
+  worldID: string,
+  name: string,
+  hp: number,
+  regionID?: string,
+): Promise<string> {
+  const data = await request<{ boss_id?: string }>(
+    `/api/worlds/${encodeURIComponent(worldID)}/bosses`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, hp, region_id: regionID }),
+    },
+  );
+  return data.boss_id ?? "";
+}
+
+// strikeWorldBoss 对一头世界 Boss 出手一次：原子扣血 + 记进世界总线贡献账本；血池清零则由抢到结算闩锁者全员分赃。
+// 真实动作：注意返回键名为 Go 大写字段名（WorldBossStrikeResult 无 json tag）。Participants/Awards/BroadcastCard 仅结算者填充。
+export async function strikeWorldBoss(
+  worldID: string,
+  bossID: string,
+  attackerID: string,
+): Promise<WorldBossStrikeResult> {
+  const data = await request<{ strike?: WorldBossStrikeResult }>(
+    `/api/worlds/${encodeURIComponent(worldID)}/bosses/${encodeURIComponent(bossID)}/strike`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attacker_id: attackerID }),
+    },
+  );
+  return (
+    data.strike ?? {
+      BossID: bossID,
+      AttackerID: attackerID,
+      Damage: 0,
+      HPRemaining: 0,
+      Defeated: false,
+      SettledByMe: false,
+      Participants: 0,
+      Awards: null,
+      BroadcastCard: "",
+    }
+  );
+}
+
+// ---- 血仇（blood feud）：某角色的世仇清单（GET，会话作用域）----
+
+// listBloodFeuds 列出某角色当前怀有的世仇关系（rivalry 达成仇阈的对外强敌意），按敌意降序。纯读、无副作用。
+export async function listBloodFeuds(sessionID: string, unitID: string): Promise<BloodFeudEntry[]> {
+  const data = await request<{ feuds?: BloodFeudEntry[] }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/feuds`,
+  );
+  return data.feuds ?? [];
+}
+
+// ---- Ops 看板（运营态，X-Ops-Token）----
+
+// fetchCostDashboard 读运营成本/单位经济仪表盘（最近 days 天，默认 30；days<=0 视为全量）。后端裸返回 CostDashboardData。
+export async function fetchCostDashboard(days = 30): Promise<CostDashboardData> {
+  return request<CostDashboardData>(
+    `/api/ops/cost-dashboard?days=${days}`,
+    undefined,
+    { withOps: true },
+  );
+}
+
+// fetchLeadsFunnel 读假门转化漏斗（按 kind 计数 + 唯一访客）。后端裸返回 LeadsFunnelData。
+export async function fetchLeadsFunnel(): Promise<LeadsFunnelData> {
+  return request<LeadsFunnelData>(`/api/ops/leads-funnel`, undefined, { withOps: true });
 }
 
 // ---- 漏斗埋点（无鉴权，best-effort）----

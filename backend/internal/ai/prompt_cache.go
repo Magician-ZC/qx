@@ -2,8 +2,10 @@ package ai
 
 // 文件说明：进程内 TTL+LRU 的 LLM 决策缓存（§11.2 最高 ROI 成本项；沙盘 §8.3「决策缓存扩展 ai.batch fingerprint 思路做跨 tick LRU」）。
 // 相同情境（task+schema+完整 prompt）的成功决策在 TTL 内直接复用、彻底跳过 LLM 调用。只缓存**成功的真 LLM 输出**
-// （规则 fallback/降级结果不入缓存）；键不含身份 Metadata（unit/session 仅作遥测，不影响情境）。整块 flag-gated
-// （QUNXIANG_PROMPT_CACHE 默认关）；缓存命中返回的 Output 仍由调用方对**当前**状态 re-validate（不符即优雅回退），故缓存安全。
+// （规则 fallback/降级结果不入缓存）；键不含身份 Metadata（unit/session 仅作遥测，不影响情境）。**默认开**
+// （默认 LRU 2048 / TTL 5min 已是安全档；命中返回的 Output 仍由调用方对**当前**状态 re-validate，不符即优雅回退，故缓存安全），
+// 仅当 QUNXIANG_PROMPT_CACHE=false/0/no/off 才显式禁用。注意：仅 Cacheable=true 的请求才会进/查缓存，故关 flag 与
+// 「无任何请求标 Cacheable」二者效果一致——本变更不改变未标 Cacheable 请求的行为。
 
 import (
 	"container/list"
@@ -11,6 +13,7 @@ import (
 	"encoding/hex"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,12 +125,13 @@ func (c *promptCache) Stats() map[string]any {
 	}
 }
 
-// promptCacheFromEnv 按 QUNXIANG_PROMPT_CACHE(true/1/yes/on 启用) / _SIZE / _TTL_SECONDS 构造；未启用返回 nil（默认关）。
+// promptCacheFromEnv 构造 prompt 缓存：**默认开**（默认 LRU 2048 / TTL 5min 安全档），
+// 仅当 QUNXIANG_PROMPT_CACHE=false/0/no/off 才返回 nil 禁用；未设/非法/其它真值一律启用。
+// 容量与 TTL 可经 _SIZE / _TTL_SECONDS 覆盖（非法或 <=0 时退回默认）。
 func promptCacheFromEnv() *promptCache {
-	switch os.Getenv("QUNXIANG_PROMPT_CACHE") {
-	case "true", "1", "yes", "on":
-	default:
-		return nil
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_PROMPT_CACHE"))) {
+	case "false", "0", "no", "off":
+		return nil // 仅显式关才禁用
 	}
 	size := 2048
 	if s, err := strconv.Atoi(os.Getenv("QUNXIANG_PROMPT_CACHE_SIZE")); err == nil && s > 0 {

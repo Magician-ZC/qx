@@ -833,6 +833,12 @@ func (service *Service) generateCombatShakeChoice(
 		relationSummary,
 		knowledgeSummary,
 	)
+	// 未成年模式：给战斗高压情绪叙事追加分级指令（避免血腥/残肢/濒死等露骨描写），仅约束 LLM 措辞、不改战斗数值。
+	// minorModeShakeDirective 定义于同包 combat_shake.go；state.MinorMode 关时返回空串、零影响。
+	if directive := minorModeShakeDirective(state.MinorMode); directive != "" {
+		systemPrompt += "\n" + directive
+		userPrompt += "\n" + directive
+	}
 	if service.llmBlocked(ctx, state) {
 		choice := budgetGuardrailCombatShakeChoice()
 		result := budgetGuardrailResult(state)
@@ -1798,6 +1804,18 @@ func buildDecisionPrompt(
 	fmt.Fprintf(&builder, "你的性格: %s\n", summarizeActorPersonality(*actor))
 	if biography := strings.TrimSpace(actor.Identity.Biography); biography != "" {
 		fmt.Fprintf(&builder, "你的生平: %s\n", biography)
+	}
+	// 六维野心的主导渴望（unit.Ambition→AmbitionBiasOf.Dominant）：让决策看见这个角色内心最强的驱动力。
+	if tag, _ := AmbitionBiasOf(*actor).Dominant(); tag != "" {
+		fmt.Fprintf(&builder, "你内心最强的渴望: %s\n", ambitionTagDisplay(tag))
+	}
+	// 离线宪章上下文（长期图景 + 社交授权）：玩家不在场时单位据此长效自治。红线另经归因校验强制，不在此重复。
+	if charterCtx := charterContextForUnit(&state, actor.ID); charterCtx != "" {
+		fmt.Fprintf(&builder, "%s\n", charterCtx)
+	}
+	// 未成年模式内容分级：约束 LLM 避免恋爱/亲密/生育与露骨暴力（state.MinorMode 关时零影响）。
+	if state.MinorMode {
+		fmt.Fprintln(&builder, "内容分级: 本局为青少年模式——不要发起或推进恋爱/亲密/生育情节；战斗与冲突用克制中性措辞，避免血腥露骨描写。")
 	}
 	fmt.Fprintf(&builder, "你的环境摘要: %s\n", summarizeImmediateEnvironment(state, byID, actor))
 	if strings.TrimSpace(memorySummary) == "" {

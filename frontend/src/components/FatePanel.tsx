@@ -7,10 +7,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  emitClientAnalytics,
   getFateFeed,
   getUnitStatus,
   resolveFateDecision,
   subscribeSessionStream,
+  trackFunnel,
   type FateCard,
 } from "../session/api";
 import { computeFateCountdown, formatFateCountdown } from "../fate/countdown";
@@ -107,6 +109,17 @@ const echoCardStyle: React.CSSProperties = {
   borderLeft: "3px solid #6f8db5",
 };
 const actionRowStyle: React.CSSProperties = { display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" };
+// 高光卡「分享」小按钮（贴右下角，弱化样式，不抢叙事正文风头）。
+const shareBtnStyle: React.CSSProperties = {
+  marginTop: 6,
+  cursor: "pointer",
+  background: "transparent",
+  border: "1px solid rgba(217, 188, 115, 0.35)",
+  color: "#cdb98a",
+  borderRadius: 6,
+  padding: "3px 8px",
+  fontSize: 11,
+};
 const btnStyle: React.CSSProperties = {
   flex: "1 1 auto",
   cursor: "pointer",
@@ -220,6 +233,8 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
   const [resolving, setResolving] = useState<string>("");
   const [toast, setToast] = useState("");
   const seenRef = useRef<Set<string>>(new Set());
+  // shareInitiatedRef 守卫 share_initiated 同一卡只上报一次（按 narrative 去重），避免重复点击灌漏斗。
+  const shareInitiatedRef = useRef<Set<string>>(new Set());
 
   // 外部选中单位变化时，跟随聚焦（仅当面板尚未手动切换过其它单位时不强切；这里简单跟随首选）。
   useEffect(() => {
@@ -302,6 +317,24 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
     [sessionId, unitID],
   );
 
+  // onShare 把一段命运叙事复制到剪贴板供玩家分享，并埋点 share_initiated（同一段叙事只上报一次）。
+  // 埋点与复制均 best-effort：剪贴板不可用时仍给 toast 反馈，绝不阻断 UX。
+  const onShare = useCallback((narrative: string) => {
+    const text = narrative.trim();
+    if (!text) return;
+    if (!shareInitiatedRef.current.has(text)) {
+      shareInitiatedRef.current.add(text);
+      void emitClientAnalytics("share_initiated");
+      void trackFunnel("share_initiated", { source: "fate_highlight" });
+    }
+    try {
+      void navigator.clipboard?.writeText(text);
+      setToast("她的故事，已经替你抄了下来。去说给别人听吧。");
+    } catch {
+      setToast("她的故事在这儿——长按或选中，讲给别人听。");
+    }
+  }, []);
+
   return (
     <aside style={panelStyle} role="dialog" aria-label="命运面板">
       <div style={headerStyle}>
@@ -357,30 +390,49 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
             <p style={{ margin: 0 }}>{pending[0].narrative}</p>
             <FateCountdownBar card={pending[0]} />
             <div style={actionRowStyle}>
-              <button
-                type="button"
-                style={btnStyle}
-                disabled={resolving === pending[0].decision_id}
-                onClick={() => void onResolve(pending[0].decision_id ?? "", "let_her", "由她去")}
-              >
-                由她去
-              </button>
-              <button
-                type="button"
-                style={btnStyle}
-                disabled={resolving === pending[0].decision_id}
-                onClick={() => void onResolve(pending[0].decision_id ?? "", "urge", "疾呼拦住")}
-              >
-                疾呼拦住
-              </button>
-              <button
-                type="button"
-                style={btnStyle}
-                disabled={resolving === pending[0].decision_id}
-                onClick={() => void onResolve(pending[0].decision_id ?? "", "acknowledge", "默默看着")}
-              >
-                默默看着
-              </button>
+              {/* 情境化 choices：后端 buildFateChoices 按事件类型/红线/关系生成贴合选项（label/id），
+                  resolveType 传 choice.id，后端 resolveFateChoiceClass 会把情境 id 折回基础后果类。
+                  feed 未带 choices 时回落硬编码三键（向后兼容 WS 推送/旧后端）。 */}
+              {pending[0].choices && pending[0].choices.length > 0 ? (
+                pending[0].choices.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    style={btnStyle}
+                    disabled={resolving === pending[0].decision_id}
+                    onClick={() => void onResolve(pending[0].decision_id ?? "", c.id, c.label)}
+                  >
+                    {c.label}
+                  </button>
+                ))
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    style={btnStyle}
+                    disabled={resolving === pending[0].decision_id}
+                    onClick={() => void onResolve(pending[0].decision_id ?? "", "let_her", "由她去")}
+                  >
+                    由她去
+                  </button>
+                  <button
+                    type="button"
+                    style={btnStyle}
+                    disabled={resolving === pending[0].decision_id}
+                    onClick={() => void onResolve(pending[0].decision_id ?? "", "urge", "疾呼拦住")}
+                  >
+                    疾呼拦住
+                  </button>
+                  <button
+                    type="button"
+                    style={btnStyle}
+                    disabled={resolving === pending[0].decision_id}
+                    onClick={() => void onResolve(pending[0].decision_id ?? "", "acknowledge", "默默看着")}
+                  >
+                    默默看着
+                  </button>
+                </>
+              )}
             </div>
             {pending.length > 1 ? (
               <div style={{ color: "#9aa0ad", fontSize: 11, marginTop: 6 }}>还有 {pending.length - 1} 件事在等你</div>
@@ -396,7 +448,15 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
       ) : (
         highlights.map((c, i) => (
           <div key={`h${i}`} style={sectionCardStyle}>
-            {c.narrative}
+            <div>{c.narrative}</div>
+            <button
+              type="button"
+              style={shareBtnStyle}
+              title="把她的故事讲给别人听"
+              onClick={() => onShare(c.narrative)}
+            >
+              讲给别人听
+            </button>
           </div>
         ))
       )}

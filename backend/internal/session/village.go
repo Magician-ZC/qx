@@ -5,6 +5,8 @@ package session
 // 出身/种子记忆/人生目标写进 Biography（决策 prompt 会读到）；秘密与目标作为锚由 M2.3 的 relevance_anchors 接手。
 // 出生仇怨/宿敌另写入可查询的结构化记忆（rememberBirthBond/rememberBirthSelf 调既有 rememberUnitWithSource API），
 // 让「出生即结仇」进入记忆检索/衰减/闪回链路，而不只停在关系行与锚里。
+// 主战局**默认**为玩家身边织这张 20 人关系网（mainVillageEnabled 默认开，QUNXIANG_MAIN_VILLAGE=false 才关），
+// 让命运层一开局就有锚可点；seedVillageForSession 自带幂等守卫（sessionAlreadyHasVillage），重连/重复建局不重复造人。
 
 import (
 	"context"
@@ -196,15 +198,17 @@ func (service *Service) SeedVillageBestEffort(ctx context.Context, sessionID str
 	return len(villagers)
 }
 
-// mainVillageEnabled 读 QUNXIANG_MAIN_VILLAGE（true/1/yes/on 视为开），默认关 → seedVillageForSession no-op。
-// 主战局默认不播种 20 人关系网：避免对所有存量/默认建局链路强行造人（每局多落库 20 行 + 关系/锚），
-// 只有显式开启才在主局兑现命运开盒「她身边已有二十个有名有姓的人」承诺。与 onboarding 的 with_village 查询参数互不影响。
+// mainVillageEnabled 读 QUNXIANG_MAIN_VILLAGE，**默认开**（未设/非法 → true，主战局兑现命运开盒
+// 「她身边已有二十个有名有姓的人」承诺）。仅当显式置 false/0/no/off 才关——保留紧急回退开关，
+// 用于线上出问题时一键回到「主局不织村」的旧行为（无需回滚代码）。
+// 采用项目约定的「默认开但可显式关」反向 envBool 语义。与 onboarding 的 with_village 查询参数互不影响；
+// 重复建局/重连不会重复造人由 seedVillageForSession 内的幂等守卫保证。
 func mainVillageEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_MAIN_VILLAGE"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
+	case "false", "0", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -213,17 +217,65 @@ func mainVillageEnabled() bool {
 // 仿 seedAmbientForNewUnit 的集中化 idiom：单人局只为玩家阵营织本局关系网（worldID 传空=不入世界，安全）。
 //
 // 纪律与不变量：
-//  1. flag-gated：QUNXIANG_MAIN_VILLAGE 关时（默认）整方法 no-op、零行为变化、零 DB 写——对默认建局链路无成本，
-//     也避免对存量局/重连重复造人。
+//  1. flag-gated（默认开）：mainVillageEnabled 默认开，主局默认织村；仅 QUNXIANG_MAIN_VILLAGE=false/0/no/off
+//     时整方法 no-op、零行为变化、零 DB 写——作紧急回退开关，回到「主局不织村」旧行为而无需回滚代码。
 //  2. best-effort：复用 SeedVillageBestEffort 的吞错包装，任何失败只记日志，**绝不**中断或影响建局/组队。
 //  3. 确定性：seed 由建局 RandomSeed 派生（state.RandomSeed+1，与 onboarding /api/units/bootstrap?with_village=1 同口径），
 //     避免与玩家主单位撞种子；同一局重复调用是确定性一致的，但会新建行，故调用方须只在建局/组队各调一次。
+//  4. 幂等：起始处用 sessionAlreadyHasVillage 守卫，已织过村则直接返回，绝不重复造人（确定性、零额外 LLM，仅一次 ListBySession）。
+//     当前两个调用点均在建局/组队时各调一次（reconnect.go 不调用本方法）；守卫是防御性的，使本方法即便日后接进中局/重连路径也不会重复造人。
 //
 // 注意：调用点应放在「玩家单位刚落库、紧邻 seedAmbientForUnits」处，让村民与玩家在同一建局事务边界内成形。
 func (service *Service) seedVillageForSession(ctx context.Context, state *State) {
 	if service == nil || state == nil || !mainVillageEnabled() {
 		return
 	}
+	// 幂等守卫：若本局已织过村（已有村民单位），直接返回——避免重复建局/未来接入中局路径时重复造人。
+	if service.sessionAlreadyHasVillage(ctx, state.ID) {
+		return
+	}
 	// worldID 传空：单人局当前无世界，只织本局关系网（不强行 world.Create）。
 	_ = service.SeedVillageBestEffort(ctx, state.ID, state.PlayerFactionID, "", state.RandomSeed+1)
+}
+
+// isSeededVillagerRecord 判定一条单位记录是否为本局 SeedVillage 落库的「村民」。
+// 用两个 seed 无关、SeedVillage 必然写入的指纹联合判定（任一命中即算村民），不依赖具体 seed/原型分布：
+//   - Identity.Gender 为中文「男」/「女」：SeedVillage 把 villageseed.Member.Gender（"男"/"女"）直接写进
+//     Identity.Gender，而 unit.BootstrapRecord 造的玩家主单位/普通单位、以及生育落库的孩子 Gender 恒为英文 "male"/"female"。
+//     这是可靠主指纹（村民必中、非村民必不中）。
+//   - Identity.Lineage 为出身原型（非空、非 "wanderer"、非 "child"）：SeedVillage 把 Lineage 置为出身原型（如「边境猎户」），
+//     bootstrap 默认 Lineage 恒为 "wanderer"、生育孩子 Lineage 恒为 "child"（见 romance.go createChildUnit），故二者须显式排除，
+//     否则「只生过孩子、从未织村」的局会被误判为已织村而永久跳过织村（潜伏 bug）。
+//
+// 两条指纹冗余互保：即便上游某天改了其一，另一条仍能兜住，避免误把玩家/孩子单位当村民、或漏判村民致重复造人。
+func isSeededVillagerRecord(rec *unit.Record) bool {
+	if rec == nil {
+		return false
+	}
+	switch rec.Identity.Gender {
+	case "男", "女":
+		return true
+	}
+	lineage := strings.TrimSpace(rec.Identity.Lineage)
+	return lineage != "" && lineage != "wanderer" && lineage != "child"
+}
+
+// sessionAlreadyHasVillage 判定本局是否已织过 20 人出生关系网：本局是否已存在「村民」单位
+// （isSeededVillagerRecord 指纹命中；玩家主单位/普通单位不会误判）。
+// 确定性、零额外 LLM：仅一次 ListBySession + 内存比对。读 DB 失败时**保守返回 false**（宁可后续 best-effort
+// 重试播种、也不因瞬时读错而永久跳过织村——SeedVillageBestEffort 本身吞错，最坏只是一次无害的多写尝试）。
+func (service *Service) sessionAlreadyHasVillage(ctx context.Context, sessionID string) bool {
+	if service == nil || service.units == nil {
+		return false
+	}
+	records, err := service.units.ListBySession(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	for i := range records {
+		if isSeededVillagerRecord(&records[i]) {
+			return true
+		}
+	}
+	return false
 }

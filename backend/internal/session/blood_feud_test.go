@@ -86,19 +86,20 @@ func TestBloodFeudEnabled_FlagSemantics(t *testing.T) {
 	defer os.Setenv("QUNXIANG_BLOOD_FEUD", orig)
 
 	os.Unsetenv("QUNXIANG_BLOOD_FEUD")
-	if bloodFeudEnabled() {
-		t.Fatalf("缺省（未设环境变量）应为关")
+	if !bloodFeudEnabled() {
+		t.Fatalf("缺省（未设环境变量）应为默认开")
 	}
-	for _, off := range []string{"", "false", "0", "no", "off", "  "} {
+	// 空串/纯空白现按默认开处理（视为未显式关）；非法值同样默认开。
+	for _, on := range []string{"", "  ", "true", "1", "yes", "on", "TRUE", " On ", "garbage"} {
+		os.Setenv("QUNXIANG_BLOOD_FEUD", on)
+		if !bloodFeudEnabled() {
+			t.Fatalf("值 %q 应判为开（默认开，仅 false/0/no/off 关）", on)
+		}
+	}
+	for _, off := range []string{"false", "0", "no", "off", "FALSE", " Off "} {
 		os.Setenv("QUNXIANG_BLOOD_FEUD", off)
 		if bloodFeudEnabled() {
 			t.Fatalf("值 %q 应判为关", off)
-		}
-	}
-	for _, on := range []string{"true", "1", "yes", "on", "TRUE", " On "} {
-		os.Setenv("QUNXIANG_BLOOD_FEUD", on)
-		if !bloodFeudEnabled() {
-			t.Fatalf("值 %q 应判为开", on)
 		}
 	}
 }

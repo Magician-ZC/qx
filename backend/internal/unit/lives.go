@@ -72,6 +72,17 @@ func TickRecovery(record *Record) {
 	}
 }
 
+// SetNewbornBattleStats 初始化新生儿单位的战斗基础属性。
+// 新生儿是初始化而非状态变更事件，无需经 StatusMutator 生成审计事件行；
+// 本函数位于 statuslint 白名单（/internal/unit/），直赋受保护字段 HP 合法，
+// 与同文件 ApplyFatalDamage/Rescue/SelfRevive 设 HP 同源。调用方：session/romance.go createChildUnit。
+func SetNewbornBattleStats(record *Record, hp, attack, defense, move int) {
+	record.Status.HP = hp
+	record.Status.Attack = attack
+	record.Status.Defense = defense
+	record.Status.Move = move
+}
+
 // lowerTrait 安全降低人格值，避免小于 0。
 func lowerTrait(current float64, delta float64) float64 {
 	value := current - delta

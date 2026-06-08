@@ -540,7 +540,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 		// 软解析账户：有 Bearer token → 归账（成本闭环 / 配额拦截）；无 token / 失败 → 匿名空串（建局照常）。
 		accountID := softAccountID(deps.Accounts, c)
-		snapshot, err := newSessionService().CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID)
+		// minor_mode 由 complianceGate() 前置中间件按账户实名生日裁定置位（flag 关时恒 false）；落 State 持久化，advance 时从 state 取。
+		snapshot, err := newSessionService().CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID, c.GetBool("minor_mode"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -593,7 +594,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		// 软解析房主账户：有 Bearer token → 归账（成本闭环 / 配额拦截）；无 token / 失败 → 匿名空串（建局照常）。
 		accountID := softAccountID(deps.Accounts, c)
 		service := newSessionService()
-		snapshot, err := service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID)
+		snapshot, err := service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(c.Request.Context(), seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, accountID, c.GetBool("minor_mode"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -1829,39 +1830,45 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusOK, gin.H{"skus": skus})
 		})
 
-		// 购买（收据校验经 ReceiptVerifier，默认 stub 恒通过；真 Apple/Google 网关是 stub 边界）。
-		router.POST("/api/billing/purchase", func(c *gin.Context) {
-			var body struct {
-				SKUID    string `json:"sku_id"`
-				Platform string `json:"platform"`
-				Receipt  string `json:"receipt"`
-			}
-			if err := c.ShouldBindJSON(&body); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid purchase payload"})
-				return
-			}
-			// 账户 ID 取自鉴权 token（忽略客户端传入），防为他人账户伪造扣费/发放权益。
-			accountID, ok := authedAccountID(deps.Accounts, c)
-			if !ok {
-				return
-			}
-			charge, err := billingSvc.Purchase(c.Request.Context(), accountID, body.SKUID, body.Platform, body.Receipt)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-			// 漏斗埋点（best-effort，失败绝不影响购买）：营收阶段事件。
-			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
-				Stage: analytics.StageRevenue,
-				Name:  analytics.EventPurchase,
-				Props: map[string]any{
-					"account_id":   accountID,
-					"sku_id":       body.SKUID,
-					"amount_cents": charge.AmountCents,
-				},
+		// 购买（收据校验经 ReceiptVerifier）。§5 高危纵深防御：仅当 billing.ProductionReady()（IAP_REAL 开 + 至少一平台凭据存在）
+		// 才注册 purchase 端点——否则 stubVerifier 恒通过会让任意伪造收据领真实权益（刷单/回放）。未就绪时端点根本不存在（404），
+		// 配合 billing.Service.Purchase 内的前置闸（返回 ErrPurchaseStubInProd）双保险，即便误开 BILLING_ENABLED 上线也无法刷单。
+		if billing.ProductionReady() {
+			router.POST("/api/billing/purchase", func(c *gin.Context) {
+				var body struct {
+					SKUID    string `json:"sku_id"`
+					Platform string `json:"platform"`
+					Receipt  string `json:"receipt"`
+				}
+				if err := c.ShouldBindJSON(&body); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid purchase payload"})
+					return
+				}
+				// 账户 ID 取自鉴权 token（忽略客户端传入），防为他人账户伪造扣费/发放权益。
+				accountID, ok := authedAccountID(deps.Accounts, c)
+				if !ok {
+					return
+				}
+				charge, err := billingSvc.Purchase(c.Request.Context(), accountID, body.SKUID, body.Platform, body.Receipt)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+				// 漏斗埋点（best-effort，失败绝不影响购买）：营收阶段事件。
+				_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+					Stage: analytics.StageRevenue,
+					Name:  analytics.EventPurchase,
+					Props: map[string]any{
+						"account_id":   accountID,
+						"sku_id":       body.SKUID,
+						"amount_cents": charge.AmountCents,
+					},
+				})
+				c.JSON(http.StatusCreated, gin.H{"charge": charge})
 			})
-			c.JSON(http.StatusCreated, gin.H{"charge": charge})
-		})
+		} else if deps.Logger != nil {
+			deps.Logger.Warn("billing enabled but not production-ready (QUNXIANG_IAP_REAL off or no platform credential); /api/billing/purchase route NOT registered to prevent stub receipt fraud")
+		}
 
 		// 查询本账号的 LLM 配额是否仍允许调用（true=未超额）。账户 ID 取自鉴权 token，忽略路径参数。
 		router.GET("/api/billing/quota/:accountId", func(c *gin.Context) {

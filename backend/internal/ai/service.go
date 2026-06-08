@@ -19,11 +19,12 @@ import (
 
 // Service 结构体用于承载该模块的核心数据。
 type Service struct {
-	logger    *slog.Logger
-	validator Validator
-	providers map[ProviderName]Provider
-	profiles  map[TaskKind]TaskProfile
-	cache     *promptCache // prompt 缓存（nil=未启用，QUNXIANG_PROMPT_CACHE 默认关）
+	logger      *slog.Logger
+	validator   Validator
+	providers   map[ProviderName]Provider
+	profiles    map[TaskKind]TaskProfile
+	cache       *promptCache       // prompt 缓存（nil=未启用，QUNXIANG_PROMPT_CACHE 默认开，仅显式 false/0/no/off 才关）
+	tierRouting config.TierRouting // 任务重要度分档路由（降本域 C；Enabled 默认关，关时 GenerateJSON 零覆盖）
 }
 
 var (
@@ -95,11 +96,12 @@ func NewService(cfg config.Config, logger *slog.Logger) *Service {
 	}
 
 	return &Service{
-		logger:    logger.With("component", "ai"),
-		validator: validator,
-		providers: providers,
-		profiles:  ConfiguredTaskProfiles(cfg.LLMTimeout),
-		cache:     promptCacheFromEnv(),
+		logger:      logger.With("component", "ai"),
+		validator:   validator,
+		providers:   providers,
+		profiles:    ConfiguredTaskProfiles(cfg.LLMTimeout),
+		cache:       promptCacheFromEnv(),
+		tierRouting: cfg.TierRouting,
 	}
 }
 
@@ -210,6 +212,15 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 		timeout = profile.Timeout
 	}
 
+	// 任务重要度分档路由（降本域 C，flag-gated）：仅当 tier routing 开启、Importance 非空、且对应档配了 model/timeout
+	// 时才覆盖；否则 tierModel="" 且 timeout 不变——与今日完全一致、零差异。tierModel 在下方 provider 循环里
+	// 注入 ProviderRequest.Model（注意 provider 取模型为 firstNonEmpty(endpoint.model, request.Model)，
+	// 端点硬编码模型优先，故 model 覆盖仅对未配端点模型的场景生效；timeout 覆盖始终生效）。
+	tierModel, tierTimeout := s.resolveTier(request.Importance)
+	if tierTimeout > 0 {
+		timeout = tierTimeout
+	}
+
 	order := providerOrder(profile.Primary, profile.Secondary, profile.Tertiary)
 	activeProvider, activeModel := s.activeCallTarget(order)
 	activeCallID := registerActiveLLMCall(request, activeProvider, activeModel)
@@ -231,11 +242,16 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 			continue
 		}
 
+		// 模型选择：默认用 provider 默认模型；tier routing 命中时用档内模型（tierModel 非空才覆盖）。
+		requestModel := provider.Status().DefaultModel
+		if tierModel != "" {
+			requestModel = tierModel
+		}
 		response, err := provider.GenerateJSON(ctx, ProviderRequest{
 			Task:           request.Task,
 			SystemPrompt:   request.SystemPrompt,
 			UserPrompt:     request.UserPrompt,
-			Model:          provider.Status().DefaultModel,
+			Model:          requestModel,
 			SchemaName:     request.SchemaName,
 			ResponseSchema: request.ResponseSchema,
 			Temperature:    request.Temperature,
@@ -457,6 +473,27 @@ func cloneMetadata(source map[string]string) map[string]string {
 		clone[key] = value
 	}
 	return clone
+}
+
+// resolveTier 把请求的 Importance 档解析为「覆盖模型 + 覆盖超时」（降本域 C）。
+// 任何下列情形均返回零值（"", 0）=不覆盖、走原 profile，保证 flag 关或 Importance 空时零行为差异：
+//   - tier routing 未启用（QUNXIANG_TIER_ROUTING 默认关）；
+//   - Importance 为空或非已知档（"critical"/"cheap"）；
+//   - 该档未配置对应 model/timeout（缺省项独立判断：可只覆盖其一）。
+//
+// 反 P2W：这是**任务重要度**档而非付费档，付费玩家无法据此买到更强 LLM。
+func (s *Service) resolveTier(importance string) (model string, timeout time.Duration) {
+	if !s.tierRouting.Enabled {
+		return "", 0
+	}
+	switch strings.TrimSpace(importance) {
+	case ImportanceCritical:
+		return s.tierRouting.CriticalModel, s.tierRouting.CriticalTimeout
+	case ImportanceCheap:
+		return s.tierRouting.CheapModel, s.tierRouting.CheapTimeout
+	default:
+		return "", 0 // 空串或未知档：不分档
+	}
 }
 
 // providerOrder 根据配置的 provider 优先级计算去重后的调用顺序。

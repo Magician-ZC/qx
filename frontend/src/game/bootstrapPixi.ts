@@ -489,7 +489,7 @@ function drawTerrain(
   height: number,
 ): BoardPlacement {
   if (!model.session) {
-    return computeBoardPlacement({ map: { width: 1, height: 1 } } as any, width, height); // Fallback, won't be used
+    return { radius: 16, horizontalStep: 0, verticalStep: 0, originX: 0, originY: 0 }; // Fallback, won't be used
   }
   const session = model.session;
   const placement = computeBoardPlacement(session, width, height, model.zoom);
@@ -927,7 +927,7 @@ function structureEmoji(type: string): string {
 
 const unitAvatarTextures = new Map<string, Texture>();
 
-function getUnitAvatarUrl(unit: any): string {
+function getUnitAvatarUrl(unit: SessionSnapshot["player_units"][number]): string {
   let hash = 0;
   for (let i = 0; i < unit.id.length; i++) {
     hash = (hash << 5) - hash + unit.id.charCodeAt(i);
@@ -2206,18 +2206,6 @@ function hpRingColor(hp: number, alive: boolean): number {
     return palette.brass;
   }
   return palette.success;
-}
-
-// unitGlyph 生成单位 token 中心字形，降低地图文字密度。
-function unitGlyph(name: string, alive: boolean): string {
-  if (!alive) {
-    return "×";
-  }
-  const trimmed = name.trim();
-  if (trimmed === "") {
-    return "兵";
-  }
-  return Array.from(trimmed)[0];
 }
 
 // phaseLabel 格式化阶段中文名称。

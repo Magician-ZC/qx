@@ -25,6 +25,11 @@ import (
 // ErrPlatformUnsupported 表示某 verifier 收到了它不处理的平台（由 platformVerifier 选择器分派时不应发生）。
 var ErrPlatformUnsupported = errors.New("billing: unsupported platform")
 
+// ErrPurchaseStubInProd 表示 billing 已开启但收据校验仍是 stub（QUNXIANG_IAP_REAL 关或真实凭据缺失）——
+// 此态下 Purchase 一律拒绝，绝不让伪造收据走 stubVerifier 的「恒通过」落 captured 流水/发真实权益（§5 高危刷单链）。
+// 「默认拒绝优于静默发权益」：要放行真实购买必须显式 QUNXIANG_IAP_REAL=on 且至少配一平台凭据（见 ProductionReady）。
+var ErrPurchaseStubInProd = errors.New("billing: purchase refused — receipt verifier is stub, not production-ready (set QUNXIANG_IAP_REAL=on with a platform credential)")
+
 // 默认账户级 LLM 成本上限（micro_usd）。来源 PRD §3.1：付费用户成本上限 = 天命月卡价 × 40%。
 // 月卡 ¥30 ÷ 汇率 7.2 ≈ $4.1667，× 40% ≈ $1.6667 → 1_666_667 micro_usd。
 // account_llm_quota.cap_micro_usd 为 0（未显式设额）时按本默认值放行判定，把「付费越多越亏」封死在配额上。
@@ -299,6 +304,13 @@ func (s *Service) Purchase(ctx context.Context, accountID, skuID, platform, rece
 	if s.db == nil {
 		return Charge{}, fmt.Errorf("billing: nil db")
 	}
+	// 根上堵死「§5 高危刷单链」：billing 开启但收据校验未就绪（stub / 凭据缺失）时，绝不让 Purchase 走
+	// stubVerifier 的「恒通过」落 captured 流水 / 发真实权益。可选沙盒：QUNXIANG_IAP_SANDBOX_OK=on 才放行
+	// stub 但强制 charge.Status="sandbox" 且不 grant 真实权益（见下方沙盒分支）。
+	// 「默认拒绝优于静默发权益」：billing 关时（向后兼容）不拦——此时 Purchase 属测试/灌数据路径，非线上扣费。
+	if s.enabled && !ProductionReady() && !iapSandboxOK() {
+		return Charge{}, ErrPurchaseStubInProd
+	}
 	if strings.TrimSpace(accountID) == "" || strings.TrimSpace(skuID) == "" {
 		return Charge{}, fmt.Errorf("billing purchase: account_id/sku_id required")
 	}
@@ -338,6 +350,17 @@ func (s *Service) Purchase(ctx context.Context, accountID, skuID, platform, rece
 			return Charge{}, insErr
 		}
 		return charge, fmt.Errorf("billing purchase: receipt verification failed for platform %q", platform)
+	}
+
+	// 沙盒分支：billing 开但未就绪（stub），仅当显式 QUNXIANG_IAP_SANDBOX_OK=on 才放行——但强制 status="sandbox"
+	// 且**绝不 grant 真实权益**，只落沙盒流水留痕。这样灰度/联调能跑通购买链，又不让伪造收据领真实会员/单品（§5）。
+	// 注意：ProductionReady() 为真时不会进此分支（前置闸已让真实校验路径正常 grant）。
+	if s.enabled && !ProductionReady() && iapSandboxOK() {
+		charge.Status = "sandbox"
+		if insErr := s.insertCharge(ctx, charge); insErr != nil {
+			return Charge{}, insErr
+		}
+		return charge, nil
 	}
 
 	// 幂等闸：非空 receipt_ref 已有 captured 流水 → 复用既有 charge，不重复落账/不重复 grant。
@@ -610,4 +633,57 @@ func (s *Service) AddSpend(ctx context.Context, accountID, periodBucket string, 
 		 ON CONFLICT(account_id) DO UPDATE SET spent_micro_usd = CASE WHEN account_llm_quota.period_bucket = excluded.period_bucket THEN account_llm_quota.spent_micro_usd + excluded.spent_micro_usd ELSE excluded.spent_micro_usd END, period_bucket = excluded.period_bucket, updated_at = excluded.updated_at`,
 		accountID, periodBucket, microUSD, DefaultCapMicroUSD, now)
 	return err
+}
+
+// IAPReal 暴露「是否启用真实收据校验」flag（QUNXIANG_IAP_REAL，true/1/yes/on 视为开）。
+// 供 router/healthz 自省，以及 ProductionReady 复用。与内部 iapReal() 同义，仅导出便于纵深防御调用方判断。
+func IAPReal() bool { return iapReal() }
+
+// ProductionReady 判断 billing 是否「线上就绪」——可安全放行真实购买（绝不让伪造收据走 stub 领权益）。
+// 三层与门（任一不满足即未就绪 false）：
+//  1. billingEnabled()：billing 必须开启（关时本判定无意义，调用方按「关」处理路由）；
+//  2. iapReal()：必须显式 QUNXIANG_IAP_REAL=on（否则收据校验是 stubVerifier 恒通过）；
+//  3. hasIAPCredential()：iapReal 开时还须至少配一平台凭据——否则真实网关无凭据校验任何收据都失败/无意义，
+//     是「形式上开了真实但实质仍可被绕」的伪就绪态，一律判未就绪。
+//
+// 「默认拒绝优于静默发权益」：只有三层全满足，Purchase 才进真实校验路径；否则前置闸返 ErrPurchaseStubInProd。
+func ProductionReady() bool {
+	if !billingEnabled() {
+		return false
+	}
+	if !iapReal() {
+		return false
+	}
+	return hasIAPCredential()
+}
+
+// hasIAPCredential 判断是否至少配了一个平台收据校验凭据（os.Getenv 任一非空，trim 后）：
+//   - APPLE_IAP_SHARED_SECRET：Apple 自动续订订阅校验必填（见 receipt_apple.go）；
+//   - GOOGLE_PLAY_SA_JSON / GOOGLE_APPLICATION_CREDENTIALS：Google service-account JSON 路径（真 OAuth2，见 receipt_google.go）；
+//   - GOOGLE_PLAY_ACCESS_TOKEN：Google 静态 access token（仅本地/测试回退，但视为已配凭据）。
+//
+// 全缺 → 即便 QUNXIANG_IAP_REAL=on 也判未就绪：真实网关没有任何可用凭据，开放购买是伪就绪高危态。
+func hasIAPCredential() bool {
+	for _, key := range []string{
+		"APPLE_IAP_SHARED_SECRET",
+		"GOOGLE_PLAY_SA_JSON",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_PLAY_ACCESS_TOKEN",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// iapSandboxOK 读 QUNXIANG_IAP_SANDBOX_OK（true/1/yes/on 视为开），**默认关**（与 enabled flag 同向：未设即拒绝）。
+// 仅当显式开启，未就绪态的 Purchase 才放行 stub 但强制 charge.Status="sandbox" 且不 grant 真实权益（见 Purchase 沙盒分支）。
+func iapSandboxOK() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_IAP_SANDBOX_OK"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

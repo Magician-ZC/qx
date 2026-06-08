@@ -160,6 +160,10 @@ func buildRomanceCandidates(
 }
 
 func canAttemptFamilyAction(state State, actor *unit.Record, target *unit.Record) bool {
+	// 青少年模式：一处关掉全部生育入口（registerPregnancy 仅由本 gate 下游调用）。
+	if state.MinorMode {
+		return false
+	}
 	if actor == nil || target == nil {
 		return false
 	}

@@ -179,6 +179,16 @@ func (service *Service) resolveCombatShake(
 	return resolution, nil
 }
 
+// minorModeShakeDirective 返回青少年模式下应追加到战斗动摇 system/user prompt 的分级指令文本。
+// 非青少年模式返回空串（不改变原 prompt）。调用方：generateCombatShakeChoice / combatShakeSystemPrompt
+// 在拼接 prompt 时按 state.MinorMode 取本文本追加（避免血腥/残肢/濒死等露骨描写）。
+func minorModeShakeDirective(minorMode bool) string {
+	if !minorMode {
+		return ""
+	}
+	return "本局为青少年模式：避免血腥、残肢、濒死、内脏等露骨或恐怖描写，用克制、中性的措辞描述战斗冲击与情绪反应。"
+}
+
 // applyCombatShakeOverlay 把战斗动摇产出的气泡/记忆/推理信息合并回最终决策文本。
 func applyCombatShakeOverlay(decision unitDecisionPayload, resolution combatShakeResolution) unitDecisionPayload {
 	if !resolution.Triggered {

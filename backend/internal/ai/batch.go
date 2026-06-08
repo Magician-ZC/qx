@@ -103,6 +103,8 @@ func (s *Service) GenerateJSONBatch(
 }
 
 // generateOneBatchResult 在并发信号量约束下执行单个请求。
+// request 是 BatchRequest.Request 原样下发——其 Cacheable 字段一并透传给 GenerateJSON，
+// 故 Cacheable=true 的批条目可命中/写入 prompt 缓存（与单发 GenerateJSON 行为一致）。
 func (s *Service) generateOneBatchResult(
 	ctx context.Context,
 	sem chan struct{},

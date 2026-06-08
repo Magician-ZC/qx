@@ -62,6 +62,33 @@ func charterRedlinesAsMap(state *State, unitID string) map[string]string {
 	return out
 }
 
+// charterContextForUnit 把某单位离线宪章的「长期目标」与「社交授权」两段拼成决策提示词块，
+// 供单位决策时看见玩家不在场时的长效图景与授权（红线另经归因校验 snap.Redlines 强制，不在此重复）。
+// 确定性、零 LLM；无宪章或两段皆空时返回 ""（调用方据此决定是否拼接）。
+func charterContextForUnit(state *State, unitID string) string {
+	charter, ok := GetUnitCharter(state, unitID)
+	if !ok {
+		return ""
+	}
+	goals := trimNonEmpty(charter.LongTermGoals)
+	mandates := trimNonEmpty(charter.SocialMandates)
+	if len(goals) == 0 && len(mandates) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if len(goals) > 0 {
+		b.WriteString("你的长期图景（玩家为你立下的长效目标，日常自治时朝它努力）: ")
+		b.WriteString(strings.Join(goals, "；"))
+		b.WriteString("\n")
+	}
+	if len(mandates) > 0 {
+		b.WriteString("你获得的社交授权（玩家允许你自行处理的人际事，无需事事上交）: ")
+		b.WriteString(strings.Join(mandates, "；"))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // NormalizeCharter 规范化一份离线宪章：裁剪三段里的空白条目、为缺 ID 的红线补确定性 ID。
 // 确定性：同输入恒同输出（不依赖随机/时间），ID 由 unitID+索引派生，保证持久化往返稳定。
 func NormalizeCharter(unitID string, charter OfflineCharter) OfflineCharter {

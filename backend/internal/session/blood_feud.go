@@ -7,8 +7,8 @@ package session
 // 哀恸的士气下挫（经 status.Mutator，reason=BLOOD_FEUD_GRIEF）。世仇留痕进世界总线，并经既有命运卡路径投
 // 「为TA复仇？」。
 //
-// 全程 flag-gated（QUNXIANG_BLOOD_FEUD，默认关 → 整段 no-op、零行为变化）+ best-effort（任何失败吞错跳过，
-// 绝不影响战斗结算/阶段推进）。确定性：仅用关系四轴 + 跳数派生强度，无随机抖动、不读 time.Now 作判定。
+// 全程 flag-gated（QUNXIANG_BLOOD_FEUD，**默认开** → 仅显式置 false/0/no/off 才整段 no-op、零行为变化）+
+// best-effort（任何失败吞错跳过，绝不影响战斗结算/阶段推进）。确定性：仅用关系四轴 + 跳数派生强度，无随机抖动、不读 time.Now 作判定。
 
 import (
 	"context"
@@ -53,13 +53,14 @@ const (
 	bloodFeudHopFanout = 8
 )
 
-// bloodFeudEnabled 读 QUNXIANG_BLOOD_FEUD（true/1/yes/on 视为开），默认关 → propagateBloodFeud 整段 no-op、零行为变化、零 DB 写。
+// bloodFeudEnabled 读 QUNXIANG_BLOOD_FEUD，**默认开**（未设/非法值 → 视为开，玩家默认即可感知血仇传播）。
+// 仅当显式置 false/0/no/off 时才关 → propagateBloodFeud 整段 no-op、零行为变化、零 DB 写（用于回退/对照）。
 func bloodFeudEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_BLOOD_FEUD"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
+	case "false", "0", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 

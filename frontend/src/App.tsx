@@ -32,6 +32,9 @@ import GovernancePanel, { ReportDialog, PrivacyEraseDialog } from "./components/
 import BillingPanel from "./components/BillingPanel";
 import ComplianceGatePanel, { ComplianceBlockedBanner } from "./components/ComplianceGate";
 import ConsentInbox from "./components/ConsentInbox";
+import WorldBossPanel from "./components/WorldBossPanel";
+import { BloodFeudPanel } from "./components/BloodFeudPanel";
+import { OpsDashboard } from "./components/OpsDashboard";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -482,6 +485,12 @@ export function App() {
   const [complianceBlockReason, setComplianceBlockReason] = useState<string | null>(null);
   // 跨玩家同意收件箱浮层（针对当前选中角色）。
   const [consentInboxOpen, setConsentInboxOpen] = useState(false);
+  // 血仇网络面板（针对当前选中角色，玩家可见——让 blood_feud 传播可感知）。
+  const [bloodFeudOpen, setBloodFeudOpen] = useState(false);
+  // 世界 Boss 协作面板（需本局已接入世界 world_id；developer 门控的进阶玩法）。
+  const [worldBossOpen, setWorldBossOpen] = useState(false);
+  // 运营看板（cost-dashboard + leads-funnel，developer 门控）。
+  const [opsDashboardOpen, setOpsDashboardOpen] = useState(false);
   const [dialogueDraft, setDialogueDraft] = useState("");
   const [latestDialogueReply, setLatestDialogueReply] = useState("");
   const [terrainCatalog, setTerrainCatalog] = useState<TerrainDefinition[]>([]);
@@ -497,8 +506,6 @@ export function App() {
   const [duelJoinSessionID, setDuelJoinSessionID] = useState("");
   const [duelJoinRoleToken, setDuelJoinRoleToken] = useState("");
   const [duelRoomStatus, setDuelRoomStatus] = useState<DuelRoomStatus | null>(null);
-  // 进入房间后默认收起房间设置，避免占用主操作区。
-  const [showRoomSettings, setShowRoomSettings] = useState(true);
   const [showHUD, setShowHUD] = useState<boolean>(() => readHUDVisibilityFromStorage());
   const [developerMode, setDeveloperMode] = useState<boolean>(() => readDeveloperModeFromStorage());
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
@@ -986,15 +993,6 @@ export function App() {
   }, [session, commanderFactionID, taskTargetUnitID, orderTargetUnitID, chatTargetUnitID]);
 
   useEffect(() => {
-    const joined = duelJoinSessionID.trim() !== "" && duelJoinRoleToken.trim() !== "";
-    if (joined) {
-      setShowRoomSettings(false);
-      return;
-    }
-    setShowRoomSettings(true);
-  }, [duelJoinSessionID, duelJoinRoleToken]);
-
-  useEffect(() => {
     const sessionID = session?.id;
     if (!sessionID) {
       return;
@@ -1261,7 +1259,10 @@ export function App() {
     () => visibleSessionForCommander(session, effectiveCommanderFactionID, fogPerspectiveUnitID),
     [session, effectiveCommanderFactionID, fogPerspectiveUnitID],
   );
-  const allUnits = visibleSession ? [...visibleSession.player_units, ...visibleSession.enemy_units] : [];
+  const allUnits = useMemo(
+    () => (visibleSession ? [...visibleSession.player_units, ...visibleSession.enemy_units] : []),
+    [visibleSession],
+  );
   const currentFactionReady = session?.phase_ready?.[effectiveCommanderFactionID] ?? false;
   const currentFactionDoctrineReady = session?.turn_state.phase === "deployment"
     ? session.directive_history.some((directive) =>
@@ -3155,6 +3156,14 @@ export function App() {
                     来意
                   </button>
                   <button
+                    className={`action-button inline-action ${bloodFeudOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setBloodFeudOpen((open) => !open)}
+                    disabled={!selectedUnitID}
+                    title={selectedUnitID ? "血仇：查看这位角色背负的世仇关系网（含因牵连传播而来的间接之恨）" : "先选中一个角色，再查看其血仇网络"}
+                  >
+                    血仇
+                  </button>
+                  <button
                     className={`action-button inline-action ${billingPanelOpen ? "action-button-primary" : ""}`}
                     onClick={() => {
                       setBillingPanelOpen((open) => !open);
@@ -3185,6 +3194,25 @@ export function App() {
                       title="运营/开发者：审计 · 举报管理台 · 隐私擦除"
                     >
                       治理台
+                    </button>
+                  ) : null}
+                  {developerMode ? (
+                    <button
+                      className={`action-button inline-action ${opsDashboardOpen ? "action-button-primary" : ""}`}
+                      onClick={() => setOpsDashboardOpen((open) => !open)}
+                      title="运营看板：跨会话 LLM 成本 / fallback 率 / 假门转化漏斗（需 X-Ops-Token）"
+                    >
+                      运营看板
+                    </button>
+                  ) : null}
+                  {developerMode ? (
+                    <button
+                      className={`action-button inline-action ${worldBossOpen ? "action-button-primary" : ""}`}
+                      onClick={() => setWorldBossOpen((open) => !open)}
+                      disabled={!session?.world_id}
+                      title={session?.world_id ? "世界 Boss：跨玩家共享血池协作 PvE（投放 / 出手 / 按贡献分赃）" : "本局未接入世界（world_id 为空），世界 Boss 不可用"}
+                    >
+                      世界Boss
                     </button>
                   ) : null}
                 </div>
@@ -3638,6 +3666,27 @@ export function App() {
               unitName={selectedUnit?.identity.name}
               onClose={() => setConsentInboxOpen(false)}
             />
+          ) : null}
+          {/* 血仇网络面板：scoped 到当前选中角色，让 blood_feud 多跳传播对玩家可感知。*/}
+          {showHUD && bloodFeudOpen && session && selectedUnitID ? (
+            <BloodFeudPanel
+              sessionID={session.id}
+              unitID={selectedUnitID}
+              unitName={selectedUnit?.identity.name}
+              onClose={() => setBloodFeudOpen(false)}
+            />
+          ) : null}
+          {/* 世界 Boss 协作 PvE（developer 门控；需本局已接入世界 world_id）。*/}
+          {showHUD && developerMode && worldBossOpen && session?.world_id ? (
+            <WorldBossPanel
+              worldID={session.world_id}
+              attackerCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
+              onClose={() => setWorldBossOpen(false)}
+            />
+          ) : null}
+          {/* 运营看板：跨会话成本 + 假门转化漏斗（developer 门控）。*/}
+          {developerMode && opsDashboardOpen ? (
+            <OpsDashboard onClose={() => setOpsDashboardOpen(false)} />
           ) : null}
           {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}
           {billingPanelOverlay}
@@ -4774,7 +4823,7 @@ export function App() {
 
                             <div className="command-summary">
                               <span className="shop-label">最近 AI 决策</span>
-                              <strong>{selectedDecision ? formatDecision(selectedDecision, session) : ""}</strong>
+                              <strong>{selectedDecision ? formatDecision(selectedDecision) : ""}</strong>
                               {selectedDecision ? (
                                 hasDefianceTrace(selectedDecision.reasoning) ? (
                                   <>
@@ -5638,22 +5687,6 @@ function nextPhaseMessage(phase: Phase): string {
   }
 }
 
-// phaseHelpText 返回当前阶段的玩法说明。
-function phaseHelpText(session: SessionSnapshot | null): string {
-  if (!session) {
-    return "等待会话初始化。";
-  }
-  if (session.outcome !== "ongoing") {
-    return "本局已经结算，可以查看日志或直接重开。";
-  }
-
-  switch (session.turn_state.phase) {
-    case "deployment":
-      return "这里是沟通期。提交部署方针后即可手动进入下一阶段；多人局需要双方都选择下一阶段。";
-    default:
-      return "这里是执行期。所有单位会按自己的判断决定吃不吃、采不采、建不建、打不打，你只能旁观结果。";
-  }
-}
 
 // advanceButtonLabel 生成“推进阶段”按钮文案。
 function advanceButtonLabel(session: SessionSnapshot | null, currentFactionReady = false): string {
@@ -6054,7 +6087,7 @@ function formatTurnAwareLine(line: string, currentTurn?: number): string {
 }
 
 // formatDecision 格式化决策轨迹的人类可读摘要。
-function formatDecision(trace: DecisionTrace, _session: SessionSnapshot | null): string {
+function formatDecision(trace: DecisionTrace): string {
   const base = firstAIDecisionText(trace) || firstAIRequestedDecisionText(trace);
   if (!base) {
     return "";

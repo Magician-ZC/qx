@@ -446,6 +446,10 @@ func (service *Service) resolveDuePregnancies(ctx context.Context, state *State)
 }
 
 func (service *Service) canAttemptRomanceProposal(ctx context.Context, state State, left *unit.Record, right *unit.Record) bool {
+	// 青少年模式：一处关掉全部表白入口（恋爱关系确认的唯一收口）。
+	if state.MinorMode {
+		return false
+	}
 	if service == nil || left == nil || right == nil {
 		return false
 	}
@@ -998,10 +1002,8 @@ func createChildUnit(state State, left unit.Record, right unit.Record, coord wor
 	child.Social.ChildUnitIDs = []string{}
 	child.Social.BornTurn = state.TurnState.Turn
 	child.Social.Wildling = factionID == FactionWildling
-	child.Status.HP = 60
-	child.Status.Attack = 4
-	child.Status.Defense = 2
-	child.Status.Move = 3
+	// 新生儿战斗基础属性初始化经白名单辅助函数（statuslint 合规），等价于直赋 HP=60/Attack=4/Defense=2/Move=3。
+	unit.SetNewbornBattleStats(&child, 60, 4, 2, 3)
 	return child
 }
 

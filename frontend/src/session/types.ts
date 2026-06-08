@@ -576,6 +576,66 @@ export type LeadEvent = {
   source?: string;
 };
 
+// LeadsFunnelData 是假门转化漏斗（GET /api/ops/leads-funnel，运营态 X-Ops-Token）。
+// 后端裸返回 {total, by_kind, unique_visitors}（leads.go），by_kind 按 lead kind 计数。
+export type LeadsFunnelData = {
+  total: number;
+  by_kind: Record<string, number>;
+  unique_visitors: number;
+};
+
+// ProviderCost 是单个 LLM provider 的成本/调用聚合（与后端 session.ProviderCost 对齐，json tag 蛇形）。
+export type ProviderCost = {
+  provider: string;
+  calls: number;
+  cost_usd: number;
+  total_tokens: number;
+  fallback_hits: number;
+};
+
+// CostDashboardData 是运营成本/单位经济仪表盘聚合结果（GET /api/ops/cost-dashboard，运营态 X-Ops-Token）。
+// 严格对齐后端 session.CostDashboardData 的 json tag（蛇形）。distinct_sessions 为 MAU 代理（窗口内有 LLM 交互的会话数）。
+export type CostDashboardData = {
+  since_days: number;
+  total_interactions: number;
+  total_cost_usd: number;
+  total_tokens: number;
+  fallback_count: number;
+  fallback_rate: number;
+  distinct_sessions: number; // MAU 代理：窗口内有 LLM 交互的会话数
+  cost_per_session_usd: number;
+  by_provider: Record<string, ProviderCost>;
+  units_total: number;
+  units_by_life_state: Record<string, number>;
+  generated_at: string;
+};
+
+// BloodFeudEntry 是某角色当前怀有的一条世仇关系（rivalry 主导的强敌意），与后端 session.BloodFeudEntry 对齐。
+// 后端 json tag：target_name 带 omitempty（无名时可缺）；其余四轴恒在。GET …/feuds 返回 {feuds: BloodFeudEntry[]}。
+export type BloodFeudEntry = {
+  target_unit_id: string;
+  target_name?: string;
+  rivalry: number;
+  fear: number;
+  trust: number;
+  affection: number;
+};
+
+// WorldBossStrikeResult 是一次对世界 Boss 出手的结果（POST …/strike 取 {strike}）。
+// 注意：后端 session.WorldBossStrikeResult 无 json tag，键名为 Go 大写字段名。
+// Participants/Awards/BroadcastCard 仅当本请求抢到结算闩锁（Defeated && SettledByMe）时有意义。
+export type WorldBossStrikeResult = {
+  BossID: string;
+  AttackerID: string;
+  Damage: number;
+  HPRemaining: number;
+  Defeated: boolean; // 这一击是否打死了 Boss
+  SettledByMe: boolean; // 这一击是否由本请求执行了结算（抢到闩锁）
+  Participants: number; // 结算时的参战人数（仅 Defeated&&SettledByMe 时有意义）
+  Awards: EncounterAward[] | null; // 全员分赃结果（仅结算者填充）
+  BroadcastCard: string; // 讨平广播的祖魂语气卡（仅结算者填充）
+};
+
 export type AccountUser = {
   id: string;
   username: string;
@@ -601,6 +661,8 @@ export type DuelRoomStatus = {
 // SessionSnapshot 是前端唯一可信输入，界面只渲染该快照，不本地推演规则。
 export type SessionSnapshot = {
   id: string;
+  world_id?: string; // 本局所属世界（空=未接入多世界）；世界 Boss 等跨玩家面板据此定位
+  minor_mode?: boolean; // 本局未成年模式（前端据此可提示分级 / 隐藏恋爱·生育入口）
   mode: string;
   random_seed: number;
   player_faction_id: string;

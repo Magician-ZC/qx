@@ -559,6 +559,7 @@ type PregnancyState struct {
 type State struct {
 	ID                   string             `json:"id"`
 	AccountID            string             `json:"account_id,omitempty"` // 本局所属账户（空=匿名/单机局，账户级成本配额对其 no-op）；随 state_json 持久化，供 LLM 成本闭环按账户记账与配额拦截
+	MinorMode            bool               `json:"minor_mode,omitempty"` // 本局是否未成年模式（建局时由 compliance.Gate 裁定落库）：开启则全程关闭恋爱·生育、降露骨暴力叙事；随 state_json 持久化，断线重连/推进自动带回，匿名/成年局默认 false 零影响
 	WorldID              string             `json:"world_id,omitempty"`   // 本局所属世界（空=未接入多世界；接入后实战交互自动写世界总线）
 	Mode                 string             `json:"mode"`
 	RandomSeed           int64              `json:"random_seed"`
@@ -616,6 +617,8 @@ type State struct {
 // Snapshot 是下发给前端/客户端的会话视图，不含仅服务端内部使用字段。
 type Snapshot struct {
 	ID                  string             `json:"id"`
+	WorldID             string             `json:"world_id,omitempty"`   // 本局所属世界（空=未接入多世界）；暴露给前端供世界 Boss 等跨玩家面板定位
+	MinorMode           bool               `json:"minor_mode,omitempty"` // 本局未成年模式（前端据此可隐藏恋爱/生育入口、提示分级）
 	Mode                string             `json:"mode"`
 	RandomSeed          int64              `json:"random_seed"`
 	PlayerFactionID     string             `json:"player_faction_id"`

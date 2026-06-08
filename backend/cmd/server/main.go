@@ -138,8 +138,10 @@ func main() {
 		RegionRunner: regionRunner,
 		// region-runner 启用时，建局/组队才把玩家单位 seed 进离线调度（M7.3-real-4b，默认关→零成本）。
 		RegionRunnerEnabled: regionRunnerEnabled,
-		// 反射真短路（降本，默认关）：日常安静 tick 的单位决策由反射层零成本落地、跳过 LLM。
-		ReflexShortCircuit: envBool("QUNXIANG_REFLEX_SHORTCIRCUIT"),
+		// 反射真短路（降本，默认开）：日常安静 tick 的单位决策由反射层零成本落地、跳过 LLM。
+		// 短路面已被 reflexShortCircuitApplies 收窄到极保守子集（immediateOrder gate + NeedsLLM=false + hold/continue），
+		// 默认开实现降本意图；紧急回退置 QUNXIANG_REFLEX_SHORTCIRCUIT=false 即关。
+		ReflexShortCircuit: envBoolDefault("QUNXIANG_REFLEX_SHORTCIRCUIT", true),
 	})
 
 	server := &http.Server{
@@ -200,6 +202,19 @@ func envBool(key string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// envBoolDefault 读「默认开但可显式关」的布尔环境变量：未设/非法→返回 def；
+// 仅当值为 false/0/no/off 才关。用于把已就绪的能力转默认开、同时保留紧急回退开关。
+func envBoolDefault(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return def
 	}
 }
 

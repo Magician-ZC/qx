@@ -27,6 +27,19 @@ type LLMEndpoint struct {
 	ReasoningEffort string
 }
 
+// TierRouting 承载**任务重要度分档路由**配置（降本域 C；非付费档——付费不得买更强 LLM，遵守反 P2W 宪法）。
+// Enabled 默认关：关闭时 GenerateJSON 行为与今日完全一致、零覆盖。开启且对应档配了 Model/Timeout 时，
+// 才把该档请求的 ProviderRequest.Model / 请求 Timeout 覆盖为档内值；档内缺省项不覆盖、回退原 profile。
+// 注意：Model 覆盖只对「端点未硬编码模型」的场景生效（provider 以 firstNonEmpty(endpoint.model, request.Model)
+// 取模型，端点模型优先），Timeout 覆盖始终生效——见 ai/service.go 注释。
+type TierRouting struct {
+	Enabled         bool
+	CriticalModel   string
+	CheapModel      string
+	CriticalTimeout time.Duration // 0=不覆盖
+	CheapTimeout    time.Duration // 0=不覆盖
+}
+
 // Config 结构体用于承载该模块的核心数据。
 type Config struct {
 	HTTPAddr                string
@@ -49,6 +62,7 @@ type Config struct {
 	OpenAIModel             string
 	OpenAIReasoningEffort   string
 	OpenAIFallbacks         []LLMEndpoint
+	TierRouting             TierRouting
 }
 
 // Load 从环境变量加载服务配置，并应用默认值与安全边界。
@@ -90,7 +104,56 @@ func Load() Config {
 		OpenAIModel:             openAIModel,
 		OpenAIReasoningEffort:   openAIReasoningEffort,
 		OpenAIFallbacks:         collectOpenAIFallbacks(),
+		TierRouting:             loadTierRouting(),
 	}
+}
+
+// loadTierRouting 读取任务重要度分档路由配置（降本域 C）。
+// QUNXIANG_TIER_ROUTING **默认关**（仅 true/1/yes/on 才开），关闭时各档 model/timeout 留空——
+// service.go 在 Enabled=false 时整段跳过覆盖逻辑，行为与今日完全一致。
+// 各档可选环境变量（缺省即不覆盖对应字段）：
+//   - QUNXIANG_TIER_CRITICAL_MODEL / QUNXIANG_TIER_CHEAP_MODEL
+//   - QUNXIANG_TIER_CRITICAL_TIMEOUT_SECONDS / QUNXIANG_TIER_CHEAP_TIMEOUT_SECONDS
+func loadTierRouting() TierRouting {
+	routing := TierRouting{Enabled: tierRoutingEnabledFromEnv()}
+	if !routing.Enabled {
+		return routing // 关闭时不读各档配置，保证零覆盖
+	}
+	routing.CriticalModel = strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_TIER_CRITICAL_MODEL"}, ""))
+	routing.CheapModel = strings.TrimSpace(getAnyEnv([]string{"QUNXIANG_TIER_CHEAP_MODEL"}, ""))
+	routing.CriticalTimeout = parseTierTimeoutSeconds(getAnyEnv([]string{"QUNXIANG_TIER_CRITICAL_TIMEOUT_SECONDS"}, ""))
+	routing.CheapTimeout = parseTierTimeoutSeconds(getAnyEnv([]string{"QUNXIANG_TIER_CHEAP_TIMEOUT_SECONDS"}, ""))
+	return routing
+}
+
+// tierRoutingEnabledFromEnv 解析 QUNXIANG_TIER_ROUTING 开关——**默认关**：仅 true/1/yes/on 视为开。
+func tierRoutingEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_TIER_ROUTING"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseTierTimeoutSeconds 解析各档秒级超时；空/非法/<=0 返回 0（=不覆盖）。
+// 与 LLM 主超时一致夹在 [60s,180s]，避免分档超时越界。
+func parseTierTimeoutSeconds(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	value, err := time.ParseDuration(raw + "s")
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value < 60*time.Second {
+		return 60 * time.Second
+	}
+	if value > 180*time.Second {
+		return 180 * time.Second
+	}
+	return value
 }
 
 type localConfigFile struct {

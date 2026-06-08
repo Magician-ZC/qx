@@ -13,7 +13,9 @@ package billing
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -369,4 +371,217 @@ func TestIAPVerifierTruncateForErr(t *testing.T) {
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("截断后应有省略号标记")
 	}
+}
+
+// --- §5 高危刷单链：默认拒绝优于静默发权益 ---
+
+// clearIAPCredentials 把全部平台凭据 env 置空（t.Setenv 由框架复原），让 hasIAPCredential/ProductionReady
+// 在测试进程里确定性不受运维 ambient 凭据干扰。供本组就绪态测试隔离用。
+func clearIAPCredentials(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"APPLE_IAP_SHARED_SECRET",
+		"GOOGLE_PLAY_SA_JSON",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_PLAY_ACCESS_TOKEN",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+// TestIAPProductionReadyMatrix 守护 ProductionReady 三层与门（billingEnabled && iapReal && hasIAPCredential）。
+func TestIAPProductionReadyMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		enabled  string
+		real     string
+		appleSec string
+		want     bool
+	}{
+		{"billing 关 → 未就绪", "", "1", "secret", false},
+		{"iap_real 关 → 未就绪（stub）", "true", "", "secret", false},
+		{"iap_real 开但凭据全缺 → 未就绪", "true", "1", "", false},
+		{"三层齐 → 就绪", "true", "1", "secret", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("QUNXIANG_BILLING_ENABLED", c.enabled)
+			t.Setenv("QUNXIANG_IAP_REAL", c.real)
+			t.Setenv("QUNXIANG_IAP_SANDBOX_OK", "")
+			clearIAPCredentials(t)
+			if c.appleSec != "" {
+				t.Setenv("APPLE_IAP_SHARED_SECRET", c.appleSec)
+			}
+			if got := ProductionReady(); got != c.want {
+				t.Fatalf("ProductionReady()=%v 期望 %v", got, c.want)
+			}
+			// IAPReal 应与 real flag 一致（与凭据无关）。
+			wantReal := c.real != ""
+			if got := IAPReal(); got != wantReal {
+				t.Fatalf("IAPReal()=%v 期望 %v", got, wantReal)
+			}
+		})
+	}
+}
+
+// purchaseFixtureDB 起临时 SQLite 并灌一个上架 SKU，返回 (ctx, db)。复用 billing_test.go 的 newBillingDB。
+func purchaseFixtureDB(t *testing.T) (context.Context, *sql.DB) {
+	t.Helper()
+	ctx, db := newBillingDB(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO billing_skus (id, kind, name, price_cents, period, active, created_at) VALUES (?,?,?,?,?,?,?)`,
+		"sku-guard", "consumable", "加量包", int64(600), "", int64(1), "2026-06-01 00:00:00"); err != nil {
+		t.Fatalf("灌 SKU 失败: %v", err)
+	}
+	return ctx, db
+}
+
+// assertNoGrant 断言某账户**未**落 captured 流水、**未**得 entitlement（§5 防伪造收据领权益）。
+func assertNoGrant(t *testing.T, ctx context.Context, db *sql.DB, accountID string) {
+	t.Helper()
+	var capturedCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM billing_charges WHERE account_id = ? AND status = 'captured'`, accountID).
+		Scan(&capturedCount); err != nil {
+		t.Fatalf("查 captured 流水失败: %v", err)
+	}
+	if capturedCount != 0 {
+		t.Fatalf("被拒购买不应落 captured 流水，得到 %d 条", capturedCount)
+	}
+	var entCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM account_entitlements WHERE account_id = ?`, accountID).Scan(&entCount); err != nil {
+		t.Fatalf("查 entitlement 失败: %v", err)
+	}
+	if entCount != 0 {
+		t.Fatalf("被拒购买不应授 entitlement，得到 %d 条", entCount)
+	}
+}
+
+// TestIAPPurchaseRefusedWhenEnabledButStub 场景(a)：BILLING_ENABLED=on + IAP_REAL 未设 →
+// Purchase 返 ErrPurchaseStubInProd，且无 entitlement/captured 落库（根上堵死 stub 恒通过领权益）。
+func TestIAPPurchaseRefusedWhenEnabledButStub(t *testing.T) {
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "on")
+	t.Setenv("QUNXIANG_IAP_REAL", "")
+	t.Setenv("QUNXIANG_IAP_SANDBOX_OK", "")
+	clearIAPCredentials(t)
+
+	ctx, db := purchaseFixtureDB(t)
+	svc := NewService(db)
+	if !svc.Enabled() {
+		t.Fatalf("BILLING_ENABLED=on 应 enabled")
+	}
+
+	_, err := svc.Purchase(ctx, "acc-stub", "sku-guard", "apple", "FORGED_RECEIPT_BLOB")
+	if !errors.Is(err, ErrPurchaseStubInProd) {
+		t.Fatalf("enabled+stub 应返回 ErrPurchaseStubInProd，得到 %v", err)
+	}
+	assertNoGrant(t, ctx, db, "acc-stub")
+}
+
+// TestIAPPurchaseRefusedWhenRealButNoCredential 场景(b)：IAP_REAL=on 但凭据全缺 →
+// ProductionReady=false → Purchase 同样被拒（伪就绪态绝不放行）。
+func TestIAPPurchaseRefusedWhenRealButNoCredential(t *testing.T) {
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	t.Setenv("QUNXIANG_IAP_REAL", "on")
+	t.Setenv("QUNXIANG_IAP_SANDBOX_OK", "")
+	clearIAPCredentials(t)
+
+	if ProductionReady() {
+		t.Fatalf("iap_real 开但凭据全缺应 ProductionReady=false")
+	}
+
+	ctx, db := purchaseFixtureDB(t)
+	svc := NewService(db)
+	_, err := svc.Purchase(ctx, "acc-nocred", "sku-guard", "google", "FORGED")
+	if !errors.Is(err, ErrPurchaseStubInProd) {
+		t.Fatalf("real 开但无凭据应返回 ErrPurchaseStubInProd，得到 %v", err)
+	}
+	assertNoGrant(t, ctx, db, "acc-nocred")
+}
+
+// TestIAPPurchaseEntersRealPathWhenCredentialed 场景(c)：IAP_REAL=on + APPLE_IAP_SHARED_SECRET 设 →
+// 前置闸放行进真实校验路径。真实 Apple 网关对假收据/打到默认线上端点仍会失败，故断言**不再是** ErrPurchaseStubInProd
+// （证明已越过前置闸进入真实校验，错误形态改变）。
+func TestIAPPurchaseEntersRealPathWhenCredentialed(t *testing.T) {
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("QUNXIANG_IAP_SANDBOX_OK", "")
+	clearIAPCredentials(t)
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "shh-secret")
+
+	if !ProductionReady() {
+		t.Fatalf("real 开 + 有凭据应 ProductionReady=true")
+	}
+
+	ctx, db := purchaseFixtureDB(t)
+	// 注入一个恒拒绝的真实校验器替身，避免真发 HTTP 到 Apple 线上端点（确定性、离线）。
+	// 关键断言：错误不再是 ErrPurchaseStubInProd（已越过前置闸进真实校验路径）；假收据被真实校验拒 → failed。
+	svc := NewService(db).WithVerifier(realPathRejectVerifier{})
+	charge, err := svc.Purchase(ctx, "acc-cred", "sku-guard", "apple", "FORGED_RECEIPT")
+	if errors.Is(err, ErrPurchaseStubInProd) {
+		t.Fatalf("有凭据应越过前置闸进真实校验，不应返回 ErrPurchaseStubInProd")
+	}
+	if err == nil {
+		t.Fatalf("真实校验对假收据应失败返 err，得到 nil")
+	}
+	if charge.Status != "failed" {
+		t.Fatalf("真实校验拒绝应落 failed 流水，得到 %q", charge.Status)
+	}
+	assertNoGrant(t, ctx, db, "acc-cred") // 校验失败仍不发权益。
+}
+
+// TestIAPPurchaseSandboxModeNoGrant 守护可选沙盒：QUNXIANG_IAP_SANDBOX_OK=on 时未就绪态放行 stub 但
+// 强制 charge.Status="sandbox" 且**不 grant 真实权益**（灰度联调能跑链路，伪收据仍领不到会员/单品）。
+func TestIAPPurchaseSandboxModeNoGrant(t *testing.T) {
+	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	t.Setenv("QUNXIANG_IAP_REAL", "")
+	t.Setenv("QUNXIANG_IAP_SANDBOX_OK", "on")
+	clearIAPCredentials(t)
+
+	ctx, db := purchaseFixtureDB(t)
+	svc := NewService(db) // 默认 stubVerifier（IAP_REAL 未设）。
+	charge, err := svc.Purchase(ctx, "acc-sandbox", "sku-guard", "apple", "SANDBOX_RECEIPT_BLOB")
+	if err != nil {
+		t.Fatalf("沙盒模式应放行 stub（不报错），得到 %v", err)
+	}
+	if charge.Status != "sandbox" {
+		t.Fatalf("沙盒购买应强制 status=sandbox，得到 %q", charge.Status)
+	}
+	// 沙盒不 grant 真实权益。
+	var entCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM account_entitlements WHERE account_id = ?`, "acc-sandbox").Scan(&entCount); err != nil {
+		t.Fatalf("查 entitlement 失败: %v", err)
+	}
+	if entCount != 0 {
+		t.Fatalf("沙盒模式绝不发真实权益，得到 %d 条", entCount)
+	}
+	// 沙盒流水应落库（status=sandbox），但不应有 captured。
+	var sandboxCount, capturedCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM billing_charges WHERE account_id = ? AND status = 'sandbox'`, "acc-sandbox").
+		Scan(&sandboxCount); err != nil {
+		t.Fatalf("查 sandbox 流水失败: %v", err)
+	}
+	if sandboxCount != 1 {
+		t.Fatalf("沙盒购买应落 1 条 sandbox 流水，得到 %d", sandboxCount)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM billing_charges WHERE account_id = ? AND status = 'captured'`, "acc-sandbox").
+		Scan(&capturedCount); err != nil {
+		t.Fatalf("查 captured 流水失败: %v", err)
+	}
+	if capturedCount != 0 {
+		t.Fatalf("沙盒模式绝不落 captured 流水，得到 %d", capturedCount)
+	}
+}
+
+// realPathRejectVerifier 是「真实校验路径」的恒拒绝替身（区别于 billing_test.go 的 rejectVerifier，避免撞名）：
+// 模拟真实 Apple/Google 网关对假收据返回 ok=false（无 err），让 Purchase 落 failed 流水——
+// 用于证明前置闸放行后进入了真实校验语义（而非 stub 恒通过）。
+type realPathRejectVerifier struct{}
+
+func (realPathRejectVerifier) Verify(_ context.Context, _ string, _ string) (bool, string, error) {
+	return false, "", nil
 }

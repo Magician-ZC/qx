@@ -56,7 +56,10 @@ func TestBillingCheckQuotaDisabledAlwaysAllows(t *testing.T) {
 func TestBillingSKUPurchaseQuotaLoop(t *testing.T) {
 	ctx, db := newBillingDB(t)
 	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
-	svc := NewService(db)
+	// 越过 §5 IAP 前置闸（ProductionReady 需 IAP_REAL 开 + 平台凭据），再显式注入 stub 校验器跑通 stub 购买路径。
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "x")
+	svc := NewService(db).WithVerifier(stubVerifier{})
 	if !svc.Enabled() {
 		t.Fatalf("flag=true 时应 enabled")
 	}
@@ -263,6 +266,9 @@ func (rejectVerifier) Verify(_ context.Context, _ string, _ string) (bool, strin
 func TestBillingPurchaseRejectedReceipt(t *testing.T) {
 	ctx, db := newBillingDB(t)
 	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
+	// 越过 §5 IAP 前置闸后，注入恒拒绝校验器验证「校验失败只落 failed 流水、不授权益」路径。
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "x")
 	svc := NewService(db).WithVerifier(rejectVerifier{})
 
 	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-x", Kind: "consumable", Name: "加量包", PriceCents: 600, Period: "", Active: true}); err != nil {
@@ -311,7 +317,10 @@ func TestBillingPurchaseRejectedReceipt(t *testing.T) {
 func TestBillingPurchaseUnknownSKU(t *testing.T) {
 	ctx, db := newBillingDB(t)
 	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
-	svc := NewService(db)
+	// 越过 §5 IAP 前置闸，确保测的是「未知 SKU」语义而非被前置闸提前拦下。
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "x")
+	svc := NewService(db).WithVerifier(stubVerifier{})
 	if _, err := svc.Purchase(ctx, "acc-1", "no-such-sku", "apple", "x"); err == nil {
 		t.Fatalf("购买未知 SKU 应返回错误")
 	}
@@ -322,7 +331,10 @@ func TestBillingPurchaseUnknownSKU(t *testing.T) {
 func TestBillingPurchaseIdempotent(t *testing.T) {
 	ctx, db := newBillingDB(t)
 	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
-	svc := NewService(db) // 默认 stubVerifier（flag QUNXIANG_IAP_REAL 未设）。
+	// 越过 §5 IAP 前置闸，再显式注入 stub 校验器验证幂等键（stub 的 receipt_ref 含 blob 前缀）。
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "x")
+	svc := NewService(db).WithVerifier(stubVerifier{})
 
 	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-idem", Kind: "consumable", Name: "宝石包", PriceCents: 600, Period: "", Active: true}); err != nil {
 		t.Fatalf("UpsertSKU 失败: %v", err)
@@ -371,7 +383,10 @@ func TestBillingPurchaseIdempotent(t *testing.T) {
 func TestBillingSubscriptionExpiry(t *testing.T) {
 	ctx, db := newBillingDB(t)
 	t.Setenv("QUNXIANG_BILLING_ENABLED", "true")
-	svc := NewService(db)
+	// 越过 §5 IAP 前置闸，再显式注入 stub 校验器跑通订阅授权益路径。
+	t.Setenv("QUNXIANG_IAP_REAL", "1")
+	t.Setenv("APPLE_IAP_SHARED_SECRET", "x")
+	svc := NewService(db).WithVerifier(stubVerifier{})
 
 	// 订阅月卡（P1M）。
 	if _, err := svc.UpsertSKU(ctx, SKU{ID: "sku-sub", Kind: "subscription", Name: "月卡", PriceCents: 3000, Period: "P1M", Active: true}); err != nil {

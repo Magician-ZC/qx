@@ -149,6 +149,11 @@ func (h *Hub) Handle(c *gin.Context) {
 			}
 			return
 		}
+		// 任何成功入站消息（含前端每 60s 的应用层心跳 {type:"ping"}）即证明连接存活——
+		// 把读超时 deadline 顺延 120s。否则 deadline 恒为连接建立时的 T0+120s（gorilla 的
+		// SetReadDeadline 是绝对时刻、读成功不自动延长），且后端从不发协议级 ping 帧→PongHandler
+		// 永不触发，导致活跃连接也会每约 120s 被读超时强断重连（churn，§5 风险4）。
+		_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 
 		outbound := h.handleIncoming(clientID, incoming)
 		for _, item := range outbound {

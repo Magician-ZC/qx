@@ -262,7 +262,7 @@ func (service *Service) CreateSinglePlayer(ctx context.Context, seed int64) (Sna
 
 // CreateSinglePlayerWithMapScript 创建单人对局并初始化地图、天气、单位与回合状态。
 func (service *Service) CreateSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, BattlefieldSizeSmall, false, 3, ModeSinglePlayer, false, true, "")
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, BattlefieldSizeSmall, false, 3, ModeSinglePlayer, false, true, "", false)
 }
 
 // CreateSinglePlayerDraftWithMapScript 创建带开局选人阶段的单人对局。
@@ -288,13 +288,14 @@ func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountAndFog(
 // CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogAndRandomEvents 创建带开局选人阶段的单人对局，并指定迷雾与随机事件开关。
 // 向后兼容入口：不带账户归属（匿名局），等价于账户级配额对其 no-op。
 func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogAndRandomEvents(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool) (Snapshot, error) {
-	return service.CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "")
+	return service.CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "", false)
 }
 
-// CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount 同上，但携带账户归属（accountID 空=匿名局，安全）。
+// CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount 同上，但携带账户归属（accountID 空=匿名局，安全）
+// 与未成年模式 minorMode（由 compliance.Gate 裁定、落 State.MinorMode；开启则关闭恋爱·生育、降露骨暴力叙事；匿名/成年局传 false）。
 // router 软解析鉴权账户后调用本入口，把 accountID 写入 State.AccountID，供 LLM 成本闭环按账户记账与配额拦截。
-func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, true, unitCount, ModeSinglePlayer, fogOfWarEnabled, randomEventsEnabled, accountID)
+func (service *Service) CreateSinglePlayerDraftWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string, minorMode bool) (Snapshot, error) {
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, true, unitCount, ModeSinglePlayer, fogOfWarEnabled, randomEventsEnabled, accountID, minorMode)
 }
 
 // CreateDuelWithMapScriptAndUnitCount 创建双人对局，并由房主指定每方单位数。
@@ -314,17 +315,17 @@ func (service *Service) CreateDuelWithMapScriptSizeUnitCountAndFog(ctx context.C
 
 // CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents 创建双人对局，并由房主指定地图、人数、迷雾和随机事件开关。
 func (service *Service) CreateDuelWithMapScriptSizeUnitCountFogAndRandomEvents(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool) (Snapshot, error) {
-	return service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "")
+	return service.CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx, seed, mapScriptID, mapSizeID, unitCount, fogOfWarEnabled, randomEventsEnabled, "", false)
 }
 
 // CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount 同上，并把房主账户 ID 贯穿到 State.AccountID，
 // 用于双人对局房主侧的 LLM 成本归账 / 配额拦截（与单人账户入口同口径）。accountID 为空 → 匿名局（账户级记账/配额 no-op）。
-// 旧同名方法委托本入口传 "" 保持向后兼容。
-func (service *Service) CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
-	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, false, unitCount, ModeDuel, fogOfWarEnabled, randomEventsEnabled, accountID)
+// minorMode 为房主侧未成年裁定（落 State.MinorMode）。旧同名方法委托本入口传 ""/false 保持向后兼容。
+func (service *Service) CreateDuelWithMapScriptSizeUnitCountFogRandomEventsAndAccount(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, unitCount int, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string, minorMode bool) (Snapshot, error) {
+	return service.createSinglePlayerWithMapScript(ctx, seed, mapScriptID, mapSizeID, false, unitCount, ModeDuel, fogOfWarEnabled, randomEventsEnabled, accountID, minorMode)
 }
 
-func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, draftMode bool, unitCount int, mode string, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string) (Snapshot, error) {
+func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, seed int64, mapScriptID string, mapSizeID string, draftMode bool, unitCount int, mode string, fogOfWarEnabled bool, randomEventsEnabled bool, accountID string, minorMode bool) (Snapshot, error) {
 	if seed == 0 {
 		seed = time.Now().UTC().UnixNano()
 	}
@@ -346,6 +347,7 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	state := State{
 		ID:                   sessionID,
 		AccountID:            strings.TrimSpace(accountID), // 本局账户归属（匿名/单机局为空，账户级成本配额对其 no-op）；随 state_json 落库
+		MinorMode:            minorMode,                   // 未成年模式（compliance.Gate 裁定）：随 state_json 落库，关闭恋爱·生育、降露骨暴力
 		Mode:                 mode,
 		RandomSeed:           seed,
 		PlayerFactionID:      "player",
@@ -3051,7 +3053,7 @@ func (service *Service) applyAttack(
 			}
 			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
 			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
-			// 血仇传播（flag-gated 默认关 + best-effort）：在乎死者的人继承对凶手 attacker 的敌意，
+			// 血仇传播（flag-gated 默认开，QUNXIANG_BLOOD_FEUD=false 才关 + best-effort）：在乎死者的人继承对凶手 attacker 的敌意，
 			// 最亲近者哀恸、世仇留痕并投「为TA复仇？」命运卡。绝不影响战斗结算。
 			// 传入 byID（执行主循环持有的活指针映射），令哀恸 morale 的 Mutator 结果能回写内存态，
 			// 避免后续 units.Save(*actor/*ally) 用旧内存态覆盖落库的悲恸（保持内存↔DB 一致）。
@@ -3781,6 +3783,8 @@ func buildSnapshot(state State, units []unit.Record) Snapshot {
 
 	return Snapshot{
 		ID:                  state.ID,
+		WorldID:             state.WorldID,
+		MinorMode:           state.MinorMode,
 		Mode:                state.Mode,
 		RandomSeed:          state.RandomSeed,
 		PlayerFactionID:     state.PlayerFactionID,

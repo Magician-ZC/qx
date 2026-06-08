@@ -18,12 +18,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 go run ./cmd/server          # 启动 HTTP + WebSocket 服务，默认监听 :8080
 go build ./...               # 编译全部包
 go test ./...                # 运行测试（目前仅 internal/engine/... 有用例，其余包暂无）
-go vet ./...                 # 标准静态检查（注意：当前存在 trade.go:68 unreachable code 的历史告警）
+go vet ./...                 # 标准静态检查（当前全绿；历史的 trade.go:68 unreachable 告警已不复现）
 go run ./cmd/statuslint ./...  # 运行自定义状态字段静态分析器（详见下方“关键不变量”）
 ```
 
 - **测试现状**：测试集中在 `internal/engine/`（`decision` 决策层路由、`arbitration` 零和仲裁、`status` 批量状态写入），是仓库第一套测试；`session` 等其余包暂无 `*_test.go`。测试文件被 `statuslint` 白名单豁免（可直接改状态字段）。`status` 包的批写测试会用 `internal/storage/sqlite` 起一个临时 SQLite（modernc 纯 Go，无需 CGO）。
-- `statuslint` 是**独立**分析器，`go build` / `go vet` **不会**自动运行它，必须单独执行。它当前会报告 3 处历史违例（`session/hunger.go:176-177`、`session/romance.go:999`）并以非零码退出——这是既有状态，不是你引入的。
+- `statuslint` 是**独立**分析器，`go build` / `go vet` **不会**自动运行它，必须单独执行。当前**已清零**（历史的 `hunger.go`、`romance.go` 违例均已收敛；新生儿初始化走白名单 `unit.SetNewbornBattleStats`），正常应以零码退出；若报违例即是新引入的，须修。
 
 ### 前端（在 `frontend/` 目录下）
 

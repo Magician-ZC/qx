@@ -142,7 +142,17 @@ type CompletionRequest struct {
 	Metadata       map[string]string
 	Fallback       RuleFallback
 	Cacheable      bool // 是否可进 prompt 缓存（高频重复情境的决策设 true；§11.2 降本，缓存全程 flag-gated 见 prompt_cache.go）
+	// Importance 标注**任务重要度档**（非付费档——付费不得买更强 LLM，违反反 P2W 宪法）。
+	// 取值：""=默认（不分档，走原 profile）/ "critical"（关键节点，可路由到更强/更长超时档）/ "cheap"（日常低权，可路由到便宜/短超时档）。
+	// 仅当 QUNXIANG_TIER_ROUTING 开启且对应档配了 model/timeout 时才生效；否则该字段被完全忽略（零行为差异）。
+	Importance string `json:"importance,omitempty"`
 }
+
+// 任务重要度档常量（CompletionRequest.Importance 取值；空串=不分档）。
+const (
+	ImportanceCritical = "critical" // 关键节点：命运抉择、首领遭遇、阵营战略等少数高价值决策
+	ImportanceCheap    = "cheap"    // 日常低权：闲聊、待命、常规巡逻等可走便宜档的高频决策
+)
 
 // CompletionResult 结构体用于承载该模块的核心数据。
 type CompletionResult struct {
@@ -158,6 +168,8 @@ type CompletionResult struct {
 }
 
 // BatchRequest 结构体用于承载该模块的核心数据。
+// 注意：批处理的可缓存性（Cacheable）经内嵌的 Request.Cacheable 透传——batch.go 把整条 Request 原样下发给
+// GenerateJSON，故无需在此重复字段；Cacheable=true 的批条目命中 prompt 缓存时同样跳过真实 LLM 调用。
 type BatchRequest struct {
 	Key     string
 	Request CompletionRequest
