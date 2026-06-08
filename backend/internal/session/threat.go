@@ -7,6 +7,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -17,6 +18,28 @@ import (
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/unit"
 )
+
+// eliteMutationRetries 是 elite 遭遇写的乐观并发重试次数（PvE-3，镜像 real-3-0）。离线遭遇（region-runner 触发）可能与
+// 战斗循环/部署期 HTTP 并发改同一单位；用 ApplyOptimistic 条件写 + 冲突重试（每次重读最新值再施 delta，**正确叠加**并发写而非
+// 整块覆盖），保证战斗/HTTP 的写**永不被离线遭遇覆盖**。单线程（HTTP 手动触发、无并发写者）首次即成功，行为同 Apply。
+const eliteMutationRetries = 8
+
+// applyEliteMutation 经乐观并发把 elite 遭遇的一次字段变更落地，冲突即重读重试。重试耗尽仍冲突则返回 ErrConcurrentModification
+// （上层据此让遭遇失败、计 encounter_errors），绝不退化成覆盖战斗写。
+func (service *Service) applyEliteMutation(ctx context.Context, mutation status.Mutation) (status.Result, error) {
+	var res status.Result
+	var err error
+	for attempt := 0; attempt <= eliteMutationRetries; attempt++ {
+		res, err = service.mutator.ApplyOptimistic(ctx, mutation)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, status.ErrConcurrentModification) {
+			return res, err
+		}
+	}
+	return res, err
+}
 
 // ThreatTier 威胁档位（四档同一模型的参数化）。
 type ThreatTier string
@@ -173,7 +196,7 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 			}
 			// 注意：威胁是合成伪单位、非 units 行，不能进 Actors（events.actor_unit_id 有 FK）；
 			// 威胁身份记在 ReasonText/Location，事件 actor 落回角色自身。
-			res, err := service.mutator.Apply(ctx, status.Mutation{
+			res, err := service.applyEliteMutation(ctx, status.Mutation{
 				UnitID:     actor.ID,
 				Turn:       turn,
 				Field:      status.FieldHP,
@@ -566,7 +589,7 @@ func (service *Service) grantEliteLoot(ctx context.Context, state *State, actor 
 		}
 	}
 	if gold > 0 {
-		res, err := service.mutator.Apply(ctx, status.Mutation{
+		res, err := service.applyEliteMutation(ctx, status.Mutation{
 			UnitID:     actor.ID,
 			Turn:       state.TurnState.Turn,
 			Field:      status.FieldWallet,
@@ -590,7 +613,7 @@ func (service *Service) applyDefeatPenalty(ctx context.Context, state *State, ac
 	care := service.ComputeAttachment(ctx, actor.ID, actor.Status.Loyalty, state.TurnState.Turn)
 	layer := encounter.DegradePenalty(candidate, care, state.TurnState.Turn)
 
-	res, err := service.mutator.Apply(ctx, status.Mutation{
+	res, err := service.applyEliteMutation(ctx, status.Mutation{
 		UnitID:     actor.ID,
 		Turn:       state.TurnState.Turn,
 		Field:      status.FieldMorale,

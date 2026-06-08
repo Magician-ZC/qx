@@ -7,13 +7,11 @@ package regionrunner
 // 真遭遇结算经**注入式 threatHandler**（main 注入 session.TriggerEliteEncounter，保持 regionrunner 不依赖 session）；
 // 未注入（PvE-1 shadow）则只计遥测、不改单位。
 //
-// 并发硬化（PvE-2 遗留，与 real-2→real-3-0 同款）：触发 handler 前 maybeEncounterThreat 已查一次让位（execGuard=
-// IsExecutionRunning），故已在**异步战斗执行**中的会话不会触发遭遇。但 session.ResolveEliteEncounter 是**多回合**且用
-// status.Mutator.Apply（**非 ApplyOptimistic**），存在丢更新窗口：① execGuard 只覆盖异步战斗执行，**不覆盖部署期 HTTP 写**
-// （改名/嘱咐等也写单位）——这正是 real-3-0 用乐观并发覆盖「所有并发写者」而非仅战斗的原因；② 遭遇**进行中**会话恰好进入战斗，
-// 每回合的 Apply 读改写可被战斗写覆盖。当前缓解：遭遇前复查让位 + **双 flag（THREATS + THREATS_APPLY）默认关** + 危害有界
-// （单回合 HP/钱包级、非破坏性）。**登记 PvE-3 硬化：ResolveEliteEncounter 改乐观并发（镜像 real-3-0）。开 THREATS_APPLY 于
-// 战斗可达会话前应先落此硬化**（对齐 real-2 当初「开 Apply 前须落单位级串行化」的前置纪律）。
+// 并发硬化（PvE-2 + PvE-3，与 real-2→real-3-0 同款）：触发 handler 前 maybeEncounterThreat 已查一次让位（execGuard=
+// IsExecutionRunning），故已在异步战斗执行中的会话不会触发遭遇。**PvE-3 已落地**：session.ResolveEliteEncounter 的每回合
+// HP/钱包/士气写已改用 status.Mutator.ApplyOptimistic + 冲突重试（applyEliteMutation），覆盖**所有并发写者**（不止异步战斗，
+// 还有 execGuard 不覆盖的部署期 HTTP 写）——遭遇**进行中**会话进入战斗/HTTP 写时，遭遇的写冲突即重读重试、**绝不覆盖**战斗/HTTP
+// 的写（有并发不变量测试证「战斗 hunger 写永不被遭遇覆盖」）。至此战斗可达会话开 THREATS_APPLY 已安全。
 
 import (
 	"context"

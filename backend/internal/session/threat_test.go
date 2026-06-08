@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"qunxiang/backend/internal/engine/encounter"
@@ -13,6 +14,62 @@ import (
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
 )
+
+// TestResolveEliteEncounter_OptimisticNoClobbersBattle 验证 PvE-3 乐观并发硬化：离线 elite 遭遇与一个无条件写者
+// （模拟战斗，每次 hunger-1）并发改同一单位时，**战斗的每次写都不被遭遇覆盖**。遭遇只写 HP/wallet/morale，其
+// applyEliteMutation(乐观) 冲突即重读重试、绝不用 stale 整块回写覆盖战斗的 hunger。不变量：final.Hunger == 起始-aWrites
+// （镜像 real-3-0 的「A 战斗写永不被 B 离线写覆盖」）。
+func TestResolveEliteEncounter_OptimisticNoClobbersBattle(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	actor := unit.BootstrapRecord(2, "s1", "player", "她")
+	actor.Status.HP = 100
+	actor.Status.Hunger = 100
+	actor.Status.Attack = 20
+	actor.Status.Defense = 5
+	if err := repo.Save(ctx, actor); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// 弱威胁：角色会赢、会受点伤（HP 写）、有金币掉落（wallet 写）——都是遭遇侧的乐观整块写。
+	weak := Threat{ID: "t1", Name: "野狗", Tier: ThreatTierElite, Attack: 15, Defense: 5, HPPool: 40,
+		Loot: []encounter.LootItem{{ID: "gold", Rarity: encounter.Common, Quantity: 15}}}
+	state := State{ID: "s1"}
+
+	const aWrites = 40
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // A：战斗——无条件 Save，每次 hunger-1（遭遇绝不写 hunger，故 hunger 只由 A 改）。
+		defer wg.Done()
+		for i := 0; i < aWrites; i++ {
+			cur, err := repo.GetByID(ctx, actor.ID)
+			if err != nil {
+				t.Errorf("A get: %v", err)
+				return
+			}
+			cur.Status.Hunger -= 1
+			if err := repo.Save(ctx, cur); err != nil {
+				t.Errorf("A save: %v", err)
+				return
+			}
+		}
+	}()
+
+	// B：离线 elite 遭遇（乐观并发），与 A 并发。
+	if _, err := service.ResolveEliteEncounter(ctx, &state, &actor, weak); err != nil {
+		t.Fatalf("resolve elite: %v", err)
+	}
+	wg.Wait()
+
+	final, err := repo.GetByID(ctx, actor.ID)
+	if err != nil {
+		t.Fatalf("final get: %v", err)
+	}
+	if final.Status.Hunger != 100-aWrites {
+		t.Fatalf("战斗的 hunger 写不应被离线遭遇覆盖：期望 %d，实际 %d（PvE-3 乐观硬化失效）", 100-aWrites, final.Status.Hunger)
+	}
+}
 
 func newThreatTestService(t *testing.T) (*sql.DB, *unit.Repository, *Service) {
 	t.Helper()
