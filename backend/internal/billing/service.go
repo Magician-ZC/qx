@@ -11,6 +11,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -20,6 +21,9 @@ import (
 
 	"qunxiang/backend/internal/storage/dbdialect"
 )
+
+// ErrPlatformUnsupported 表示某 verifier 收到了它不处理的平台（由 platformVerifier 选择器分派时不应发生）。
+var ErrPlatformUnsupported = errors.New("billing: unsupported platform")
 
 // 默认账户级 LLM 成本上限（micro_usd）。来源 PRD §3.1：付费用户成本上限 = 天命月卡价 × 40%。
 // 月卡 ¥30 ÷ 汇率 7.2 ≈ $4.1667，× 40% ≈ $1.6667 → 1_666_667 micro_usd。
@@ -65,8 +69,9 @@ type ReceiptVerifier interface {
 }
 
 // stubVerifier 是收据校验的占位实现——恒通过。
-// TODO 接真实收据校验 API：Apple App Store Server API（verifyReceipt/已迁 App Store Server Notifications V2）
-// 与 Google Play Developer API（purchases.subscriptions/products.get）。当前是**明确 stub 边界**，勿在生产用。
+// 真实网关见 receipt_apple.go（AppleReceiptVerifier）与 receipt_google.go（GoogleReceiptVerifier），
+// 经 platformVerifier 选择器分派；设 QUNXIANG_IAP_REAL=1 时 NewService 默认装真实选择器（见 selectVerifier）。
+// 默认（未设）仍用本 stub 保持向后兼容——**stub 是明确边界，勿在生产开放购买时用**。
 type stubVerifier struct{}
 
 // Verify 恒返回 true，并用收据原文哈希位长充当占位 receipt_ref（仅用于流水可读，非真实凭据）。
@@ -82,6 +87,98 @@ func (stubVerifier) Verify(_ context.Context, platform, receiptBlob string) (boo
 	return true, ref, nil
 }
 
+// platformVerifier 是按平台分派的收据校验选择器：apple→AppleReceiptVerifier、google→GoogleReceiptVerifier，
+// 其余平台或对应凭据未配 → 走 fallback（安全降级语义见下）。
+//
+// 安全降级语义（**绝不静默放行未校验收据于生产**）：
+//   - 已注册的平台（apple/google）：真实网关。校验失败返回 ok=false（落 failed 流水留痕），
+//     网络/凭据错返回 err（Purchase 整体失败，不授权益）。
+//   - 未注册/未知平台：派到 fallback。
+//   - fallback 默认是 denyVerifier（恒 ok=false），即未配真实网关的平台一律拒绝——安全侧默认拒绝。
+//     仅当显式 WithFallback(stubVerifier{}) 才回到「恒通过」（仅供测试/灰度，注释已警示）。
+type platformVerifier struct {
+	verifiers map[string]ReceiptVerifier // 按小写 platform 索引的真实网关。
+	fallback  ReceiptVerifier            // 未命中时的降级校验器（默认 denyVerifier，安全侧拒绝）。
+}
+
+// Verify 按 platform 分派。命中真实网关则用之；未命中走 fallback。
+func (p *platformVerifier) Verify(ctx context.Context, platform, receiptBlob string) (bool, string, error) {
+	key := strings.ToLower(strings.TrimSpace(platform))
+	if v, ok := p.verifiers[key]; ok && v != nil {
+		return v.Verify(ctx, platform, receiptBlob)
+	}
+	if p.fallback != nil {
+		return p.fallback.Verify(ctx, platform, receiptBlob)
+	}
+	// 无 fallback：安全侧拒绝（绝不放行未配网关的平台）。
+	return false, "", fmt.Errorf("%w: no verifier for platform %q", ErrPlatformUnsupported, platform)
+}
+
+// denyVerifier 恒拒绝——platformVerifier 对未配真实网关平台的安全默认（绝不静默放行）。
+type denyVerifier struct{}
+
+func (denyVerifier) Verify(_ context.Context, _ string, _ string) (bool, string, error) {
+	return false, "", nil
+}
+
+// newRealPlatformVerifier 装配真实平台选择器：注册 apple/google 真实网关，凭据/端点经 env 自动读取。
+// fallback 默认 denyVerifier（未配网关的平台安全拒绝）。HTTP client 用各 verifier 的默认（带超时）。
+func newRealPlatformVerifier() *platformVerifier {
+	return &platformVerifier{
+		verifiers: map[string]ReceiptVerifier{
+			"apple":  NewAppleReceiptVerifier(nil, "", "", ""),
+			"google": NewGoogleReceiptVerifier(nil, "", nil),
+		},
+		fallback: denyVerifier{},
+	}
+}
+
+// WithFallback 替换平台选择器的降级校验器（仅当当前 verifier 是 platformVerifier 时生效）。
+// 传 stubVerifier{} 可让未配网关平台恒通过——**仅供测试/灰度，生产勿用**。返回自身便于链式。
+func (s *Service) WithFallback(fallback ReceiptVerifier) *Service {
+	if pv, ok := s.verifier.(*platformVerifier); ok && fallback != nil {
+		pv.fallback = fallback
+	}
+	return s
+}
+
+// iapReal 读 QUNXIANG_IAP_REAL（true/1/yes/on 视为开）→ 用真实平台选择器；默认关，保持 stub 向后兼容。
+func iapReal() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_IAP_REAL"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// selectVerifier 按 env 选择默认收据校验器：QUNXIANG_IAP_REAL 开 → 真实平台选择器；否则 stub（向后兼容）。
+func selectVerifier() ReceiptVerifier {
+	if iapReal() {
+		return newRealPlatformVerifier()
+	}
+	return stubVerifier{}
+}
+
+// firstNonEmpty 返回首个非空（trim 后）字符串；全空返回 ""。供各 verifier 取「构造参数→env→默认」优先级用。
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// truncateForErr 把响应原文截到 256 字节并去空白，避免把超大/多行 body 塞进错误信息。供各 verifier 的非 2xx 错误用。
+func truncateForErr(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 256 {
+		s = s[:256] + "…"
+	}
+	return s
+}
+
 // Service 是商业化服务。零依赖外部网关（收据校验经 verifier，默认 stub）。
 type Service struct {
 	db       *sql.DB
@@ -90,10 +187,12 @@ type Service struct {
 }
 
 // NewService 构造商业化服务。flag QUNXIANG_BILLING_ENABLED 默认关 → CheckQuota 恒放行（向后兼容）。
+// 收据校验器按 env 选择（selectVerifier）：QUNXIANG_IAP_REAL 开 → 真实 Apple/Google 网关选择器；
+// 默认（未设）→ stubVerifier（恒通过，向后兼容）。Purchase 调用点不变（仍走 s.verifier.Verify）。
 func NewService(db *sql.DB) *Service {
 	return &Service{
 		db:       db,
-		verifier: stubVerifier{},
+		verifier: selectVerifier(),
 		enabled:  billingEnabled(),
 	}
 }

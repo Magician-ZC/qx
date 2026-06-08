@@ -291,7 +291,10 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
   claimed_at VARCHAR(64) NULL,
   completed_at VARCHAR(64) NULL,
   INDEX idx_agent_jobs_status (status, created_at),
-  INDEX idx_agent_jobs_claimed (status, claimed_at)
+  INDEX idx_agent_jobs_claimed (status, claimed_at),
+  -- region 维度认领（ClaimNextJobInRegion）的覆盖索引：让多实例分片的 FOR UPDATE 只锁本区 pending 段、
+  -- 不跨区过锁，兑现 per-region 并行吞吐（§11.2 单区单写者串行、跨区并行）。
+  INDEX idx_agent_jobs_region (region_id, status, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fake_door_leads (
@@ -422,4 +425,27 @@ CREATE TABLE IF NOT EXISTS region_leases (
   expires_at VARCHAR(64) NULL,
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
   INDEX idx_region_leases_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- region 注册表（多世界模型 region 实体地基，设计 docs/大世界沙盘设计方案.md §8.1）：把 region 从
+-- 「region_id==sessionID」隐式约定扶正为 worlds 下一等子实体，承载区级活跃度（HOT/WARM/COLD）、
+-- threat_level（威胁累积，供 PvE「天然扎堆」结算）、last_tick（最近推进的逻辑时钟值）。纯新增。
+CREATE TABLE IF NOT EXISTS regions (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL DEFAULT '',
+  activity_tier VARCHAR(16) NOT NULL DEFAULT 'cold',
+  threat_level BIGINT NOT NULL DEFAULT 0,
+  last_tick BIGINT NOT NULL DEFAULT 0,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_regions_world_tier (world_id, activity_tier)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- per-region 逻辑时钟（设计 §8.1）：worlds.tick 是世界级全局序，本表是每个 region 自己的单调发号器。
+-- AdvanceRegionTick 原子 +1（双驱动，对齐 world.AdvanceTick：MySQL 走 SELECT…FOR UPDATE + UPDATE）。
+CREATE TABLE IF NOT EXISTS world_ticks (
+  world_id VARCHAR(191) NOT NULL,
+  region_id VARCHAR(191) NOT NULL,
+  tick BIGINT NOT NULL DEFAULT 0,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (world_id, region_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

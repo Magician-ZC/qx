@@ -70,15 +70,34 @@ type record struct {
 	dailyPlaySeconds int64
 }
 
-// Service 是合规前置门服务，持有 DB 连接与可注入时钟。
+// Service 是合规前置门服务，持有 DB 连接、可注入时钟与实名核验器。
 type Service struct {
-	db  *sql.DB
-	now func() time.Time // 可注入时钟，默认 time.Now；确定性测试可替换
+	db       *sql.DB
+	now      func() time.Time // 可注入时钟，默认 time.Now；确定性测试可替换
+	realname RealnameVerifier // 实名核验网关；默认 stub（恒过，向后兼容），生产经 env 注入真实 HTTP 网关
 }
 
 // NewService 构造合规服务，使用真实时钟。
+// 默认实名核验器：若 env 配了 QUNXIANG_REALNAME_ENDPOINT 则用真实 HTTP 网关，否则回退 stub（零行为变化）。
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	svc := &Service{db: db, now: time.Now, realname: stubRealnameVerifier{}}
+	if v := NewHTTPRealnameVerifierFromEnv(); v != nil {
+		svc.realname = v
+	}
+	return svc
+}
+
+// WithRealnameVerifier 返回一个使用注入实名核验器的浅拷贝（用于注入真实 HTTP 网关或测试 mock）。
+// 不修改原 Service；verifier 为 nil 时保持原核验器不变。
+func (s *Service) WithRealnameVerifier(verifier RealnameVerifier) *Service {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	if verifier != nil {
+		clone.realname = verifier
+	}
+	return &clone
 }
 
 // WithClock 返回一个使用注入时钟的浅拷贝（用于确定性测试宵禁/日切）。
@@ -207,12 +226,46 @@ func (s *Service) RecordPlaySeconds(ctx context.Context, accountID string, secon
 }
 
 // VerifyRealname 登记/更新账号实名状态（Verify 类方法，PRD 强制实名前置）。
+//
+// 历史/向后兼容路径：直接落客户端传入的 bool——这是「客户端自报即过」语义，**不做真实核验**。
+// 保留此签名仅为整合方/既有路由不被破坏；新接入应改用 VerifyRealnameWithIdentity 走真实核验网关。
 func (s *Service) VerifyRealname(ctx context.Context, accountID string, verified bool) error {
 	rec, err := s.load(ctx, accountID)
 	if err != nil {
 		return err
 	}
 	rec.realnameVerified = verified
+	return s.save(ctx, rec, s.clock())
+}
+
+// VerifyRealnameWithIdentity 是真实实名核验路径（PRD §5/§9 强制实名前置门）。
+// 把「真实姓名 + 身份证号」交给 RealnameVerifier 核验，仅在核验通过（matched=true）时
+// 把 realname_verified 置 1 落库；核验不过或网关报错则返回错误、不置位。
+//
+// PII 安全：姓名/身份证号仅用于核验，**绝不落 account_compliance**（只落结果位 realname_verified
+// + 可选脱敏 ref）；本方法不打印姓名/身份证号到任何日志。
+//
+// 默认核验器为 stub（恒过，向后兼容）；生产须经 env（QUNXIANG_REALNAME_ENDPOINT）或
+// WithRealnameVerifier 注入真实 HTTP 网关，否则实名门形同虚设。
+func (s *Service) VerifyRealnameWithIdentity(ctx context.Context, accountID, name, idNumber string) error {
+	verifier := s.realname
+	if verifier == nil {
+		verifier = stubRealnameVerifier{}
+	}
+	matched, _, err := verifier.Verify(ctx, name, idNumber)
+	if err != nil {
+		// 核验失败（不匹配 / 格式非法 / 网关错误）：不置位，原样上抛供调用方区分处理。
+		return err
+	}
+	if !matched {
+		return ErrRealnameMismatch
+	}
+	rec, err := s.load(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	rec.realnameVerified = true
+	// 注意：rec 中绝不写入 name/idNumber——只落结果位。
 	return s.save(ctx, rec, s.clock())
 }
 

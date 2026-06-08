@@ -334,6 +334,8 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_decision_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_claimed ON agent_decision_jobs(status, claimed_at);
+-- region 维度认领（ClaimNextJobInRegion）覆盖索引：多实例分片只锁本区 pending 段、不跨区过锁，兑现 per-region 并行吞吐。
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_region ON agent_decision_jobs(region_id, status, created_at);
 
 -- 假门预实验留资表（W0 验证，append-only）：landing 的留资/问卷/事件 POST 进来，验证需求后再大投入。
 -- 隐私：仅存自愿提交的留资+归因，无 PII 关联游戏账户；保留期清理可按 created_at。
@@ -481,3 +483,30 @@ CREATE TABLE IF NOT EXISTS region_leases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_region_leases_expires ON region_leases(expires_at);
+
+-- region 注册表（多世界模型 region 实体地基，设计 docs/大世界沙盘设计方案.md §8.1）。
+-- 在此之前 region 是「region_id==sessionID」的隐式约定、无独立实体；本表把 region 扶正为 worlds 下的一等子实体，
+-- 承载区级活跃度（HOT/WARM/COLD 三层调度档）、threat_level（威胁累积，供 PvE 威胁「天然扎堆」结算用）、
+-- last_tick（最近一次推进的逻辑时钟值，便于巡检/调度排序）。纯新增，不改既有路径。
+-- runner 接入 region.threat_level 做威胁扎堆是后续接线点（regionrunner.go）。
+CREATE TABLE IF NOT EXISTS regions (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL DEFAULT '',
+  activity_tier TEXT NOT NULL DEFAULT 'cold',
+  threat_level INTEGER NOT NULL DEFAULT 0,
+  last_tick INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_regions_world_tier ON regions(world_id, activity_tier);
+
+-- per-region 逻辑时钟（设计 §8.1：tick 改为 per-region 逻辑时钟）。
+-- worlds.tick 是世界级「谁先动手」全局序，本表是每个 region 自己的单调发号器，供区级调度独立计时。
+-- AdvanceRegionTick 原子 +1 发号（双驱动，对齐 world.AdvanceTick 的 UPDATE…RETURNING / SELECT…FOR UPDATE）。
+CREATE TABLE IF NOT EXISTS world_ticks (
+  world_id TEXT NOT NULL,
+  region_id TEXT NOT NULL,
+  tick INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (world_id, region_id)
+);

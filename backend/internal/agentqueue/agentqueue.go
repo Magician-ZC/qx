@@ -288,6 +288,69 @@ func claimNextJobMySQL(ctx context.Context, db *sql.DB, claimedAt string) (*Deci
 	return job, nil
 }
 
+// ClaimNextJobInRegion 是 ClaimNextJob 的 **region 维度** 变体（沙盘 §8.2「per-region 唯一处理者」接线点）：
+// 只原子认领 region_id == 给定 regionID 的下一条 pending 作业。region-runner 多实例分片时，每个实例仅认领自己
+// 持租 region 的作业，避免「实例 A 持 region-1 租约却处理了 region-2 的单位」破坏 per-region 单写者不变量。
+//
+// 语义与 ClaimNextJob 完全一致（pending→running、FIFO created_at 升序、双驱动原子认领），仅多一个 region_id 等值谓词。
+// regionID 为空时返回错误（空 region 作业不该被 region-scoped 认领；区分于全局 ClaimNextJob 的「认领任意作业」语义）。
+// 不改既有 ClaimNextJob——后者仍是 flag 关（单实例）时 region-runner 的零行为变化默认路径。
+func ClaimNextJobInRegion(ctx context.Context, db *sql.DB, regionID string) (*DecisionJob, error) {
+	if regionID == "" {
+		return nil, fmt.Errorf("claim next job in region: empty region id")
+	}
+	claimedAt := nowTS()
+	if dbdialect.IsMySQL(db) {
+		return claimNextJobInRegionMySQL(ctx, db, regionID, claimedAt)
+	}
+	row := db.QueryRowContext(ctx, `
+		UPDATE agent_decision_jobs SET status = ?, claimed_at = ?
+		WHERE id = (SELECT id FROM agent_decision_jobs WHERE status = ? AND region_id = ? ORDER BY created_at ASC, id ASC LIMIT 1)
+		RETURNING id, unit_id, session_id, world_id, region_id, tick, attempt`,
+		StatusRunning, claimedAt, StatusPending, regionID)
+	job, err := scanClaimedJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim next job in region %s (sqlite): %w", regionID, err)
+	}
+	return job, nil
+}
+
+func claimNextJobInRegionMySQL(ctx context.Context, db *sql.DB, regionID, claimedAt string) (*DecisionJob, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim next job in region (begin tx): %w", err)
+	}
+	defer tx.Rollback()
+
+	var id string
+	row := tx.QueryRowContext(ctx, `SELECT id FROM agent_decision_jobs WHERE status = ? AND region_id = ? ORDER BY created_at ASC, id ASC LIMIT 1 FOR UPDATE`, StatusPending, regionID)
+	if err := row.Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claim next job in region %s (select for update): %w", regionID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_decision_jobs SET status = ?, claimed_at = ? WHERE id = ?`, StatusRunning, claimedAt, id); err != nil {
+		return nil, fmt.Errorf("claim next job in region %s (update): %w", regionID, err)
+	}
+	job := &DecisionJob{ID: id, Status: StatusRunning}
+	var sessionID, worldID, regionID2 sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT unit_id, session_id, world_id, region_id, tick, attempt FROM agent_decision_jobs WHERE id = ?`, id).
+		Scan(&job.UnitID, &sessionID, &worldID, &regionID2, &job.Tick, &job.Attempt); err != nil {
+		return nil, fmt.Errorf("claim next job in region %s (reload): %w", regionID, err)
+	}
+	job.SessionID = sessionID.String
+	job.WorldID = worldID.String
+	job.RegionID = regionID2.String
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("claim next job in region %s (commit): %w", regionID, err)
+	}
+	return job, nil
+}
+
 func scanClaimedJob(row *sql.Row) (*DecisionJob, error) {
 	job := &DecisionJob{Status: StatusRunning}
 	var sessionID, worldID, regionID sql.NullString

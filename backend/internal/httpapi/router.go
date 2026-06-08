@@ -1615,11 +1615,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	if envFlag("QUNXIANG_COMPLIANCE_ENABLED") {
 		complianceSvc := compliance.NewService(deps.Store)
 
-		// 登记实名状态与生日（实名前置 + 据生日刷新未成年模式）。
+		// 登记实名（真实姓名+身份证号交 RealnameVerifier 核验，绝不信任客户端 bool）与生日（据生日刷新未成年模式）。
+		// PII：name/id_number 仅用于核验、不落库、不入日志（VerifyRealnameWithIdentity 只落结果位）。
 		router.POST("/api/compliance/verify", func(c *gin.Context) {
 			var body struct {
-				BirthDate        string `json:"birth_date"`
-				RealnameVerified bool   `json:"realname_verified"`
+				BirthDate string `json:"birth_date"`
+				Name      string `json:"name"`
+				IDNumber  string `json:"id_number"`
 			}
 			if err := c.ShouldBindJSON(&body); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid verify payload"})
@@ -1636,9 +1638,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 					return
 				}
 			}
-			if err := complianceSvc.VerifyRealname(c.Request.Context(), accountID, body.RealnameVerified); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
+			// 仅当提交了姓名+身份证号时才走实名核验（生日单独登记也允许）；核验不过/网关错→不置位、4xx。
+			if strings.TrimSpace(body.Name) != "" || strings.TrimSpace(body.IDNumber) != "" {
+				if err := complianceSvc.VerifyRealnameWithIdentity(c.Request.Context(), accountID, body.Name, body.IDNumber); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
 			}
 			c.JSON(http.StatusOK, gin.H{"ok": true})
 		})

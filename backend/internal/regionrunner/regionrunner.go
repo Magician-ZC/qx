@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"qunxiang/backend/internal/agentqueue"
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/events"
@@ -124,6 +126,8 @@ type Config struct {
 	ReclaimEvery time.Duration // 多久跑一次 stale-running 回收
 	StaleAfter   time.Duration // 作业认领后多久未完成算 stale
 	MaxAttempt   int           // 作业最大重试次数（超限置 failed）
+	LeaseTTL     time.Duration // region 租约有效期（§8.2 多实例分片；须 > 数个 TickInterval，留出续租余量）。
+	// 仅当 flag QUNXIANG_REGION_LEASES 开时生效；flag 关时 AcquireLease/RenewLease/ReleaseLease 恒 no-op，零行为变化。
 }
 
 func (c Config) withDefaults() Config {
@@ -148,6 +152,13 @@ func (c Config) withDefaults() Config {
 	if c.MaxAttempt <= 0 {
 		c.MaxAttempt = 3
 	}
+	if c.LeaseTTL <= 0 {
+		// 默认租约 = max(90s, 3×TickInterval)：远大于一个调度 pass，留足续租余量；持租实例崩溃后约一个 TTL 内别的实例可接管。
+		c.LeaseTTL = 3 * c.TickInterval
+		if c.LeaseTTL < 90*time.Second {
+			c.LeaseTTL = 90 * time.Second
+		}
+	}
 	return c
 }
 
@@ -158,6 +169,7 @@ type stats struct {
 	deferred, dropped, conflicted, settled                                int64 // 让位战斗/丢弃(逝者或删档)/乐观并发冲突退避/饱和空写短路
 	llmCalls, llmFallbacks                                                int64 // real-3：HOT 单位经 LLM 决策成功 / LLM 失败回退反射
 	threatsRolled, threatsEncountered, threatsFled, encounterErrors       int64 // PvE：roll 命中威胁/升级为遭遇/HP 危急撤退/真遭遇失败
+	leasesAcquired, leasesLost, regionsSkipped                            int64 // 分片：本实例抢到 region 租约/续租失败丢区/因他人持租跳过的 region
 }
 
 // Runner 是 region-runner 引擎实例。
@@ -170,6 +182,13 @@ type Runner struct {
 	mutator   *status.Mutator   // 经它改饥饿等保护字段、留痕
 	execGuard func(string) bool // 让位战斗：某会话在聚焦执行中则跳过其单位（默认恒 false）
 	st        stats
+
+	// region 分片（§8.2「per-region 唯一处理者」）。instanceID 标识本 runner 实例；leases 抢/续/释 region 租约。
+	// flag QUNXIANG_REGION_LEASES 关时 leases 全程 no-op（恒抢到、不触 DB）→ 单实例零行为变化。
+	instanceID  string                           // 本实例唯一 ID（New 时生成 uuid）
+	leases      *LeaseManager                    // region 租约管理器
+	heldRegions map[string]agentqueue.WakeRegion // 本实例当前持租的 region（region_id → world/region），由 schedulePass 维护、worker 据此 region-scoped 认领
+	heldMu      sync.RWMutex                     // 守护 heldRegions（schedulePass 写 / worker 读 并发）
 
 	// real-3 HOT-LLM（默认 llm==nil → 全程反射；main 按 QUNXIANG_REGION_RUNNER_LLM 注入才启用，见 ambient_llm.go）。
 	llm               ambientLLM    // 离线决策 LLM 客户端
@@ -201,6 +220,9 @@ func New(db *sql.DB, cfg Config, log *slog.Logger) *Runner {
 		execGuard:      func(string) bool { return false },
 		threatsEnabled: cfg.Threats,
 		threatRouter:   decision.DefaultRouter(),
+		instanceID:     uuid.NewString(),
+		leases:         NewLeaseManager(db),
+		heldRegions:    make(map[string]agentqueue.WakeRegion),
 	}
 }
 
@@ -211,9 +233,12 @@ func (r *Runner) SetExecutionGuard(guard func(string) bool) {
 	}
 }
 
-// withClock 注入时钟（测试用）。
+// withClock 注入时钟（测试用）。同步注入到 LeaseManager，使租约抢/续/过期窗口与 runner 同钟（确定性分片测试）。
 func (r *Runner) withClock(now func() time.Time) *Runner {
 	r.now = now
+	if r.leases != nil {
+		r.leases = r.leases.withClock(now)
+	}
 	return r
 }
 
@@ -224,6 +249,11 @@ func (r *Runner) currentTick() int64 {
 
 // schedulePass 跑一个调度 tick：遍历有唤醒排期的 region，拉到点单位，入队决策作业（背压闸把守）。返回本次入队数。
 // 处理过的 wake 先 RemoveWake 再入队 job——单位在「被拉出到重排」之间无 wake 行，故不会被重复入队。
+//
+// region 分片（§8.2「per-region 唯一处理者」）：遍历前对每个 due region 先 AcquireLease(regionID, instanceID, ttl)——
+// 抢到才处理（入队其作业 + 把该 region 记入 heldRegions 供 worker region-scoped 认领）；抢不到（别的实例持租）就跳过、
+// 让位。本 pass 持租的 region 在 pass 末统一 RenewLease 续租。flag QUNXIANG_REGION_LEASES 关时 AcquireLease 恒 true →
+// 不跳过任何 region、heldRegions 含全部 region；worker 仍走全局 ClaimNextJob（见 claimNextJobScoped）→ 零行为变化。
 func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 	atomic.AddInt64(&r.st.ticks, 1)
 	tick := r.currentTick()
@@ -232,7 +262,21 @@ func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	enqueued := 0
+	held := make(map[string]agentqueue.WakeRegion, len(regions)) // 本 pass 新确认持租的 region（pass 末覆写 heldRegions）
 	for _, reg := range regions {
+		// 抢区锁：抢到才处理该 region；抢不到（他人持租）跳过、让位。flag 关时恒抢到（单实例零变化）。
+		ok, lerr := r.leases.AcquireLease(ctx, reg.RegionID, r.instanceID, r.cfg.LeaseTTL)
+		if lerr != nil {
+			r.log.Warn("region-runner acquire lease", "region", reg.RegionID, "error", lerr)
+			continue
+		}
+		if !ok {
+			atomic.AddInt64(&r.st.regionsSkipped, 1)
+			continue // 别的实例持有此 region 的租约 → 不碰它的单位/作业
+		}
+		atomic.AddInt64(&r.st.leasesAcquired, 1)
+		held[reg.RegionID] = reg
+
 		due, err := agentqueue.ListDueWakes(ctx, r.db, reg.WorldID, reg.RegionID, tick, 256)
 		if err != nil {
 			r.log.Warn("region-runner list due wakes", "region", reg.RegionID, "error", err)
@@ -257,13 +301,67 @@ func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 			atomic.AddInt64(&r.st.enqueued, 1)
 		}
 	}
+	// 发布本 pass 持租的 region 集合（worker 据此 region-scoped 认领作业），并续租它们以免在下个 pass 前过期。
+	r.publishHeldRegions(ctx, held)
 	return enqueued, nil
+}
+
+// publishHeldRegions 覆写 heldRegions 为本 pass 确认持租的集合，并对每个续租（顺延 TTL）。续租失败（已被他人抢走）
+// 的 region 立即从持租集合剔除，避免 worker 继续认领已失去区锁的作业。flag 关时 RenewLease 恒 true、不触 DB。
+func (r *Runner) publishHeldRegions(ctx context.Context, held map[string]agentqueue.WakeRegion) {
+	for regionID := range held {
+		ok, err := r.leases.RenewLease(ctx, regionID, r.instanceID, r.cfg.LeaseTTL)
+		if err != nil {
+			r.log.Warn("region-runner renew lease", "region", regionID, "error", err)
+			continue
+		}
+		if !ok {
+			// 续不到 = 已失去区锁（被别的实例抢走）→ 本 pass 不再持有它。
+			atomic.AddInt64(&r.st.leasesLost, 1)
+			delete(held, regionID)
+		}
+	}
+	r.heldMu.Lock()
+	r.heldRegions = held
+	r.heldMu.Unlock()
+}
+
+// heldRegionList 快照当前持租的 (world,region) 列表（worker region-scoped 认领时遍历）。
+func (r *Runner) heldRegionList() []agentqueue.WakeRegion {
+	r.heldMu.RLock()
+	defer r.heldMu.RUnlock()
+	out := make([]agentqueue.WakeRegion, 0, len(r.heldRegions))
+	for _, reg := range r.heldRegions {
+		out = append(out, reg)
+	}
+	return out
+}
+
+// claimNextJobScoped 是 worker 的认领入口：
+//   - flag QUNXIANG_REGION_LEASES 关（单实例）→ 走全局 agentqueue.ClaimNextJob，认领任意 pending 作业（**与接线前完全一致**）。
+//   - flag 开（多实例分片）→ 只认领本实例持租 region 的作业：遍历 heldRegions，逐区 ClaimNextJobInRegion，取到第一条即返回。
+//
+// 这样实例只处理自己持租 region 的单位，维护 §8.2 per-region 单写者不变量。持租集合空时返回 (nil,nil)（worker 退避）。
+func (r *Runner) claimNextJobScoped(ctx context.Context) (*agentqueue.DecisionJob, error) {
+	if !LeasesEnabled() {
+		return agentqueue.ClaimNextJob(ctx, r.db)
+	}
+	for _, reg := range r.heldRegionList() {
+		job, err := agentqueue.ClaimNextJobInRegion(ctx, r.db, reg.RegionID)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+	return nil, nil
 }
 
 // processOne 让一个 worker 原子认领并处理一条作业：派发给 handleJob（shadow 记日志 / apply 真应用 L1），
 // 据其返回决定是否重排唤醒，最后完成作业。返回是否处理了一条（false 表示队列空）。
 func (r *Runner) processOne(ctx context.Context) (bool, error) {
-	job, err := agentqueue.ClaimNextJob(ctx, r.db)
+	job, err := r.claimNextJobScoped(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -500,7 +598,27 @@ func (r *Runner) Run(ctx context.Context) {
 
 	<-ctx.Done()
 	wg.Wait()
+	r.releaseHeldRegions() // 退出时主动释放持租的 region，让别的实例立刻可接管（flag 关时 no-op）。
 	r.log.Info("region-runner stopped", "stats", r.Stats())
+}
+
+// releaseHeldRegions 在 runner 退出时释放本实例当前持有的所有 region 租约（别的实例可立即抢占接管）。
+// 用独立的短超时 context（Run 的 ctx 此刻已取消，无法再做 DB 写）。flag 关时 ReleaseLease no-op、不触 DB。
+func (r *Runner) releaseHeldRegions() {
+	regions := r.heldRegionList()
+	if len(regions) == 0 {
+		return
+	}
+	relCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, reg := range regions {
+		if err := r.leases.ReleaseLease(relCtx, reg.RegionID, r.instanceID); err != nil {
+			r.log.Warn("region-runner release lease on stop", "region", reg.RegionID, "error", err)
+		}
+	}
+	r.heldMu.Lock()
+	r.heldRegions = make(map[string]agentqueue.WakeRegion)
+	r.heldMu.Unlock()
 }
 
 // processOneRecovered 包 recover——单条作业 panic 不拖垮 worker（崩溃作业由 stale-reclaim 重试）。
@@ -535,6 +653,14 @@ func (r *Runner) Stats() map[string]any {
 		"dropped":       atomic.LoadInt64(&r.st.dropped),
 		"conflicted":    atomic.LoadInt64(&r.st.conflicted),
 		"settled":       atomic.LoadInt64(&r.st.settled),
+		// region 分片遥测：instance_id 本实例 ID；leases_enabled flag 是否开（开才真互斥）；leases_acquired 抢到的 region 次数；
+		// leases_lost 续租失败丢区；regions_skipped 因他人持租而跳过的 region 次数；regions_held 当前持租 region 数。
+		"instance_id":     r.instanceID,
+		"leases_enabled":  LeasesEnabled(),
+		"leases_acquired": atomic.LoadInt64(&r.st.leasesAcquired),
+		"leases_lost":     atomic.LoadInt64(&r.st.leasesLost),
+		"regions_skipped": atomic.LoadInt64(&r.st.regionsSkipped),
+		"regions_held":    len(r.heldRegionList()),
 		// real-3 HOT-LLM 遥测：llm_enabled 是否注入了客户端；llm_calls 成功经 LLM 决策次数；llm_fallbacks LLM 失败回退反射；
 		// llm_spent_usd 进程级累计成本；llm_latched 预算是否已耗尽闩死（此后全转反射）。
 		"llm_enabled":   r.llm != nil,

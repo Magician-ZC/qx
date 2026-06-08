@@ -63,6 +63,10 @@ func leasesEnabled() bool {
 	}
 }
 
+// LeasesEnabled 是 leasesEnabled 的导出别名，供 regionrunner 主循环判定是否走 region 分片路径
+// （flag 关时 schedulePass 不跳过任何 region、worker 走全局 ClaimNextJob，保证零行为变化）。
+func LeasesEnabled() bool { return leasesEnabled() }
+
 // formatLeaseTS 把时刻格式化为定宽可字典序比较的 UTC 串。
 func formatLeaseTS(t time.Time) string { return t.UTC().Format(leaseTSLayout) }
 
