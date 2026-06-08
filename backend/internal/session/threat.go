@@ -236,6 +236,8 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 			verb = "终究避开了"
 		}
 		result.InboxCard = fmt.Sprintf("她%s那头%s，伤得不轻，心气也低了一截——但她还在，命还攥在自己手里。", verb, threat.Name)
+		// 失败后果向旁观者传播（一人一版，best-effort）：在乎她的人按相关性各收到一版「你挂念的人败了」。
+		_, _ = service.propagateThreatFailure(ctx, state, *actor, threat.Name, result.PenaltyLayer)
 	}
 
 	appendLog(state, "threat_encounter", result.InboxCard, actor.ID, elite.ID)
@@ -521,6 +523,8 @@ func (service *Service) settleFieldBoss(ctx context.Context, state *State, threa
 			}
 			outcome.PenaltyLayer = layer
 			outcome.InboxCard = fmt.Sprintf("她和同伴没能拿下那头%s，伤痕累累退了下来——但人都还在，命还攥在自己手里。", threat.Name)
+			// 每个战败队员各向其牵挂者扇出一版失败后果（best-effort）。
+			_, _ = service.propagateThreatFailure(ctx, state, *ms.rec, threat.Name, outcome.PenaltyLayer)
 		}
 
 		appendLog(state, "field_boss_encounter", outcome.InboxCard, ms.rec.ID, threat.ID)

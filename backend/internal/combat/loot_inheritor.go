@@ -84,6 +84,10 @@ func (service *LootInheritor) Resolve(ctx context.Context, request ResolveReques
 		if stack.ItemID == "" {
 			continue
 		}
+		// 灵魂绑定/传家遗物不被击杀者抢走：已先由 session.inheritLegacyItems 路由给亲密继承人（soulbound 语义硬保证）。
+		if stack.SoulBound || stack.IsLegacy {
+			continue
+		}
 
 		definition, ok := item.Lookup(stack.ItemID)
 		if !ok {
@@ -106,6 +110,10 @@ func (service *LootInheritor) Resolve(ctx context.Context, request ResolveReques
 	}
 
 	for index, stack := range victim.Inventory.Backpack {
+		// 灵魂绑定/传家遗物不被击杀者抢走（同上：已先走传承）。
+		if stack.SoulBound || stack.IsLegacy {
+			continue
+		}
 		definition, ok := item.Lookup(stack.ItemID)
 		if !ok {
 			continue

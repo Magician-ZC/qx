@@ -107,6 +107,54 @@ const (
 	// 经 EmitProcessEvent 留痕（含被拒动作/单位/reason），不改保护状态字段、不走 status.Mutator。
 	// 补齐 OOC 原仅有进程级内存计数（AttributionStats）、无持久审计行、重启即丢的缺口。
 	ReasonOOCRejected ReasonCode = "OOC_REJECTED"
+
+	// PvE 威胁系统专属原因码（设计 docs/PvE威胁系统.md §9）。补齐此前 PvE 留痕复用通用码
+	// （分赃=继承敌方资产 ECONOMY_LOOT、威胁失败=目睹惨烈 EMOTION_TRAUMA）导致审计可读性弱的缺口。
+	// 分三类：①改保护字段经 status.Mutator（HP/lives→CategoryCombat；wallet→CategoryEconomy；
+	// morale→CategoryEmotion）；②纯流程/叙事广播经 EmitProcessEvent（CategoryLifecycle，StatDomains 空）。
+
+	// 遭遇 / 参与（流程留痕，威胁浮现与参战意图，非状态变更）。
+	ReasonThreatEmerged     ReasonCode = "THREAT_EMERGED"         // 一头威胁在某地浮现，进入遭遇窗口
+	ReasonThreatJoinAuto    ReasonCode = "THREAT_JOIN_AUTONOMOUS" // 角色自主决定迎战
+	ReasonThreatJoinAdvise  ReasonCode = "THREAT_JOIN_ADVISED"    // 角色采纳玩家嘱咐而参战
+	ReasonThreatJoinDecline ReasonCode = "THREAT_JOIN_DECLINED"   // 反射护栏/性格判定退避不战（贡献保留语义不适用——未参战）
+
+	// 战况推进（HIT 沿用通用 COMBAT_HIT/COMBAT_DOWN 落 HP；以下为 PvE 专属的阶段/结局/同伴留痕）。
+	ReasonThreatPhase    ReasonCode = "THREAT_PHASE"     // 威胁进入新阶段（如世界 Boss 换形态，流程留痕）
+	ReasonThreatDefeated ReasonCode = "THREAT_DEFEATED"  // 威胁被讨平（广播流程事件，非个体状态变更）
+	ReasonThreatWipe     ReasonCode = "THREAT_WIPE"      // 全队覆没/被反扑击溃（流程广播）
+	ReasonThreatAllyDown ReasonCode = "THREAT_ALLY_DOWN" // 目睹并肩之人倒下，士气受挫（改 morale，经 Mutator）
+
+	// 副本（异步分段推进的踏入/通关/退出，流程留痕）。
+	ReasonDungeonEnter      ReasonCode = "DUNGEON_ENTER"       // 踏入一处副本/秘境
+	ReasonDungeonFloorClear ReasonCode = "DUNGEON_FLOOR_CLEAR" // 攻克一层
+	ReasonDungeonExit       ReasonCode = "DUNGEON_EXIT"        // 通关或撤离副本
+
+	// 分赃 / 补偿（改 wallet，经 status.Mutator；区别于通用 ECONOMY_LOOT 的「继承敌方资产」口径）。
+	ReasonEconomyLootArbitrated ReasonCode = "ECONOMY_LOOT_ARBITRATED" // 排他战利品经 arbitration 仲裁归属后入袋（胜率∝贡献、付费不进）
+	ReasonConsolationMaterial   ReasonCode = "CONSOLATION_MATERIAL"    // 未夺得排他件者按贡献获补偿物资
+
+	// 失败后果（叙事 + 可恢复代价；区分 D1/D2/D3 分级与家乡蹂躏，避免一律落「目睹惨烈」）。
+	ReasonGearDamaged    ReasonCode = "GEAR_DAMAGED"   // 装备在苦战中受损（耐久代价，非保护字段→流程留痕）
+	ReasonRegionRavaged  ReasonCode = "REGION_RAVAGED" // 威胁未被挡下，家乡/region 遭蹂躏（流程广播，旁观者传播取材）
+	ReasonDefeatSetback  ReasonCode = "PVE_DEFEAT_D1"  // 失败后果 D1：轻度挫败（士气受挫，经 Mutator 改 morale）
+	ReasonDefeatScarred  ReasonCode = "PVE_DEFEAT_D2"  // 失败后果 D2：重度代价（士气+忠诚双挫，经 Mutator）
+	ReasonDefeatCrippled ReasonCode = "PVE_DEFEAT_D3"  // 失败后果 D3：硬锁不可逆（叠加残伤/陨落语义，流程广播标注分级）
+
+	// 肢体残伤 / 阵亡（改保护字段，经 status.Mutator）。
+	ReasonCombatMaimed ReasonCode = "COMBAT_MAIMED"  // 致命后果经 consent 降级为残废：永久折损（改 hp，记一条不可逆伤）
+	ReasonFellInDefeat ReasonCode = "FELL_IN_DEFEAT" // 在 PvE 败局中陨落（改 lives_remaining，区别于 PvP 的 COMBAT_DOWN/CHARACTER_DIED 语境）
+
+	// 传承（死亡传承线：传家物交付继承人，流程留痕，非状态变更）。
+	ReasonLegacyBequeathed ReasonCode = "LEGACY_BEQUEATHED" // 传家物/遗志交付继承人，"失去"转为"延续"
+
+	// 跨玩家组队 / 黑吃黑（World Bus 阶段，流程留痕；改保护字段的另由对应通用码承担）。
+	ReasonCrossPartyJoin   ReasonCode = "CROSS_PARTY_JOIN"   // 与他玩家的角色结队共担
+	ReasonCrossPartyLeave  ReasonCode = "CROSS_PARTY_LEAVE"  // 离队
+	ReasonCrossPartyWipe   ReasonCode = "CROSS_PARTY_WIPE"   // 跨玩家联队覆没
+	ReasonCrossContestWin  ReasonCode = "CROSS_CONTEST_WIN"  // 跨玩家排他争夺中胜出（arbitration 留痕）
+	ReasonCrossContestLose ReasonCode = "CROSS_CONTEST_LOSE" // 跨玩家排他争夺中落败
+	ReasonCrossBetrayal    ReasonCode = "CROSS_BETRAYAL"     // 跨玩家黑吃黑/背刺（流程广播，可被血仇传播取材）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -166,6 +214,43 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonAmbitionShift, Category: CategoryLifecycle, DisplayName: "野心流转", DefaultReasonText: "经历沉淀，她内心所求悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonRedlineTrip, Category: CategoryLifecycle, DisplayName: "触碰红线", DefaultReasonText: "一桩行为越过了她（或你）立下的红线", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonOOCRejected, Category: CategoryLifecycle, DisplayName: "动机被拦", DefaultReasonText: "因无法解释的动机被拦下，回退到稳妥选择", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+
+		// —— PvE 威胁系统专属（docs/PvE威胁系统.md §9）——
+		// 遭遇 / 参与（流程留痕）。
+		{Code: ReasonThreatEmerged, Category: CategoryLifecycle, DisplayName: "威胁浮现", DefaultReasonText: "一头凶险的东西在近旁现了形", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonThreatJoinAuto, Category: CategoryLifecycle, DisplayName: "毅然迎战", DefaultReasonText: "她自己拿定主意，迎了上去", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonThreatJoinAdvise, Category: CategoryLifecycle, DisplayName: "受嘱参战", DefaultReasonText: "听了你的话，她迎了上去", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonThreatJoinDecline, Category: CategoryLifecycle, DisplayName: "退避不战", DefaultReasonText: "权衡之下，她没有去硬碰那头凶险", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		// 战况推进（HIT 走通用 COMBAT_HIT/COMBAT_DOWN；以下为阶段/结局/同伴）。
+		{Code: ReasonThreatPhase, Category: CategoryLifecycle, DisplayName: "战局生变", DefaultReasonText: "那东西换了路数，战局陡然吃紧", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonThreatDefeated, Category: CategoryLifecycle, DisplayName: "讨平凶险", DefaultReasonText: "那头凶险终于被讨平了", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
+		{Code: ReasonThreatWipe, Category: CategoryLifecycle, DisplayName: "全军覆没", DefaultReasonText: "她们这一伙没能挡住，被反扑击溃", StatDomains: []string{}, ImportanceMin: 8, ImportanceMax: 10},
+		{Code: ReasonThreatAllyDown, Category: CategoryEmotion, DisplayName: "同伴倒下", DefaultReasonText: "并肩的人在她眼前倒下，心头一沉", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 9},
+		// 副本。
+		{Code: ReasonDungeonEnter, Category: CategoryLifecycle, DisplayName: "踏入秘境", DefaultReasonText: "她踏进了一处幽深之地", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonDungeonFloorClear, Category: CategoryLifecycle, DisplayName: "攻克一层", DefaultReasonText: "她又向深处推进了一层", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonDungeonExit, Category: CategoryLifecycle, DisplayName: "走出秘境", DefaultReasonText: "她从那处幽深之地全身退了出来", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		// 分赃 / 补偿（改 wallet，经 Mutator）。
+		{Code: ReasonEconomyLootArbitrated, Category: CategoryEconomy, DisplayName: "仲裁分赃", DefaultReasonText: "凭着出力，那件难得之物分到了她手里", StatDomains: []string{"wallet"}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonConsolationMaterial, Category: CategoryEconomy, DisplayName: "补偿所得", DefaultReasonText: "没夺得那件好物，但她出的力也得了份补偿", StatDomains: []string{"wallet"}, ImportanceMin: 3, ImportanceMax: 6},
+		// 失败后果。
+		{Code: ReasonGearDamaged, Category: CategoryEconomy, DisplayName: "兵器受损", DefaultReasonText: "一场苦战下来，随身的家伙折损了", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonRegionRavaged, Category: CategoryLifecycle, DisplayName: "家乡蒙难", DefaultReasonText: "没能挡住那东西，她在乎的那片土地遭了殃", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonDefeatSetback, Category: CategoryEmotion, DisplayName: "败局挫志", DefaultReasonText: "这一仗没赢，她心气受了挫", StatDomains: []string{"morale"}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonDefeatScarred, Category: CategoryEmotion, DisplayName: "败局重创", DefaultReasonText: "这一败代价不轻，士气与心气都伤了", StatDomains: []string{"morale", "loyalty"}, ImportanceMin: 6, ImportanceMax: 9},
+		{Code: ReasonDefeatCrippled, Category: CategoryLifecycle, DisplayName: "败局重难", DefaultReasonText: "这一败留下了难以挽回的代价", StatDomains: []string{}, ImportanceMin: 8, ImportanceMax: 10},
+		// 肢体残伤 / 阵亡（改保护字段，经 Mutator）。
+		{Code: ReasonCombatMaimed, Category: CategoryCombat, DisplayName: "肢体残伤", DefaultReasonText: "她在那一战里落下了难以复原的伤", StatDomains: []string{"hp"}, ImportanceMin: 8, ImportanceMax: 10},
+		{Code: ReasonFellInDefeat, Category: CategoryCombat, DisplayName: "败局陨落", DefaultReasonText: "她在那场败局里没能走出来", StatDomains: []string{"lives_remaining"}, ImportanceMin: 9, ImportanceMax: 10},
+		// 传承（流程留痕）。
+		{Code: ReasonLegacyBequeathed, Category: CategoryLifecycle, DisplayName: "遗志交付", DefaultReasonText: "她的传家之物与未竟之志，交到了后来者手中", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		// 跨玩家组队 / 黑吃黑（流程留痕）。
+		{Code: ReasonCrossPartyJoin, Category: CategoryLifecycle, DisplayName: "异客结队", DefaultReasonText: "她与几个素不相识的人结成了共担之伙", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonCrossPartyLeave, Category: CategoryLifecycle, DisplayName: "散伙别过", DefaultReasonText: "这一伙人就此散了，各奔前程", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonCrossPartyWipe, Category: CategoryLifecycle, DisplayName: "联队覆没", DefaultReasonText: "结成的这一伙人，终究没能一起挺过去", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonCrossContestWin, Category: CategoryLifecycle, DisplayName: "夺得头筹", DefaultReasonText: "几方角力，那份归属最终落到了她这一边", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonCrossContestLose, Category: CategoryLifecycle, DisplayName: "争而未得", DefaultReasonText: "几方角力，那份归属终究没落到她手里", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonCrossBetrayal, Category: CategoryLifecycle, DisplayName: "黑吃黑", DefaultReasonText: "本该共担的人，临头却反咬了一口", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
 	}
 }
 

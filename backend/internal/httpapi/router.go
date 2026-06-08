@@ -1716,6 +1716,24 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"encounter": result})
 	})
 
+	// 触发一次多层副本（逐层 combat_roll→累计分赃/撤退保利/败北分级惩罚→各自命运收件箱）。真实动作，QUNXIANG_DUNGEON 默认关。
+	router.POST("/api/sessions/:id/dungeon", func(c *gin.Context) {
+		var body struct {
+			UnitIDs []string `json:"unit_ids"`
+			Floors  int      `json:"floors"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().RunDungeonForSession(c.Request.Context(), c.Param("id"), body.UnitIDs, body.Floors)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"dungeon": result})
+	})
+
 	// ---- 多世界 / 跨玩家世界总线 ----
 	// 注册一个持久世界。
 	router.POST("/api/worlds", func(c *gin.Context) {

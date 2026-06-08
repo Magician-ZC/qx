@@ -3067,6 +3067,10 @@ func (service *Service) applyAttack(
 			return err
 		}
 		if target.Status.LifeState == unit.LifeStateDead {
+			// 灵魂绑定/传家遗物先于普通战利品继承：转移给在乎死者的人（best-effort，绝不影响结算）。
+			// 关键顺序：必须在 resolveKillLoot 之前——后者经 LootInheritor 会清空死者背包把普通物分给凶手/地面；
+			// 配合 loot_inheritor.go 跳过 SoulBound/IsLegacy 件，使遗物→亲密继承人、普通物→凶手，两路不重叠不丢件。
+			_, _ = service.inheritLegacyItems(ctx, state, *target)
 			if err := service.resolveKillLoot(ctx, state, attacker, target); err != nil {
 				return err
 			}

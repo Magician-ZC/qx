@@ -142,6 +142,16 @@ type ItemStack struct {
 	// Pinned 标记「传家宝」——绝不被离线自治逻辑自动卖/赠（喂归因 GateSurprise 的 ActionSellPinned 硬门）。
 	// omitempty：旧存档无此字段反序列化为 false（默认可正常交易），向后兼容。
 	Pinned bool `json:"pinned,omitempty"`
+	// SoulBound 标记「灵魂绑定」——比 Pinned 更硬：不仅离线自治不卖/赠，连玩家手动交易/赠予也禁止。
+	// 用于 epic/boss_relic 等不可交易掉落落库（设计 docs/PvE威胁系统.md 战利品传承）。
+	// omitempty：旧存档无此字段反序列化为 false（默认可正常交易），向后兼容。
+	SoulBound bool `json:"soul_bound,omitempty"`
+	// IsLegacy 标记「传家遗物」——角色死亡时可被传承逻辑转移给在乎死者的继承人（session/legacy_inheritance.go）。
+	// omitempty：旧存档无此字段反序列化为 false（默认非遗物、不参与传承），向后兼容。
+	IsLegacy bool `json:"is_legacy,omitempty"`
+	// Durability 耐久值——0 表示不衰减/无限耐久（多数物品默认）；>0 表示有限耐久，随使用递减、归 0 即损毁。
+	// omitempty：旧存档无此字段反序列化为 0（默认无限耐久），向后兼容。
+	Durability int `json:"durability,omitempty"`
 }
 
 // Inventory 结构体用于承载该模块的核心数据。
