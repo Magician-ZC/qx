@@ -334,3 +334,17 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_decision_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_claimed ON agent_decision_jobs(status, claimed_at);
+
+-- 假门预实验留资表（W0 验证，append-only）：landing 的留资/问卷/事件 POST 进来，验证需求后再大投入。
+-- 隐私：仅存自愿提交的留资+归因，无 PII 关联游戏账户；保留期清理可按 created_at。
+CREATE TABLE IF NOT EXISTS fake_door_leads (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'lead',
+  vid TEXT,
+  email TEXT,
+  source TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_fake_door_leads_kind ON fake_door_leads(kind, created_at);

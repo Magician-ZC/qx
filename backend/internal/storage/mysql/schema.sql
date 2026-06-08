@@ -293,3 +293,14 @@ CREATE TABLE IF NOT EXISTS agent_decision_jobs (
   INDEX idx_agent_jobs_status (status, created_at),
   INDEX idx_agent_jobs_claimed (status, claimed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fake_door_leads (
+  id VARCHAR(191) PRIMARY KEY,
+  kind VARCHAR(32) NOT NULL DEFAULT 'lead',
+  vid VARCHAR(191) NULL,
+  email VARCHAR(255) NULL,
+  source VARCHAR(191) NULL,
+  payload_json LONGTEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_fake_door_leads_kind (kind, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -247,6 +247,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, data)
 	})
 
+	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
+	registerLeadEndpoints(router, deps.Store)
+
 	router.GET("/api/world/terrains", func(c *gin.Context) {
 		if err := world.SeedTerrainCatalog(c.Request.Context(), deps.Store); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
