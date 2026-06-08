@@ -197,10 +197,10 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 	if cacheable {
 		ckey = cacheKey(request)
 		if cached, hit := s.cache.get(ckey); hit {
-			// 命中是复用、**无真实 LLM 花费**：清零用量，使下游 buildLLMInteraction/accumulateLLMMetrics 对回放记 $0 成本/0 token，
-			// 否则幻影成本会提前触发会话预算护栏（降级为 hold）并虚增成本仪表盘——与 §11.2 降本本意相悖。cached 是值拷贝，不动缓存项。
-			cached.Usage = Usage{}
-			cached.Provider = "prompt_cache"
+			// 命中是复用、**无真实 LLM 花费**：用显式标志 CacheHit=true 标记，使下游 buildLLMInteraction 对回放记 $0 成本，
+			// 否则幻影成本会提前触发会话预算护栏（降级为 hold）并虚增成本仪表盘——与 §11.2 降本本意相悖。
+			// 保留原始 Usage/Provider 供遥测（仅成本计 0）。cached 是值拷贝，不动缓存项。
+			cached.CacheHit = true
 			return cached, nil
 		}
 	}

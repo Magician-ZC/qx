@@ -152,6 +152,9 @@ type CompletionResult struct {
 	UsedFallback bool            `json:"used_fallback"`
 	Usage        Usage           `json:"usage"`
 	Debug        CompletionDebug `json:"debug"`
+	// CacheHit 标记该结果取自 prompt 缓存复用、无真实 LLM 花费；保留原始 Usage/Provider 供遥测，
+	// 下游 buildLLMInteraction 据此把 EstimatedCost 计 0，避免幻影成本误触会话预算护栏与成本仪表盘。
+	CacheHit bool `json:"cache_hit,omitempty"`
 }
 
 // BatchRequest 结构体用于承载该模块的核心数据。

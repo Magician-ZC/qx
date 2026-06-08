@@ -78,7 +78,10 @@ func (service *Service) ListPendingConsents(ctx context.Context, targetID string
 }
 
 // ResolveConsentRequest 处理一条 pending 同意请求：accept→应用关系效果并置 accepted；reject→置 rejected（不应用）。
-// 守门：原子 UPDATE … WHERE status='pending'（RowsAffected==0 即已被处理，防重复/竞态——对齐 CompleteJob 模式）。
+// **事务原子**：在单个 tx 内 ① 原子 flip `status=? WHERE id=? AND status='pending'`（RowsAffected==0 即已被处理，
+// 回滚 + 返回「已处理」错误——防重复/竞态，对齐 CompleteJob 模式）；② accept 时**在同一事务内**经
+// applyRelationShiftTx 应用七类互动四轴关系增量，失败则**回滚**（status 回到 pending，可重试）；③ Commit。
+// 这修了原先「先 flip 再应用、应用失败已 accepted 无法重试」的非原子缺口：现在关系效果与 accepted 翻转同生共死。
 func (service *Service) ResolveConsentRequest(ctx context.Context, reqID string, accept bool) (ConsentRequest, error) {
 	req, err := service.GetConsentRequest(ctx, reqID)
 	if err != nil {
@@ -87,31 +90,49 @@ func (service *Service) ResolveConsentRequest(ctx context.Context, reqID string,
 	if req.Status != "pending" {
 		return req, fmt.Errorf("consent request %s not pending (status=%s)", reqID, req.Status)
 	}
+	if service.db == nil {
+		return req, fmt.Errorf("resolve consent: missing db")
+	}
 	newStatus := "rejected"
 	if accept {
 		newStatus = "accepted"
 	}
-	res, err := service.db.ExecContext(ctx,
+	resolvedAt := nowConsentTS()
+
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return req, fmt.Errorf("begin resolve consent tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // Commit 后为 no-op；任一早返回路径都回滚（关系/flip 整体不落库，可重试）。
+
+	// ① 原子守门 flip：仅唯一胜出的 resolve 把 pending 翻成 accepted/rejected。
+	res, err := tx.ExecContext(ctx,
 		`UPDATE consent_requests SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`,
-		newStatus, nowConsentTS(), reqID)
+		newStatus, resolvedAt, reqID)
 	if err != nil {
 		return req, fmt.Errorf("resolve consent: %w", err)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
+		// 已被并发 resolve/expire 抢先处理：回滚（无副作用），返回「已处理」错误。
 		return req, fmt.Errorf("consent request %s already resolved", reqID)
 	}
+
+	// ② accept 时在同一事务内应用关系效果；失败则随 defer 回滚（status 回到 pending），调用方可安全重试。
 	if accept {
-		// exactly-once 由上面的原子 flip(WHERE status='pending') 保证：仅唯一胜出的 accept 走到这里，绝不双重应用关系增量。
-		// applySevenEffect 已 best-effort（跨分片/远端角色干净跳过，仅真实 relations 写错才返错）；故仅在罕见 DB 写错时
-		// 会留下「accepted 但关系未应用」的可恢复边界——状态已落 accepted、世界总线事件已是事实，调用方据返回错误可重试/告警。
 		if tmpl, ok := sevenTemplates[SevenInteraction(req.Interaction)]; ok {
-			if err := service.applySevenEffect(ctx, req.ActorID, req.TargetID, tmpl); err != nil {
-				return req, err
+			// best-effort 跨分片：actor/target 任一不在本库 → 跳过关系写、不报错（applyRelationShiftTx 内 SELECT 1 判存在）。
+			if _, err := service.applyRelationShiftTx(ctx, tx, req.ActorID, req.TargetID, tmpl.Delta, "七种交互·"+tmpl.Reason); err != nil {
+				return req, fmt.Errorf("apply consent relation effect: %w", err)
 			}
 		}
 	}
+
+	// ③ 提交：accepted 翻转与关系效果同时落库。
+	if err := tx.Commit(); err != nil {
+		return req, fmt.Errorf("commit resolve consent: %w", err)
+	}
 	req.Status = newStatus
-	req.ResolvedAt = nowConsentTS()
+	req.ResolvedAt = resolvedAt
 	return req, nil
 }
 

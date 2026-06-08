@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -152,6 +153,128 @@ func (service *Service) applyRelationShift(
 		return false, fmt.Errorf("upsert relation %s -> %s: %w", source.ID, target.ID, err)
 	}
 
+	return true, nil
+}
+
+// applyRelationShiftTx 是 applyRelationShift 的**事务版**：在调用方传入的 *sql.Tx 内做同一份四轴关系 UPSERT，
+// 让「关系效果」与外层状态翻转（如 consent accept 的 status=accepted）原子提交——任一步失败整体回滚、可重试。
+// 与 applyRelationShift 共享同一套 SQL/clamp(±10)/dbdialect 双分支语义；仅用 source.ID/target.ID + 四轴 delta + note，
+// 不读单位其它字段。**best-effort 跨分片安全**：relations 表对 source/target 都有 units FK，故先在同一事务内
+// `SELECT 1 FROM units WHERE id=?` 判存在，任一不在本库（跨分片/远端角色）→ 跳过关系写、返回 (false,nil)（不报错），
+// 对齐 applySevenEffect 的 best-effort 语义；仅真实 DB 写失败才返错。dialect 仍以 service.db 判定（registry 按 *sql.DB 注册），
+// 实际写落在 tx 上。
+func (service *Service) applyRelationShiftTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	sourceID string,
+	targetID string,
+	delta relationDelta,
+	reason string,
+) (bool, error) {
+	if service == nil || service.db == nil || tx == nil || sourceID == "" || targetID == "" || sourceID == targetID {
+		return false, nil
+	}
+	if delta.isZero() {
+		return false, nil
+	}
+
+	// 跨分片/远端角色 best-effort 跳过：relations 对 source/target 都有 units FK，任一不存在则不写关系（不报错）。
+	if exists, err := unitExistsTx(ctx, tx, sourceID); err != nil {
+		return false, err
+	} else if !exists {
+		return false, nil
+	}
+	if exists, err := unitExistsTx(ctx, tx, targetID); err != nil {
+		return false, err
+	} else if !exists {
+		return false, nil
+	}
+
+	delta.Trust = clampRelationScore(delta.Trust)
+	delta.Fear = clampRelationScore(delta.Fear)
+	delta.Affection = clampRelationScore(delta.Affection)
+	delta.Rivalry = clampRelationScore(delta.Rivalry)
+
+	note := relationNote{
+		Reason:         limitTextRunes(strings.TrimSpace(reason), 80),
+		TrustDelta:     delta.Trust,
+		FearDelta:      delta.Fear,
+		AffectionDelta: delta.Affection,
+		RivalryDelta:   delta.Rivalry,
+	}
+	noteJSON, err := json.Marshal(note)
+	if err != nil {
+		return false, fmt.Errorf("marshal relation note: %w", err)
+	}
+
+	query := `
+		INSERT INTO relations (
+			source_unit_id,
+			target_unit_id,
+			trust,
+			fear,
+			affection,
+			rivalry,
+			notes_json,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_unit_id, target_unit_id) DO UPDATE SET
+			trust = MIN(10.0, MAX(-10.0, relations.trust + excluded.trust)),
+			fear = MIN(10.0, MAX(-10.0, relations.fear + excluded.fear)),
+			affection = MIN(10.0, MAX(-10.0, relations.affection + excluded.affection)),
+			rivalry = MIN(10.0, MAX(-10.0, relations.rivalry + excluded.rivalry)),
+			notes_json = excluded.notes_json,
+			updated_at = excluded.updated_at
+		`
+	if dbdialect.IsMySQL(service.db) {
+		query = `
+		INSERT INTO relations (
+			source_unit_id,
+			target_unit_id,
+			trust,
+			fear,
+			affection,
+			rivalry,
+			notes_json,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			trust = LEAST(10.0, GREATEST(-10.0, relations.trust + VALUES(trust))),
+			fear = LEAST(10.0, GREATEST(-10.0, relations.fear + VALUES(fear))),
+			affection = LEAST(10.0, GREATEST(-10.0, relations.affection + VALUES(affection))),
+			rivalry = LEAST(10.0, GREATEST(-10.0, relations.rivalry + VALUES(rivalry))),
+			notes_json = VALUES(notes_json),
+			updated_at = VALUES(updated_at)
+		`
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		query,
+		sourceID,
+		targetID,
+		delta.Trust,
+		delta.Fear,
+		delta.Affection,
+		delta.Rivalry,
+		string(noteJSON),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return false, fmt.Errorf("upsert relation %s -> %s: %w", sourceID, targetID, err)
+	}
+
+	return true, nil
+}
+
+// unitExistsTx 在给定事务内判断某单位是否存在于本库（用于关系写前的 FK best-effort 跳过判断）。
+func unitExistsTx(ctx context.Context, tx *sql.Tx, unitID string) (bool, error) {
+	var one int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM units WHERE id = ?`, unitID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check unit %s exists: %w", unitID, err)
+	}
 	return true, nil
 }
 

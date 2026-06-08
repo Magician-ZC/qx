@@ -868,6 +868,11 @@ func buildLLMInteraction(
 		result.Usage.TotalTokens,
 	)
 	estimatedCost := estimateLLMCostUSD(result.Provider, result.Model, promptTokens, outputTokens)
+	if result.CacheHit {
+		// prompt 缓存命中是复用、无真实 LLM 花费：成本归零，避免重复计入会话预算护栏（llmBudgetGuardrailActive）
+		// 与成本仪表盘。token 保留供遥测，仅成本计 0。
+		estimatedCost = 0
+	}
 
 	return LLMInteraction{
 		ID:            uuid.NewString(),

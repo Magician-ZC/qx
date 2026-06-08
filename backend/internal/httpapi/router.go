@@ -57,7 +57,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Role-Token")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Role-Token, X-Ops-Token")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -233,7 +233,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 运营成本/单位经济仪表盘（只读聚合，产品验证）：跨会话真实 LLM 成本 + MAU 代理 + 单位经济。?days=N 限窗口（默认 30，0=全量）。
-	router.GET("/api/ops/cost-dashboard", func(c *gin.Context) {
+	router.GET("/api/ops/cost-dashboard", opsTokenGuard(), func(c *gin.Context) {
 		days := 30
 		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -249,10 +249,20 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
+	// 漏斗端点是 ops 敏感只读聚合，套 opsTokenGuard；POST /api/leads 是 landing 公开提交，保持公开（不守卫）。
+	// 漏斗路由在 leads.go 内注册，这里用路径作用域的前置中间件守卫，避免影响公开的 /api/leads。
+	leadsFunnelGuard := opsTokenGuard()
+	router.Use(func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet && c.Request.URL.Path == "/api/ops/leads-funnel" {
+			leadsFunnelGuard(c)
+			return
+		}
+		c.Next()
+	})
 	registerLeadEndpoints(router, deps.Store)
 
 	// 社会客体撮合（跨玩家，§2.2）：POST 用 MatchScore 四因子 + arbitration 确定性择人绑进社会客体；GET 列出某世界的社会客体。
-	router.POST("/api/worlds/:worldId/social-objects", func(c *gin.Context) {
+	router.POST("/api/worlds/:worldId/social-objects", opsTokenGuard(), func(c *gin.Context) {
 		worldID := strings.TrimSpace(c.Param("worldId"))
 		var body struct {
 			Kind       string                   `json:"kind"`
@@ -281,7 +291,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 七种交互（跨玩家，§2.3）：POST 记录并按 consent 档路由（单方立即应用/高后果建待决同意请求）。
-	router.POST("/api/worlds/:worldId/seven-interactions", func(c *gin.Context) {
+	router.POST("/api/worlds/:worldId/seven-interactions", opsTokenGuard(), func(c *gin.Context) {
 		var body struct {
 			ActorID     string `json:"actor_id"`
 			TargetID    string `json:"target_id"`
@@ -301,7 +311,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, res)
 	})
 	// consent_gate：列出某角色的待决同意请求 / 处理一条（接受=应用关系效果，拒绝=不应用）。
-	router.GET("/api/consent/pending/:unitId", func(c *gin.Context) {
+	router.GET("/api/consent/pending/:unitId", opsTokenGuard(), func(c *gin.Context) {
 		reqs, err := newSessionService().ListPendingConsents(c.Request.Context(), strings.TrimSpace(c.Param("unitId")))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -309,7 +319,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"pending": reqs})
 	})
-	router.POST("/api/consent/:reqId/resolve", func(c *gin.Context) {
+	router.POST("/api/consent/:reqId/resolve", opsTokenGuard(), func(c *gin.Context) {
 		var body struct {
 			Accept bool `json:"accept"`
 		}

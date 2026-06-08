@@ -7,11 +7,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/storage/dbdialect"
 )
+
+// nowTimestamp 返回与 SQLite CURRENT_TIMESTAMP 同格式（UTC、定宽 "YYYY-MM-DD HH:MM:SS"）的时间串。
+// 定宽 ⇒ 字典序 == 时间序，使 ORDER BY created_at/joined_at 在 SQLite/MySQL 双驱动下排序一致；
+// MySQL 列默认 ” 时若不显式写入会导致全为空串、排序失真，故插入时一律显式写本值。
+func nowTimestamp() string {
+	return time.Now().UTC().Format("2006-01-02 15:04:05")
+}
 
 // SocialObject 是一个可撮合多名角色进入的共享客体。
 type SocialObject struct {
@@ -31,7 +39,8 @@ type Member struct {
 	JoinedAt string  `json:"joined_at"`
 }
 
-// Create 落库一个社会客体（id 空则生成）。occurred/created 留空交给 DB 默认 CURRENT_TIMESTAMP。
+// Create 落库一个社会客体（id 空则生成）。显式写 created_at（定宽 UTC，双驱动一致）——
+// MySQL 列默认 ”，不显式写会致排序失真；ON CONFLICT/ON DUPLICATE 的 UPDATE 分支不更新 created_at，保留首次创建时间。
 func Create(ctx context.Context, db *sql.DB, obj SocialObject) (string, error) {
 	if obj.WorldID == "" || obj.Kind == "" {
 		return "", fmt.Errorf("social object: world_id/kind required")
@@ -42,36 +51,43 @@ func Create(ctx context.Context, db *sql.DB, obj SocialObject) (string, error) {
 	if obj.Status == "" {
 		obj.Status = "active"
 	}
+	if obj.CreatedAt == "" {
+		obj.CreatedAt = nowTimestamp()
+	}
 	if dbdialect.IsMySQL(db) {
 		_, err := db.ExecContext(ctx,
-			`INSERT INTO social_objects (id, world_id, kind, label, status) VALUES (?,?,?,?,?)
+			`INSERT INTO social_objects (id, world_id, kind, label, status, created_at) VALUES (?,?,?,?,?,?)
 			 ON DUPLICATE KEY UPDATE label=VALUES(label), status=VALUES(status)`,
-			obj.ID, obj.WorldID, obj.Kind, obj.Label, obj.Status)
+			obj.ID, obj.WorldID, obj.Kind, obj.Label, obj.Status, obj.CreatedAt)
 		return obj.ID, err
 	}
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO social_objects (id, world_id, kind, label, status) VALUES (?,?,?,?,?)
+		`INSERT INTO social_objects (id, world_id, kind, label, status, created_at) VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET label=excluded.label, status=excluded.status`,
-		obj.ID, obj.WorldID, obj.Kind, obj.Label, obj.Status)
+		obj.ID, obj.WorldID, obj.Kind, obj.Label, obj.Status, obj.CreatedAt)
 	return obj.ID, err
 }
 
-// AddMember 幂等绑定一名成员（重复绑定更新分数）。
+// AddMember 幂等绑定一名成员（重复绑定更新分数）。显式写 joined_at（定宽 UTC，双驱动一致）——
+// MySQL 列默认 ”，不显式写会致排序失真；重复绑定的 UPDATE 分支不更新 joined_at，保留首次加入时间。
 func AddMember(ctx context.Context, db *sql.DB, m Member) error {
 	if m.ObjectID == "" || m.UnitID == "" {
 		return fmt.Errorf("social object member: object_id/unit_id required")
 	}
+	if m.JoinedAt == "" {
+		m.JoinedAt = nowTimestamp()
+	}
 	if dbdialect.IsMySQL(db) {
 		_, err := db.ExecContext(ctx,
-			`INSERT INTO social_object_members (object_id, unit_id, score) VALUES (?,?,?)
+			`INSERT INTO social_object_members (object_id, unit_id, score, joined_at) VALUES (?,?,?,?)
 			 ON DUPLICATE KEY UPDATE score=VALUES(score)`,
-			m.ObjectID, m.UnitID, m.Score)
+			m.ObjectID, m.UnitID, m.Score, m.JoinedAt)
 		return err
 	}
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO social_object_members (object_id, unit_id, score) VALUES (?,?,?)
+		`INSERT INTO social_object_members (object_id, unit_id, score, joined_at) VALUES (?,?,?,?)
 		 ON CONFLICT(object_id, unit_id) DO UPDATE SET score=excluded.score`,
-		m.ObjectID, m.UnitID, m.Score)
+		m.ObjectID, m.UnitID, m.Score, m.JoinedAt)
 	return err
 }
 
