@@ -88,6 +88,18 @@ func threatSpawnPerMille(anchorDensity float64) int {
 	return pm
 }
 
+// bumpRegionThreat 把一次威胁命中累计到 region.threat_level（威胁扎堆，§11.3）。best-effort + flag-gated：
+// 分片关 / registry==nil / regionID 空 / region 未登记（ErrNotFound）时静默跳过——威胁累计是辅助遥测，绝不拖垮遭遇。
+func (r *Runner) bumpRegionThreat(ctx context.Context, regionID string) {
+	if !shardingEnabled() || r.registry == nil || regionID == "" {
+		return
+	}
+	if _, err := r.registry.BumpThreatLevel(ctx, regionID, 1); err != nil {
+		// region 未登记是常态（按 tier 列举的区才一定登记，DistinctWakeRegions 兜底来的可能没登记）→ Debug 即可。
+		r.log.Debug("region-runner bump region threat", "region", regionID, "error", err)
+	}
+}
+
 // situationFromRecord 把单位状态填成 decision.Situation：StrategicFork=true（撞威胁=战略岔路，触发关键节点闸），
 // HP/Hunger 喂 Router 的 L1 护栏（HP<25% 危急即撤退）。HasRation 留 false——饥饿由 ambient 层处理，威胁时只关心保命。
 func situationFromRecord(record unit.Record, tick int64) decision.Situation {
@@ -128,6 +140,9 @@ func (r *Runner) maybeEncounterThreat(ctx context.Context, job *agentqueue.Decis
 		}
 	}
 	atomic.AddInt64(&r.st.threatsRolled, 1)
+	// 威胁扎堆（§11.3）：命中威胁 → 把该 region 的 threat_level +1 累计，让威胁在高活跃区天然扎堆（后续刷新可读 region.threat_level
+	// 加权）。best-effort + flag-gated：分片关 / registry==nil / region 未登记时静默跳过，绝不影响遭遇结算。
+	r.bumpRegionThreat(ctx, job.RegionID)
 
 	dec := r.threatRouter.Route(situationFromRecord(record, tick))
 	if dec.Intent.Action == decision.ActionFlee {

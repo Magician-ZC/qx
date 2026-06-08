@@ -172,6 +172,8 @@ const accountAuthStorageKey = "qunxiang.account.auth.v1";
 const hudVisibilityStorageKey = "qunxiang.map.hud.visible.v1";
 const deploymentIntroSkipStorageKey = "qunxiang.deployment.intro.skip.v1";
 const developerModeStorageKey = "qunxiang.developer.mode.v1";
+// returnVisitStorageKey 标记「这台浏览器之前来过」——存在即视为回访（return_visit 漏斗）。
+const returnVisitStorageKey = "qunxiang.last.visit.v1";
 const gameGuideSections: GameGuideSection[] = [
   {
     title: "这是一个怎样的世界",
@@ -514,6 +516,8 @@ export function App() {
   const [fogVisionMode, setFogVisionMode] = useState("merged");
   const autoAdvancedPhaseKeyRef = useRef("");
   const phaseTransitionPollTimerRef = useRef<number | undefined>();
+  // returnVisitTrackedRef 守卫 return_visit 漏斗每次启动至多上报一条（防 StrictMode 双挂载/重渲重复）。
+  const returnVisitTrackedRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [openingDraftUnits, setOpeningDraftUnits] = useState<BattleUnit[]>([]);
   const [openingDraftSelectedIDs, setOpeningDraftSelectedIDs] = useState<string[]>([]);
@@ -598,6 +602,29 @@ export function App() {
       delete target.qxdev;
       delete target.qxnodev;
     };
+  }, []);
+
+  // return_visit：启动时若本浏览器存在上次访问标记，则视为回访上报一条漏斗（once 守卫，每次启动至多一条）；
+  // 随后写入本次访问标记。全程 best-effort（吞 localStorage/网络错），绝不影响首屏与 UX。
+  useEffect(() => {
+    if (returnVisitTrackedRef.current) {
+      return;
+    }
+    returnVisitTrackedRef.current = true;
+    let returning = false;
+    try {
+      returning = (window.localStorage.getItem(returnVisitStorageKey) ?? "") !== "";
+    } catch {
+      // localStorage 不可用（隐私模式等）：当作首次访问，不上报。
+    }
+    if (returning) {
+      void trackFunnel("return_visit");
+    }
+    try {
+      window.localStorage.setItem(returnVisitStorageKey, String(Date.now()));
+    } catch {
+      // 忽略持久化失败——下次启动仍按首次处理，至多漏一条回访。
+    }
   }, []);
 
   useEffect(() => {

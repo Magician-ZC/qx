@@ -101,26 +101,24 @@ func (service *Service) resolveCombatShake(
 		resolution.OverrideDecision = &decision
 	case "surrender":
 		narrative := strings.TrimSpace(firstNonEmptyText(choice.Memory, choice.Bubble, choice.Reasoning))
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldMorale,
-			-0.18,
-			events.ReasonEmotionTrauma,
-			narrative,
-		); err != nil {
-			return resolution, err
-		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldLoyalty,
-			-0.05,
-			events.ReasonCommandForced,
-			narrative,
-		); err != nil {
+		// 投降对同一单位连续两次变更（士气 + 忠诚），二者字段独立、互不读取对方结果、无数据依赖，
+		// 聚成一次 ApplyBatch 收敛 DB 往返；顺序（先 Morale 后 Loyalty）与逐次路径一致，事件/日志交错不变。
+		if err := service.applyStatusMutationsBatch(ctx, state, []pendingStatusMutation{
+			{
+				record:     actor,
+				field:      status.FieldMorale,
+				delta:      -0.18,
+				reasonCode: events.ReasonEmotionTrauma,
+				reasonText: narrative,
+			},
+			{
+				record:     actor,
+				field:      status.FieldLoyalty,
+				delta:      -0.05,
+				reasonCode: events.ReasonCommandForced,
+				reasonText: narrative,
+			},
+		}); err != nil {
 			return resolution, err
 		}
 		decision := unitDecisionPayload{

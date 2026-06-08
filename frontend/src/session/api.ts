@@ -954,6 +954,19 @@ export function trackFunnel(kind: string, props?: { email?: string; source?: str
     .catch(() => undefined);
 }
 
+// emitClientAnalytics 向 /api/analytics/client 提交一条客户端行为事件（best-effort）。
+// 后端白名单 status_card_viewed / share_initiated → 落 product_events；非白名单被后端静默丢弃。
+// 与 trackFunnel 一样吞掉所有错误——调用方可裸调 `void emitClientAnalytics("status_card_viewed")` 而无需 try/catch。
+export function emitClientAnalytics(name: string, props?: Record<string, unknown>): Promise<void> {
+  return request<{ ok?: boolean }>(`/api/analytics/client`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, props }),
+  })
+    .then(() => undefined)
+    .catch(() => undefined);
+}
+
 const visitorIDStorageKey = "qunxiang.visitor.id.v1";
 
 // anonymousVisitorID 读取（或惰性生成并持久化）匿名访客 ID，用于漏斗去重统计。

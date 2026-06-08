@@ -46,6 +46,7 @@ const (
 	ReasonEmotionReward    ReasonCode = "EMOTION_REWARD"
 	ReasonAmbientSocialize ReasonCode = "AMBIENT_SOCIALIZE" // 大世界离线自治：与人攀谈交往，士气舒展（region-runner L3，§8.2）
 	ReasonAmbientReflect   ReasonCode = "AMBIENT_REFLECT"   // 大世界离线自治：独自思忖沉淀，心绪渐定（region-runner L3）
+	ReasonBloodFeudGrief   ReasonCode = "BLOOD_FEUD_GRIEF"  // 血仇传播：在乎死者的哀悼者闻死讯哀恸，士气小幅下挫（blood_feud.go，耦合文档「传播」）
 	ReasonEconomyPurchase  ReasonCode = "ECONOMY_PURCHASE"
 	ReasonEconomyReward    ReasonCode = "ECONOMY_REWARD"
 	ReasonEconomyLoot      ReasonCode = "ECONOMY_LOOT"
@@ -107,6 +108,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonAmbientRest, Category: CategorySurvival, DisplayName: "日常消耗", DefaultReasonText: "她在战斗之外的日常起居里消耗了些口粮", StatDomains: []string{"hunger"}, ImportanceMin: 1, ImportanceMax: 2},
 		{Code: ReasonAmbientSocialize, Category: CategoryEmotion, DisplayName: "日常交往", DefaultReasonText: "她在战斗之外与人攀谈交往，心情舒展了些", StatDomains: []string{"morale"}, ImportanceMin: 2, ImportanceMax: 4},
 		{Code: ReasonAmbientReflect, Category: CategoryEmotion, DisplayName: "独自沉淀", DefaultReasonText: "她独自思忖沉淀，心绪渐定", StatDomains: []string{"morale"}, ImportanceMin: 1, ImportanceMax: 3},
+		{Code: ReasonBloodFeudGrief, Category: CategoryEmotion, DisplayName: "闻丧哀恸", DefaultReasonText: "她在乎的人死于他人之手，悲恸难抑、士气受挫", StatDomains: []string{"morale"}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonEmotionTrauma, Category: CategoryEmotion, DisplayName: "创伤事件", DefaultReasonText: "目睹惨烈事件后情绪受挫", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 9},
 		{Code: ReasonEmotionReward, Category: CategoryEmotion, DisplayName: "荣誉奖励", DefaultReasonText: "获得奖励后士气提升", StatDomains: []string{"morale"}, ImportanceMin: 6, ImportanceMax: 8},
 		{Code: ReasonEconomyPurchase, Category: CategoryEconomy, DisplayName: "物资购买", DefaultReasonText: "花费金币购入物资", StatDomains: []string{"wallet"}, ImportanceMin: 2, ImportanceMax: 5},

@@ -27,6 +27,16 @@ import (
 // regionLeasesFlagEnv 是 region 租约的进程级开关。默认关 → 抢/续租恒成功（单实例兼容）。
 const regionLeasesFlagEnv = "QUNXIANG_REGION_LEASES"
 
+// regionShardingFlagEnv 是 region 真分片的进程级开关（§11.3「多实例真分片」接线点）。默认关 →
+//   - schedulePass 仍只走 agentqueue.DistinctWakeRegions 枚举 region（不消费 region.Registry 的 tier）；
+//   - ambient_scheduling 的 region_id 仍 ==sessionID（单人局每会话自成一区）；
+//   - agentqueue 的 region 列举/认领不加 world 维度限定。
+//
+// 开启后才让 region.Registry 接管「按活跃度档优先调度活跃区 + 推进 per-region 逻辑时钟」、region_id 升级为
+// 世界子区、agentqueue 按 (world_id, region_id) 限定防跨世界串唤醒。与 QUNXIANG_REGION_LEASES（租约互斥）正交：
+// 分片开但租约关时仍可单实例按 tier 调度；两者皆开才是完整的「多实例按活跃度真分片」。
+const regionShardingFlagEnv = "QUNXIANG_REGION_SHARDING"
+
 // leaseTSLayout 是定宽时间布局（纳秒补零 + 显式时区），字典序 == 时间序——expires_at 的字符串比较
 // （抢过期租约用 expires_at < now）双驱动一致。对齐 agentqueue 的 tsLayout，避免 DATETIME 函数方言差异。
 const leaseTSLayout = "2006-01-02T15:04:05.000000000Z07:00"
@@ -66,6 +76,21 @@ func leasesEnabled() bool {
 // LeasesEnabled 是 leasesEnabled 的导出别名，供 regionrunner 主循环判定是否走 region 分片路径
 // （flag 关时 schedulePass 不跳过任何 region、worker 走全局 ClaimNextJob，保证零行为变化）。
 func LeasesEnabled() bool { return leasesEnabled() }
+
+// shardingEnabled 读 QUNXIANG_REGION_SHARDING（true/1/yes/on 视为开，大小写不敏感、忽略首尾空白），默认关。
+func shardingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(regionShardingFlagEnv))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// ShardingEnabled 是 shardingEnabled 的导出别名：供 regionrunner schedulePass 判定是否消费 region.Registry、
+// 供 session.seedAmbientForUnits 判定 region_id 是否升级为世界子区。flag 关时两处均走旧逻辑（region_id==sessionID、
+// DistinctWakeRegions 枚举），保证零行为变化。
+func ShardingEnabled() bool { return shardingEnabled() }
 
 // formatLeaseTS 把时刻格式化为定宽可字典序比较的 UTC 串。
 func formatLeaseTS(t time.Time) string { return t.UTC().Format(leaseTSLayout) }

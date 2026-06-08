@@ -20,6 +20,7 @@ import (
 	"qunxiang/backend/internal/config"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/httpapi"
+	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/regionrunner"
 	"qunxiang/backend/internal/session"
 	mysqlstore "qunxiang/backend/internal/storage/mysql"
@@ -64,6 +65,12 @@ func main() {
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
 	regionRunner.SetExecutionGuard(session.IsExecutionRunning) // 让位聚焦战斗：在战会话的单位由战斗循环管
+	// region 真分片（§11.3，默认关）：QUNXIANG_REGION_SHARDING=true 才注入 region.Registry——schedulePass 改按活跃度档
+	// （HOT/WARM）优先调度活跃区、推进 per-region 逻辑时钟、威胁经 BumpThreatLevel 扎堆。注入即装配（与 regionrunner 并列）；
+	// 实际生效还需 flag 开（SetRegistry 注入后，shardingEnabled() 关时 schedulePass 仍走 DistinctWakeRegions 旧路径）。
+	if envBool("QUNXIANG_REGION_SHARDING") {
+		regionRunner.SetRegistry(region.New(db))
+	}
 	// PvE（默认关）：QUNXIANG_REGION_RUNNER_THREATS 开即 roll 威胁——注入 AnchorDensity 做锚加权（PvE-4，威胁扎堆她在乎处）；
 	// 再开 QUNXIANG_REGION_RUNNER_THREATS_APPLY 才注入真 elite 遭遇结算（PvE-2，命中→改 HP/钱包、分赃/惩罚、命运卡），仅 THREATS=shadow。
 	// ⚠️ 威胁 roll 还依赖 QUNXIANG_REGION_RUNNER_APPLY=true（roll 在 applyAmbientL1 内）——完整真打需 ENABLED+APPLY+THREATS+THREATS_APPLY 四者皆开。

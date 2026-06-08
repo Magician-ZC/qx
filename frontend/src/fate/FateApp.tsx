@@ -3,7 +3,7 @@
    会话与角色 ID 存 localStorage，刷新自动续上她的人生。*/
 
 import { useCallback, useEffect, useState } from "react";
-import { bootstrapCharacter, recordPlayerIntervention } from "../session/api";
+import { bootstrapCharacter, recordPlayerIntervention, trackFunnel } from "../session/api";
 import { FateView } from "./FateView";
 import "./fate.css";
 
@@ -78,6 +78,9 @@ export function FateApp() {
       const next: Saved = { sessionId, unitId, name: trimmed };
       window.localStorage.setItem(STORE_KEY, JSON.stringify(next));
       setSaved(next);
+      // charter_completed：捏人成功（角色已建、离线宪章已落）即 onboarding→play 转换达成，进 leads 漏斗。
+      // 后端 bootstrap 另会 Emit 权威版到 product_events；这条仅供前端漏斗统计，best-effort、不重复。
+      void trackFunnel("charter_completed", { source: origin });
       setPhase("preview");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

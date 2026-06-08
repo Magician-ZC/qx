@@ -7,11 +7,28 @@ package session
 
 import (
 	"context"
+	"os"
+	"strings"
 
 	"qunxiang/backend/internal/agentqueue"
 	"qunxiang/backend/internal/engine/scheduler"
+	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/unit"
 )
+
+// regionShardingFlagEnv 与 regionrunner.QUNXIANG_REGION_SHARDING 同名：seed 侧据此把 region_id 升级为世界子区。
+// 自包含解析（对齐 billing/compliance 的 flag idiom，避免 session→regionrunner 反向依赖）。默认关 → region_id==sessionID。
+const regionShardingFlagEnv = "QUNXIANG_REGION_SHARDING"
+
+// regionShardingEnabled 读 QUNXIANG_REGION_SHARDING（默认关）。开时 seedAmbientForUnits 用确定性子区映射算 region_id。
+func regionShardingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(regionShardingFlagEnv))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // SetAmbientSchedulingEnabled 由 main/router 按 region-runner 是否启用注入（默认关）。
 func (service *Service) SetAmbientSchedulingEnabled(enabled bool) {
@@ -29,7 +46,8 @@ func (service *Service) seedAmbientForNewUnit(ctx context.Context, state *State,
 	if service == nil || state == nil || rec.FactionID != state.PlayerFactionID {
 		return
 	}
-	_ = service.seedAmbientForUnits(ctx, state.ID, "", []string{rec.ID})
+	// 传 state.WorldID（未接多世界时恒空 → region_id 回退 sessionID；接入后才升级世界子区分片）。
+	_ = service.seedAmbientForUnits(ctx, state.ID, state.WorldID, []string{rec.ID})
 }
 
 // seedAmbientForUnits 为一组单位登记离线调度：作用域(world=worldID, region=sessionID)、生命态列=active、入初始唤醒
@@ -46,12 +64,31 @@ func (service *Service) seedAmbientForUnits(ctx context.Context, sessionID strin
 			firstErr = err
 		}
 	}
+	// region 分片（§11.3，flag QUNXIANG_REGION_SHARDING 开）：region_id 升级为世界子区（worldID#shardN），先在 registry
+	// 登记该子区再 seed；worldID 空（单人局无世界）或 flag 关时回退 region_id==sessionID，保证零行为变化。registry 仅分片开时构造。
+	sharding := regionShardingEnabled()
+	var registry *region.Registry
+	if sharding && worldID != "" {
+		registry = region.New(service.db)
+	}
 	for _, unitID := range unitIDs {
 		if unitID == "" {
 			continue
 		}
-		// region=sessionID：单人局每会话自成一个 region（region 分片是 real-5+ 的事）。world 可空（单人局无世界）。
-		if err := service.units.SetUnitScope(ctx, unitID, worldID, sessionID); err != nil {
+		// region_id：分片关 / 无世界 → ==sessionID（旧口径，单人局每会话自成一区）；分片开 + 有世界 → 确定性子区映射。
+		regionID := sessionID
+		if sharding {
+			regionID = agentqueue.ShardRegionID(worldID, unitID, sessionID, agentqueue.DefaultShardCount)
+			// 先登记子区（幂等 upsert：建档默认 cold 档、零威胁、tick 0），让 region-runner 的 ListByTier/AdvanceRegionTick 能发现它。
+			// best-effort：worldID 空时 registry==nil（regionID 已回退 sessionID）不登记；登记失败只记错、不挡 seed。
+			if registry != nil && regionID != sessionID {
+				if err := registry.UpsertRegion(ctx, regionID, worldID); err != nil {
+					note(err)
+				}
+			}
+		}
+		// world 可空（单人局无世界）。
+		if err := service.units.SetUnitScope(ctx, unitID, worldID, regionID); err != nil {
 			note(err)
 			continue
 		}
@@ -60,7 +97,7 @@ func (service *Service) seedAmbientForUnits(ctx context.Context, sessionID strin
 			continue
 		}
 		if err := agentqueue.EnqueueWake(ctx, service.db, agentqueue.WakeEntry{
-			UnitID: unitID, SessionID: sessionID, WorldID: worldID, RegionID: sessionID,
+			UnitID: unitID, SessionID: sessionID, WorldID: worldID, RegionID: regionID,
 			WakeAtTick: 0, Tier: string(scheduler.TierCold),
 		}); err != nil {
 			note(err)

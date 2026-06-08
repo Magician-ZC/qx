@@ -230,6 +230,37 @@ func TestListDueWakesWorldFilter(t *testing.T) {
 	}
 }
 
+// TestDistinctWakeRegionsInWorld：world 维度枚举只列出本世界的 region，跨世界同名 region 不混入（§11.3 防串唤醒）。
+func TestDistinctWakeRegionsInWorld(t *testing.T) {
+	db, ctx := newQueueDB(t)
+	// 两世界各有 region；w2 与 w1 共用同名 region "r1"——world 维度须把它们区隔开。
+	_ = EnqueueWake(ctx, db, WakeEntry{UnitID: "a", WorldID: "w1", RegionID: "r1", WakeAtTick: 1})
+	_ = EnqueueWake(ctx, db, WakeEntry{UnitID: "b", WorldID: "w1", RegionID: "r2", WakeAtTick: 1})
+	_ = EnqueueWake(ctx, db, WakeEntry{UnitID: "c", WorldID: "w2", RegionID: "r1", WakeAtTick: 1})
+
+	w1Regions, err := DistinctWakeRegionsInWorld(ctx, db, "w1")
+	if err != nil {
+		t.Fatalf("distinct in world w1: %v", err)
+	}
+	if len(w1Regions) != 2 {
+		t.Fatalf("w1 应有 2 个 region（r1,r2），得到 %+v", w1Regions)
+	}
+	for _, rg := range w1Regions {
+		if rg.WorldID != "w1" {
+			t.Fatalf("w1 枚举不应混入他世界 region：%+v", rg)
+		}
+	}
+	w2Regions, _ := DistinctWakeRegionsInWorld(ctx, db, "w2")
+	if len(w2Regions) != 1 || w2Regions[0].RegionID != "r1" || w2Regions[0].WorldID != "w2" {
+		t.Fatalf("w2 应仅 (w2,r1)，得到 %+v", w2Regions)
+	}
+	// 全局 DistinctWakeRegions（不带 world）仍枚举全部不同 (world,region)。
+	all, _ := DistinctWakeRegions(ctx, db)
+	if len(all) != 3 {
+		t.Fatalf("全局枚举应有 3 个不同 (world,region)，得到 %+v", all)
+	}
+}
+
 func TestReclaimStaleJobs(t *testing.T) {
 	db, ctx := newQueueDB(t)
 

@@ -762,6 +762,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
+		// 注意：此处不可埋 return_visit。GET /api/sessions/:id 被前端按 1s/5s 高频轮询
+		// （App.tsx 阶段轮询/执行快照轮询/重连刷新等），一次轮询=一行事件会把留存漏斗灌爆、指标失真。
+		// 真实回访信号由前端 App.tsx 经 localStorage 去重后 trackFunnel("return_visit") → POST /api/leads
+		// （按匿名 vid 去重）承载，语义正确，无需在被轮询的快照 GET 上重复埋点。
 		commanderFactionID, ok := resolveCommanderFaction(c, snapshot.ID, snapshot.PlayerFactionID)
 		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role token"})
@@ -1204,6 +1208,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			SessionID: sessionID,
 			UnitID:    record.ID,
 		})
+		// 捏人/契约完成（charter）：bootstrap 成功落地角色即视为该单位契约完成，best-effort 埋点（激活阶段）。
+		_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+			Stage:     analytics.StageActivation,
+			Name:      analytics.EventCharterCompleted,
+			SessionID: sessionID,
+			UnitID:    record.ID,
+		})
 
 		response := gin.H{"unit": record}
 		// 兑现命运 onboarding「她身边已有二十个有名有姓的人」承诺：with_village 时附带 20 人关系网。
@@ -1215,6 +1226,37 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 
 		c.JSON(http.StatusCreated, response)
+	})
+
+	// 客户端漏斗埋点入口（无鉴权，best-effort）：让纯前端转化点（状态卡查看 / 分享发起）也能落 product_events。
+	// 防滥用注水：仅白名单事件名落库，其余一律返回 ok 但忽略（不报错、不写库）。
+	// 契约（给前端）：POST /api/analytics/client  body {name:string, props?:object}；返回 {"ok":true}。
+	router.POST("/api/analytics/client", func(c *gin.Context) {
+		var request struct {
+			Name  string         `json:"name"`
+			Props map[string]any `json:"props"`
+		}
+		// 解析失败也返 ok：埋点端点对客户端永远成功，绝不暴露内部细节。
+		_ = c.ShouldBindJSON(&request)
+
+		// 白名单：事件名 → 漏斗阶段。仅这两个客户端事件允许注入，其余忽略。
+		stage, allowed := map[string]analytics.Stage{
+			analytics.EventStatusCardViewed: analytics.StageActivation, // 状态卡查看 = 激活
+			analytics.EventShareInitiated:   analytics.StageReferral,   // 分享发起 = 转介
+		}[request.Name]
+		if allowed {
+			props := request.Props
+			if props == nil {
+				props = map[string]any{}
+			}
+			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+				Stage: stage,
+				Name:  request.Name,
+				Props: props,
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	router.POST("/api/units/:id/mutations", func(c *gin.Context) {
@@ -1467,6 +1509,33 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"feed": items})
+	})
+	// 世仇清单：列出某角色当前怀有的强敌意关系（blood_feud 传播的可观测面，前端/调试用）。纯读。
+	// 关系四轴敌意图是敏感读面：必须按 :id 会话作用域 + 指挥阵营鉴权（与其它 /api/sessions/:id 读一致），
+	// 且校验 :unitId 确属该会话，否则任意调用方可拿任意 unitId 跨会话拉取其完整敌意网络（含对象名）。
+	router.GET("/api/sessions/:id/units/:unitId/feuds", func(c *gin.Context) {
+		snapshot, err := newSessionService().GetSnapshot(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if _, ok := resolveCommanderFaction(c, snapshot.ID, snapshot.PlayerFactionID); !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role token"})
+			return
+		}
+		// 校验 unitId 归属本会话：拒绝跨会话/任意单位读。
+		unitID := strings.TrimSpace(c.Param("unitId"))
+		rec, err := unit.NewRepository(deps.Store).GetByID(c.Request.Context(), unitID)
+		if err != nil || strings.TrimSpace(rec.SessionID) != snapshot.ID {
+			c.JSON(http.StatusNotFound, gin.H{"error": "unit not found in session"})
+			return
+		}
+		entries, err := newSessionService().ListBloodFeuds(c.Request.Context(), unitID, 32)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"feuds": entries})
 	})
 	// 角色状态卡：读单个单位（命运四槽的「状态卡」用）。
 	router.GET("/api/units/:id", func(c *gin.Context) {

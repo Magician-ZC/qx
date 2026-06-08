@@ -5,11 +5,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  emitClientAnalytics,
   getFateFeed,
   getUnitStatus,
   recordPlayerIntervention,
   resolveFateDecision,
   subscribeSessionStream,
+  trackFunnel,
   type FateCard,
 } from "../session/api";
 import { computeFateCountdown, formatFateCountdown } from "./countdown";
@@ -55,6 +57,10 @@ export function FateView({ sessionId, unitId }: Props) {
   const [interveneText, setInterveneText] = useState("");
   const [toast, setToast] = useState("");
   const seenRef = useRef<Set<string>>(new Set());
+  // statusViewedRef 守卫 status_card_viewed 埋点只触发一次（首次拉到角色状态时），避免每次重渲重复上报。
+  const statusViewedRef = useRef(false);
+  // shareInitiatedRef 守卫 share_initiated 同一卡只上报一次（按 narrative 去重），避免重复点击灌漏斗。
+  const shareInitiatedRef = useRef<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -69,6 +75,14 @@ export function FateView({ sessionId, unitId }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // status_card_viewed：首次拉到角色状态（命运状态卡有内容可看）时上报一次（best-effort，吞错、once 守卫）。
+  useEffect(() => {
+    if (status && !statusViewedRef.current) {
+      statusViewedRef.current = true;
+      void emitClientAnalytics("status_card_viewed");
+    }
+  }, [status]);
 
   // 实时增量：WS 推来的新卡即时插入（按 narrative 去重，避免与首屏重复）。
   useEffect(() => {
@@ -133,6 +147,27 @@ export function FateView({ sessionId, unitId }: Props) {
     }
   }, [interveneText, sessionId, unitId]);
 
+  // onShare 把一段命运叙事复制到剪贴板供玩家分享，并埋点 share_initiated（同一段叙事只上报一次）。
+  // 埋点与复制均 best-effort：剪贴板不可用时仍给 toast 反馈，绝不阻断 UX。
+  const onShare = useCallback(
+    (narrative: string) => {
+      const text = narrative.trim();
+      if (!text) return;
+      if (!shareInitiatedRef.current.has(text)) {
+        shareInitiatedRef.current.add(text);
+        void emitClientAnalytics("share_initiated");
+        void trackFunnel("share_initiated", { source: "fate_highlight" });
+      }
+      try {
+        void navigator.clipboard?.writeText(text);
+        setToast("她的故事，已经替你抄了下来。去说给别人听吧。");
+      } catch {
+        setToast("她的故事在这儿——长按或选中，讲给别人听。");
+      }
+    },
+    [],
+  );
+
   return (
     <div className="fate-root">
       <header className="fate-header">
@@ -185,7 +220,14 @@ export function FateView({ sessionId, unitId }: Props) {
         {highlights.length === 0 && <div className="fate-empty">还很平静。让世界往前走走看。</div>}
         {highlights.map((c, i) => (
           <div className="fate-card fate-card-highlight" key={`h${i}`}>
-            {c.narrative}
+            <span className="fate-card-text">{c.narrative}</span>
+            <button
+              className="fate-share-btn"
+              title="把她的故事讲给别人听"
+              onClick={() => onShare(c.narrative)}
+            >
+              讲给别人听
+            </button>
           </div>
         ))}
       </section>

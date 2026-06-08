@@ -505,7 +505,8 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 
 	// 把玩家单位 seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op）。best-effort：绝不因调度登记失败拖垮建局。
 	// draft 模式此处 PlayerUnitIDs 尚空（单位在 ApplyOpeningDraft 才落库），故对 draft 自然 no-op、由组队完成时再 seed。
-	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
+	// 传 state.WorldID（未接多世界时恒空 → region_id 回退 sessionID；接入后才升级世界子区分片）。
+	_ = service.seedAmbientForUnits(ctx, sessionID, state.WorldID, state.PlayerUnitIDs)
 
 	// 在主战局兑现命运开盒「她身边已有二十个有名有姓的人」承诺（QUNXIANG_MAIN_VILLAGE 关时 no-op，best-effort）。
 	// 仅非 draft 路径在此织村庄：draft 模式此处玩家单位尚未落库，由 ApplyOpeningDraft 组队完成时再 seed，避免漏播/重复。
@@ -644,7 +645,8 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 	appendLog(&state, "setup", fmt.Sprintf("开局组队完成：玩家选择了 %d 名单位。第 1 回合部署阶段开始。", len(state.PlayerUnitIDs)), "", "")
 	ensureFactionRelations(&state)
 	// 组队完成、玩家单位刚落库 → seed 进大世界离线调度（M7.3-real-4b，开关关时 no-op；best-effort）。
-	_ = service.seedAmbientForUnits(ctx, sessionID, "", state.PlayerUnitIDs)
+	// 传 state.WorldID（未接多世界时恒空 → region_id 回退 sessionID；接入后才升级世界子区分片）。
+	_ = service.seedAmbientForUnits(ctx, sessionID, state.WorldID, state.PlayerUnitIDs)
 	// 同步在主战局兑现命运开盒「她身边已有二十个有名有姓的人」承诺（QUNXIANG_MAIN_VILLAGE 关时 no-op，best-effort）。
 	// draft 路径的村庄播种唯一落点——createSinglePlayerWithMapScript 在 draft 模式跳过，此处补齐，避免漏播/重复。
 	service.seedVillageForSession(ctx, &state)
@@ -2779,6 +2781,11 @@ func (service *Service) applyAttack(
 			}
 			// 把她的死按相关性路由进「在乎她的人」的命运收件箱（best-effort，绝不影响战斗结算）。
 			_, _ = service.WorldizeDeath(ctx, state.ID, *target)
+			// 血仇传播（flag-gated 默认关 + best-effort）：在乎死者的人继承对凶手 attacker 的敌意，
+			// 最亲近者哀恸、世仇留痕并投「为TA复仇？」命运卡。绝不影响战斗结算。
+			// 传入 byID（执行主循环持有的活指针映射），令哀恸 morale 的 Mutator 结果能回写内存态，
+			// 避免后续 units.Save(*actor/*ally) 用旧内存态覆盖落库的悲恸（保持内存↔DB 一致）。
+			service.propagateBloodFeud(ctx, state, *target, attacker.ID, state.WorldID, byID)
 			// 接入世界后：这一击作为跨玩家事件写进不可篡改的世界总线（best-effort，gate 在 WorldID）。
 			service.recordWorldizedKill(ctx, state, attacker, target)
 		}
@@ -3145,7 +3152,12 @@ func (service *Service) applyCombatGroupDynamics(
 		return nil
 	}
 
+	targetID := target.ID
 	if isFactionLeader(*state, target.ID, target.FactionID) {
+		// 队长阵亡：同阵营每个友军 -0.3 士气并各记一条 morale_shift 日志。各友军互相独立、无数据依赖，
+		// 聚成一次 ApplyBatch；每条变更紧随的 morale_shift 日志经 after 闭包在该条标准副作用后立即回放，
+		// 与逐次路径的日志/事件交错顺序完全一致。
+		leaderMutations := make([]pendingStatusMutation, 0)
 		for _, alliedID := range alliedIDs(*state, target.FactionID) {
 			if alliedID == target.ID {
 				continue
@@ -3154,27 +3166,33 @@ func (service *Service) applyCombatGroupDynamics(
 			if !ok || !isBattleReady(*ally) {
 				continue
 			}
-			if err := service.applyStatusMutation(
-				ctx,
-				state,
-				ally,
-				status.FieldMorale,
-				-0.3,
-				downReason,
-				fmt.Sprintf("我目睹队长 %s 阵亡，士气重挫。", target.DisplayName()),
-			); err != nil {
-				return err
-			}
-			appendLog(
-				state,
-				"morale_shift",
-				"我因队长阵亡遭受全军冲击。",
-				ally.ID,
-				target.ID,
-			)
+			allyRef := ally
+			leaderMutations = append(leaderMutations, pendingStatusMutation{
+				record:     ally,
+				field:      status.FieldMorale,
+				delta:      -0.3,
+				reasonCode: downReason,
+				reasonText: fmt.Sprintf("我目睹队长 %s 阵亡，士气重挫。", target.DisplayName()),
+				after: func() error {
+					appendLog(
+						state,
+						"morale_shift",
+						"我因队长阵亡遭受全军冲击。",
+						allyRef.ID,
+						targetID,
+					)
+					return nil
+				},
+			})
+		}
+		if err := service.applyStatusMutationsBatch(ctx, state, leaderMutations); err != nil {
+			return err
 		}
 	}
 	if isFactionStandardBearer(*state, target.ID, target.FactionID) {
+		// 旗手倒下：同阵营每个友军 -0.2 士气并各记一条 morale_shift 日志。同上聚成一次 ApplyBatch，
+		// 日志经 after 闭包回放，保持与逐次路径完全一致的交错顺序。
+		bearerMutations := make([]pendingStatusMutation, 0)
 		for _, alliedID := range alliedIDs(*state, target.FactionID) {
 			if alliedID == target.ID {
 				continue
@@ -3183,27 +3201,33 @@ func (service *Service) applyCombatGroupDynamics(
 			if !ok || !isBattleReady(*ally) {
 				continue
 			}
-			if err := service.applyStatusMutation(
-				ctx,
-				state,
-				ally,
-				status.FieldMorale,
-				-0.2,
-				downReason,
-				fmt.Sprintf("我目睹旗手 %s 被击溃，军心受到打击。", target.DisplayName()),
-			); err != nil {
-				return err
-			}
-			appendLog(
-				state,
-				"morale_shift",
-				"我因旗手倒下受到士气冲击。",
-				ally.ID,
-				target.ID,
-			)
+			allyRef := ally
+			bearerMutations = append(bearerMutations, pendingStatusMutation{
+				record:     ally,
+				field:      status.FieldMorale,
+				delta:      -0.2,
+				reasonCode: downReason,
+				reasonText: fmt.Sprintf("我目睹旗手 %s 被击溃，军心受到打击。", target.DisplayName()),
+				after: func() error {
+					appendLog(
+						state,
+						"morale_shift",
+						"我因旗手倒下受到士气冲击。",
+						allyRef.ID,
+						targetID,
+					)
+					return nil
+				},
+			})
+		}
+		if err := service.applyStatusMutationsBatch(ctx, state, bearerMutations); err != nil {
+			return err
 		}
 	}
 
+	// 击倒方阵营冲击半径内的友军各 +0.05 士气并各记一条 morale_shift 日志。同上聚成一次 ApplyBatch，
+	// 日志经 after 闭包回放，保持与逐次路径完全一致的交错顺序。
+	attackerAllyMutations := make([]pendingStatusMutation, 0)
 	for _, alliedID := range alliedIDs(*state, attacker.FactionID) {
 		if alliedID == attacker.ID {
 			continue
@@ -3216,24 +3240,27 @@ func (service *Service) applyCombatGroupDynamics(
 			continue
 		}
 
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			ally,
-			status.FieldMorale,
-			0.05,
-			downReason,
-			fmt.Sprintf("我目睹 %s 击倒敌人，士气上扬。", attacker.DisplayName()),
-		); err != nil {
-			return err
-		}
-		appendLog(
-			state,
-			"morale_shift",
-			"我看到友军击倒敌人，士气提升。",
-			ally.ID,
-			target.ID,
-		)
+		allyRef := ally
+		attackerAllyMutations = append(attackerAllyMutations, pendingStatusMutation{
+			record:     ally,
+			field:      status.FieldMorale,
+			delta:      0.05,
+			reasonCode: downReason,
+			reasonText: fmt.Sprintf("我目睹 %s 击倒敌人，士气上扬。", attacker.DisplayName()),
+			after: func() error {
+				appendLog(
+					state,
+					"morale_shift",
+					"我看到友军击倒敌人，士气提升。",
+					allyRef.ID,
+					targetID,
+				)
+				return nil
+			},
+		})
+	}
+	if err := service.applyStatusMutationsBatch(ctx, state, attackerAllyMutations); err != nil {
+		return err
 	}
 
 	return nil

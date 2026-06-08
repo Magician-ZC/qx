@@ -275,17 +275,16 @@ func (service *Service) executeSkill(
 		if err := service.applyActionHungerCost(ctx, state, actor, definition.DisplayName); err != nil {
 			return err
 		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldMorale,
-			0.08,
-			events.ReasonEmotionReward,
-			"我发出战吼，士气提升。",
-		); err != nil {
-			return err
-		}
+		// 战吼：施法者自身 +士气，再循环鼓舞相邻友军。这些单位互相独立、无数据依赖，
+		// 聚成一次 ApplyBatch 收敛 DB 往返；入参顺序（先施法者后友军，按 alliedIDs 顺序）
+		// 与逐次路径完全一致，raw event / stat_change 日志交错顺序不变。
+		shoutMutations := []pendingStatusMutation{{
+			record:     actor,
+			field:      status.FieldMorale,
+			delta:      0.08,
+			reasonCode: events.ReasonEmotionReward,
+			reasonText: "我发出战吼，士气提升。",
+		}}
 		for _, alliedID := range alliedIDs(*state, actor.FactionID) {
 			if alliedID == actor.ID {
 				continue
@@ -297,17 +296,16 @@ func (service *Service) executeSkill(
 			if unit.HexDistance(actor.Status.PositionQ, actor.Status.PositionR, ally.Status.PositionQ, ally.Status.PositionR) > 1 {
 				continue
 			}
-			if err := service.applyStatusMutation(
-				ctx,
-				state,
-				ally,
-				status.FieldMorale,
-				0.05,
-				events.ReasonEmotionReward,
-				fmt.Sprintf("我受到 %s 战吼鼓舞。", actor.DisplayName()),
-			); err != nil {
-				return err
-			}
+			shoutMutations = append(shoutMutations, pendingStatusMutation{
+				record:     ally,
+				field:      status.FieldMorale,
+				delta:      0.05,
+				reasonCode: events.ReasonEmotionReward,
+				reasonText: fmt.Sprintf("我受到 %s 战吼鼓舞。", actor.DisplayName()),
+			})
+		}
+		if err := service.applyStatusMutationsBatch(ctx, state, shoutMutations); err != nil {
+			return err
 		}
 		appendLog(
 			state,
@@ -530,26 +528,24 @@ func (service *Service) executeSkill(
 		}
 
 		damage := fireAssaultDamage(*state, *target)
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			target,
-			status.FieldHP,
-			-float64(damage),
-			events.ReasonCombatHit,
-			fmt.Sprintf("我对 %s 发动火攻突袭。", target.DisplayName()),
-		); err != nil {
-			return err
-		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			target,
-			status.FieldMorale,
-			-0.06,
-			events.ReasonEmotionTrauma,
-			fmt.Sprintf("我被 %s 的火攻震慑。", actor.DisplayName()),
-		); err != nil {
+		// 火攻对同一目标连续两次变更（HP 伤害 + 士气震慑），二者互不读取对方结果、无数据依赖，
+		// 聚成一次 ApplyBatch；顺序（先 HP 后 Morale）与逐次路径一致，事件/日志交错不变。
+		if err := service.applyStatusMutationsBatch(ctx, state, []pendingStatusMutation{
+			{
+				record:     target,
+				field:      status.FieldHP,
+				delta:      -float64(damage),
+				reasonCode: events.ReasonCombatHit,
+				reasonText: fmt.Sprintf("我对 %s 发动火攻突袭。", target.DisplayName()),
+			},
+			{
+				record:     target,
+				field:      status.FieldMorale,
+				delta:      -0.06,
+				reasonCode: events.ReasonEmotionTrauma,
+				reasonText: fmt.Sprintf("我被 %s 的火攻震慑。", actor.DisplayName()),
+			},
+		}); err != nil {
 			return err
 		}
 		appendLog(

@@ -27,6 +27,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/scheduler"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -190,6 +191,12 @@ type Runner struct {
 	heldRegions map[string]agentqueue.WakeRegion // 本实例当前持租的 region（region_id → world/region），由 schedulePass 维护、worker 据此 region-scoped 认领
 	heldMu      sync.RWMutex                     // 守护 heldRegions（schedulePass 写 / worker 读 并发）
 
+	// region.Registry（§11.3「多实例真分片」）：flag QUNXIANG_REGION_SHARDING 开 + registry 非 nil 时，schedulePass
+	// 优先按活跃度档（HOT/WARM）调度活跃区、对推进的 region 调 AdvanceRegionTick 推进 per-region 逻辑时钟，并把威胁 roll
+	// 经 BumpThreatLevel 累计到 region（威胁在高活跃区扎堆）。flag 关 / registry==nil → 全程不消费，走 DistinctWakeRegions
+	// 旧路径，零行为变化。best-effort：registry 任一调用失败只记日志、不中断调度（离线分片是辅助能力）。
+	registry *region.Registry
+
 	// real-3 HOT-LLM（默认 llm==nil → 全程反射；main 按 QUNXIANG_REGION_RUNNER_LLM 注入才启用，见 ambient_llm.go）。
 	llm               ambientLLM    // 离线决策 LLM 客户端
 	costEstimate      costEstimator // 用量→USD（注入 session.EstimateLLMCostUSD）
@@ -233,6 +240,16 @@ func (r *Runner) SetExecutionGuard(guard func(string) bool) {
 	}
 }
 
+// SetRegistry 注入 region.Registry（main 按 QUNXIANG_REGION_SHARDING 构造 region.New(db) 注入），让 schedulePass
+// 消费区级活跃度档/推进 per-region 逻辑时钟/威胁扎堆（§11.3）。nil-safe；不注入则 schedulePass 走 DistinctWakeRegions 旧路径。
+// 与 leases 正交：分片消费 Registry，租约保证 per-region 单写者，可独立或组合开启。
+func (r *Runner) SetRegistry(registry *region.Registry) {
+	if r == nil {
+		return
+	}
+	r.registry = registry
+}
+
 // withClock 注入时钟（测试用）。同步注入到 LeaseManager，使租约抢/续/过期窗口与 runner 同钟（确定性分片测试）。
 func (r *Runner) withClock(now func() time.Time) *Runner {
 	r.now = now
@@ -254,10 +271,20 @@ func (r *Runner) currentTick() int64 {
 // 抢到才处理（入队其作业 + 把该 region 记入 heldRegions 供 worker region-scoped 认领）；抢不到（别的实例持租）就跳过、
 // 让位。本 pass 持租的 region 在 pass 末统一 RenewLease 续租。flag QUNXIANG_REGION_LEASES 关时 AcquireLease 恒 true →
 // 不跳过任何 region、heldRegions 含全部 region；worker 仍走全局 ClaimNextJob（见 claimNextJobScoped）→ 零行为变化。
+//
+// region.Registry 消费（§11.3「多实例真分片」，flag QUNXIANG_REGION_SHARDING 开 + registry 非 nil）：region 集合改由
+// selectRegions 按活跃度档（HOT 优先、WARM 次之）从 registry.ListByTier 取，且对每个抢到的 region 调 AdvanceRegionTick
+// 推进 per-region 逻辑时钟。flag 关 / registry==nil 时 selectRegions 退化为 DistinctWakeRegions、不推 tick → 零行为变化。
+//
+// 活跃度档由 reconcileRegionTier 在每个 region 处理后自驱动维护：本 pass 有单位入队的区标 HOT、空 pass 的区降 COLD。
+// 这是生产侧唯一把 region 升出 COLD 的触发点——没有它 selectRegions 的 tier 优先路径恒空、等价于走旧路径。
+// 首个 pass registry 尚无 HOT/WARM 区时走 DistinctWakeRegions 兜底，本 pass 标档后下个 pass 起即真正按活跃度优先调度。
+// region_id 的世界子区分片（worldID#shardN）另需非空 worldID（见 session.seedAmbientForUnits）；未接多世界时
+// region_id==sessionID，但单实例按活跃度优先调度仍完全生效（不依赖 worldID）。
 func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 	atomic.AddInt64(&r.st.ticks, 1)
 	tick := r.currentTick()
-	regions, err := agentqueue.DistinctWakeRegions(ctx, r.db)
+	regions, err := r.selectRegions(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -277,11 +304,15 @@ func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 		atomic.AddInt64(&r.st.leasesAcquired, 1)
 		held[reg.RegionID] = reg
 
+		// 分片开时：抢到该 region → 推进其 per-region 逻辑时钟（best-effort，失败不中断调度）。
+		r.advanceRegionTick(ctx, reg)
+
 		due, err := agentqueue.ListDueWakes(ctx, r.db, reg.WorldID, reg.RegionID, tick, 256)
 		if err != nil {
 			r.log.Warn("region-runner list due wakes", "region", reg.RegionID, "error", err)
 			continue
 		}
+		regionEnqueued := 0
 		for _, w := range due {
 			inflight, err := agentqueue.CountJobsByStatus(ctx, r.db, agentqueue.StatusRunning)
 			if err != nil {
@@ -297,13 +328,104 @@ func (r *Runner) schedulePass(ctx context.Context) (int, error) {
 				r.log.Warn("region-runner promote wake to job", "unit", w.UnitID, "error", err)
 				continue
 			}
+			regionEnqueued++
 			enqueued++
 			atomic.AddInt64(&r.st.enqueued, 1)
 		}
+		// 区级活跃度档维护（分片开）：本 pass 有单位被唤醒入队的 region → 标 HOT（活跃区，下个 pass 经 selectRegions
+		// 的 tier 优先路径被优先调度）；空 pass 的 region → 向 COLD 降温（让 tier 焦点收敛到真活跃区）。这是把
+		// 「按活跃度档优先调度」从只有 SetActivityTier 原语、生产无人调用的死路，接成自驱动的区级活跃度环。best-effort。
+		r.reconcileRegionTier(ctx, reg, regionEnqueued > 0)
 	}
 	// 发布本 pass 持租的 region 集合（worker 据此 region-scoped 认领作业），并续租它们以免在下个 pass 前过期。
 	r.publishHeldRegions(ctx, held)
 	return enqueued, nil
+}
+
+// reconcileRegionTier 在分片开 + registry 非 nil 时，按本 pass 该 region 是否有单位被唤醒入队，维护其活跃度档：
+//   - active=true（有入队）→ 确保已登记（幂等 UpsertRegion）后标 HOT，使其下个 pass 进 selectRegions 的 tier 优先路径；
+//   - active=false（空 pass）→ 降温 WARM/COLD（best-effort 直接标 COLD，让 tier 焦点收敛到真活跃区，不饿死空区——
+//     空区仍由 DistinctWakeRegions 兜底枚举，故降到 COLD 不会丢失它后续来 wake 时被处理的机会）。
+//
+// 这是生产侧唯一把 region 升出 COLD 的触发点——没有它，regions.activity_tier 恒为 UpsertRegion 建档的 'cold'，
+// selectRegions 的 ListByTier(HOT/WARM) 恒空、tier 优先调度全程死路，分片开等价于分片关。
+// best-effort + flag-gated：分片关 / registry==nil → no-op（零行为变化）；登记/标档失败只记日志、不中断调度。
+func (r *Runner) reconcileRegionTier(ctx context.Context, reg agentqueue.WakeRegion, active bool) {
+	if !shardingEnabled() || r.registry == nil || reg.RegionID == "" {
+		return
+	}
+	if active {
+		// 幂等登记（DistinctWakeRegions 兜底来的区可能尚未登记 → UpsertRegion 建档 COLD，再升 HOT）。
+		if err := r.registry.UpsertRegion(ctx, reg.RegionID, reg.WorldID); err != nil {
+			r.log.Warn("region-runner upsert active region", "region", reg.RegionID, "error", err)
+			return
+		}
+		if err := r.registry.SetActivityTier(ctx, reg.RegionID, region.TierHot); err != nil {
+			r.log.Warn("region-runner promote region tier", "region", reg.RegionID, "error", err)
+		}
+		return
+	}
+	// 空 pass：降温至 COLD（region 未登记则 ErrNotFound，无害跳过——未登记区本就在 COLD 语义下）。
+	if err := r.registry.SetActivityTier(ctx, reg.RegionID, region.TierCold); err != nil && !errors.Is(err, region.ErrNotFound) {
+		r.log.Warn("region-runner demote region tier", "region", reg.RegionID, "error", err)
+	}
+}
+
+// selectRegions 选出本 pass 要遍历的 region：
+//   - 分片关（默认）/ registry==nil → agentqueue.DistinctWakeRegions：枚举唤醒队列里出现过的 region（旧路径，零行为变化）。
+//   - 分片开 + registry 非 nil → 按活跃度档优先取活跃区：先 ListByTier(HOT) 再 ListByTier(WARM)，去重合并（HOT 优先），
+//     再并入 DistinctWakeRegions 里尚未覆盖的 region（兜底：刚 seed、registry 尚未登记/标档的区也别饿死）。
+//
+// 活跃度档把调度焦点从「所有有 wake 的区平均扫」转为「先推活跃区」（§8.2 三层活跃度）。registry 列举失败时 best-effort
+// 回退 DistinctWakeRegions（不中断调度）。worldID 传空 → 跨世界列举该档全部（多世界由各区 world_id 自带 + agentqueue 限定隔离）。
+func (r *Runner) selectRegions(ctx context.Context) ([]agentqueue.WakeRegion, error) {
+	if !shardingEnabled() || r.registry == nil {
+		return agentqueue.DistinctWakeRegions(ctx, r.db)
+	}
+	seen := make(map[string]struct{})
+	out := make([]agentqueue.WakeRegion, 0, 16)
+	add := func(worldID, regionID string) {
+		if regionID == "" {
+			return
+		}
+		if _, dup := seen[regionID]; dup {
+			return
+		}
+		seen[regionID] = struct{}{}
+		out = append(out, agentqueue.WakeRegion{WorldID: worldID, RegionID: regionID})
+	}
+	for _, tier := range []region.Tier{region.TierHot, region.TierWarm} {
+		regs, err := r.registry.ListByTier(ctx, "", tier, 0)
+		if err != nil {
+			r.log.Warn("region-runner list by tier", "tier", string(tier), "error", err)
+			continue
+		}
+		for _, reg := range regs {
+			add(reg.WorldID, reg.ID)
+		}
+	}
+	// 兜底：并入唤醒队列里出现、但 registry 尚未登记/标 HOT|WARM 档的 region（含刚 seed 的 COLD/未登记区），避免饿死。
+	wakeRegions, err := agentqueue.DistinctWakeRegions(ctx, r.db)
+	if err != nil {
+		// registry 已给出一批活跃区，DistinctWakeRegions 失败不致命：返回已有的（best-effort）。
+		r.log.Warn("region-runner distinct wake regions (sharding fallback)", "error", err)
+		return out, nil
+	}
+	for _, reg := range wakeRegions {
+		add(reg.WorldID, reg.RegionID)
+	}
+	return out, nil
+}
+
+// advanceRegionTick 在分片开 + registry 非 nil 时推进该 region 的 per-region 逻辑时钟（区级发号器）。
+// best-effort：region 未登记/推进失败只记日志、不中断调度（离线分片是辅助能力，绝不拖垮主调度）。flag 关时 no-op。
+func (r *Runner) advanceRegionTick(ctx context.Context, reg agentqueue.WakeRegion) {
+	if !shardingEnabled() || r.registry == nil {
+		return
+	}
+	if _, err := r.registry.AdvanceRegionTick(ctx, reg.WorldID, reg.RegionID); err != nil {
+		r.log.Warn("region-runner advance region tick", "region", reg.RegionID, "error", err)
+	}
 }
 
 // publishHeldRegions 覆写 heldRegions 为本 pass 确认持租的集合，并对每个续租（顺延 TTL）。续租失败（已被他人抢走）
@@ -655,12 +777,13 @@ func (r *Runner) Stats() map[string]any {
 		"settled":       atomic.LoadInt64(&r.st.settled),
 		// region 分片遥测：instance_id 本实例 ID；leases_enabled flag 是否开（开才真互斥）；leases_acquired 抢到的 region 次数；
 		// leases_lost 续租失败丢区；regions_skipped 因他人持租而跳过的 region 次数；regions_held 当前持租 region 数。
-		"instance_id":     r.instanceID,
-		"leases_enabled":  LeasesEnabled(),
-		"leases_acquired": atomic.LoadInt64(&r.st.leasesAcquired),
-		"leases_lost":     atomic.LoadInt64(&r.st.leasesLost),
-		"regions_skipped": atomic.LoadInt64(&r.st.regionsSkipped),
-		"regions_held":    len(r.heldRegionList()),
+		"instance_id":      r.instanceID,
+		"leases_enabled":   LeasesEnabled(),
+		"sharding_enabled": ShardingEnabled() && r.registry != nil, // 分片真生效需 flag 开 + registry 已注入
+		"leases_acquired":  atomic.LoadInt64(&r.st.leasesAcquired),
+		"leases_lost":      atomic.LoadInt64(&r.st.leasesLost),
+		"regions_skipped":  atomic.LoadInt64(&r.st.regionsSkipped),
+		"regions_held":     len(r.heldRegionList()),
 		// real-3 HOT-LLM 遥测：llm_enabled 是否注入了客户端；llm_calls 成功经 LLM 决策次数；llm_fallbacks LLM 失败回退反射；
 		// llm_spent_usd 进程级累计成本；llm_latched 预算是否已耗尽闩死（此后全转反射）。
 		"llm_enabled":   r.llm != nil,

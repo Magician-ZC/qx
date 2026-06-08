@@ -365,6 +365,12 @@ func (service *Service) applyRandomEventBranch(
 	}
 	before := actor.Status
 
+	// 随机事件分支最多对同一单位的 4 个独立字段（金币/饥饿/士气/忠诚）各变更一次。
+	// 各字段目标值都基于原始 actor.Status 计算、彼此无数据依赖（一次变更只触及自身字段），
+	// 故四档目标全部先行算出，再聚成一次 ApplyBatch 收敛 DB 往返；入参顺序与逐次路径一致
+	// （金币→饥饿→士气→忠诚），事件/日志交错顺序不变。
+	var branchMutations []pendingStatusMutation
+
 	walletTarget := actor.Status.Wallet + branch.WalletDelta
 	if walletTarget < 0 {
 		walletTarget = 0
@@ -374,31 +380,23 @@ func (service *Service) applyRandomEventBranch(
 		if walletTarget < actor.Status.Wallet {
 			reasonCode = events.ReasonEconomyPurchase
 		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldWallet,
-			float64(walletTarget-actor.Status.Wallet),
-			reasonCode,
-			fmt.Sprintf("随机事件[%s]导致金币变化", branch.Label),
-		); err != nil {
-			return "", err
-		}
+		branchMutations = append(branchMutations, pendingStatusMutation{
+			record:     actor,
+			field:      status.FieldWallet,
+			delta:      float64(walletTarget - actor.Status.Wallet),
+			reasonCode: reasonCode,
+			reasonText: fmt.Sprintf("随机事件[%s]导致金币变化", branch.Label),
+		})
 	}
 	hungerTarget := clampInt(actor.Status.Hunger+branch.HungerDelta, 0, 100)
 	if hungerTarget != actor.Status.Hunger {
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldHunger,
-			float64(hungerTarget-actor.Status.Hunger),
-			events.ReasonSurvivalHunger,
-			fmt.Sprintf("随机事件[%s]导致饥饿变化", branch.Label),
-		); err != nil {
-			return "", err
-		}
+		branchMutations = append(branchMutations, pendingStatusMutation{
+			record:     actor,
+			field:      status.FieldHunger,
+			delta:      float64(hungerTarget - actor.Status.Hunger),
+			reasonCode: events.ReasonSurvivalHunger,
+			reasonText: fmt.Sprintf("随机事件[%s]导致饥饿变化", branch.Label),
+		})
 	}
 	moraleTarget := clampFloat(actor.Status.Morale+branch.MoraleDelta, 0.05, 1)
 	if moraleTarget != actor.Status.Morale {
@@ -406,17 +404,13 @@ func (service *Service) applyRandomEventBranch(
 		if moraleTarget < actor.Status.Morale {
 			reasonCode = events.ReasonEmotionTrauma
 		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldMorale,
-			moraleTarget-actor.Status.Morale,
-			reasonCode,
-			fmt.Sprintf("随机事件[%s]导致士气变化", branch.Label),
-		); err != nil {
-			return "", err
-		}
+		branchMutations = append(branchMutations, pendingStatusMutation{
+			record:     actor,
+			field:      status.FieldMorale,
+			delta:      moraleTarget - actor.Status.Morale,
+			reasonCode: reasonCode,
+			reasonText: fmt.Sprintf("随机事件[%s]导致士气变化", branch.Label),
+		})
 	}
 	loyaltyTarget := clampFloat(actor.Status.Loyalty+branch.LoyaltyDelta, 0.05, 1)
 	if loyaltyTarget != actor.Status.Loyalty {
@@ -424,17 +418,16 @@ func (service *Service) applyRandomEventBranch(
 		if loyaltyTarget < actor.Status.Loyalty {
 			reasonCode = events.ReasonRelationBetray
 		}
-		if err := service.applyStatusMutation(
-			ctx,
-			state,
-			actor,
-			status.FieldLoyalty,
-			loyaltyTarget-actor.Status.Loyalty,
-			reasonCode,
-			fmt.Sprintf("随机事件[%s]导致忠诚变化", branch.Label),
-		); err != nil {
-			return "", err
-		}
+		branchMutations = append(branchMutations, pendingStatusMutation{
+			record:     actor,
+			field:      status.FieldLoyalty,
+			delta:      loyaltyTarget - actor.Status.Loyalty,
+			reasonCode: reasonCode,
+			reasonText: fmt.Sprintf("随机事件[%s]导致忠诚变化", branch.Label),
+		})
+	}
+	if err := service.applyStatusMutationsBatch(ctx, state, branchMutations); err != nil {
+		return "", err
 	}
 
 	consumeApplied := false

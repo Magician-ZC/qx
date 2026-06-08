@@ -27,12 +27,41 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/storage/dbdialect"
 )
+
+// DefaultShardCount 是一个世界默认切成多少个子区（region 分片，§11.3）。单位按确定性哈希均匀落到子区，
+// 让 region-runner 多实例能按 region 互斥并行（每实例持租若干子区）。值取适中：太小则分片粒度粗、并行度低；
+// 太大则每区单位稀疏、调度开销摊薄差。MVP 常量；未来可按世界规模/在线人数动态分桶。
+const DefaultShardCount = 16
+
+// ShardRegionID 把一个单位确定性映射到其所属世界子区的 region_id（region 分片，§11.3）。
+//   - worldID 为空（单人局无世界）→ 回退 fallbackRegionID（调用方传 sessionID，沿用「region_id==sessionID」旧口径，
+//     与分片前完全兼容）。
+//   - worldID 非空 → FNV-32a(worldID:unitID) mod shards 算桶号，region_id = "worldID#shardN"。
+//
+// 确定性（FNV 哈希、不依赖全局 rand/时间）：同一 (world, unit) 永远落同一子区，故重排/重连/多实例看到一致归属。
+// shards<=0 时取 DefaultShardCount。前缀含 worldID 保证不同世界的同号子区天然不撞（再叠加 agentqueue 的 world 维度限定双保险）。
+func ShardRegionID(worldID, unitID, fallbackRegionID string, shards int) string {
+	if worldID == "" {
+		return fallbackRegionID
+	}
+	if shards <= 0 {
+		shards = DefaultShardCount
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(worldID))
+	_, _ = h.Write([]byte{':'})
+	_, _ = h.Write([]byte(unitID))
+	bucket := int(h.Sum32() % uint32(shards))
+	return worldID + "#" + strconv.Itoa(bucket)
+}
 
 // 作业状态。
 const (
@@ -136,6 +165,36 @@ func DistinctWakeRegions(ctx context.Context, db *sql.DB) ([]WakeRegion, error) 
 			return nil, fmt.Errorf("scan wake region: %w", err)
 		}
 		out = append(out, WakeRegion{WorldID: worldID.String, RegionID: regionID.String})
+	}
+	return out, rows.Err()
+}
+
+// DistinctWakeRegionsInWorld 是 DistinctWakeRegions 的 **world 维度** 变体（§11.3 防跨世界串唤醒接线点）：
+// 只列举 world_id == 给定 worldID 的唤醒队列里出现过的不同 region_id。region 分片落地（多世界、子区可能在不同世界
+// 同名）后，region-runner 按世界枚举待推进的 region，避免「世界 A 的实例枚举到世界 B 的同名 region」。
+// worldID 为空时退化为对 NULL world 的行做限定（单人局 world 可空），仍带 region_id IS NOT NULL 保证可被发现。
+// 不改既有 DistinctWakeRegions——后者仍是 flag 关时的零行为变化默认路径。
+func DistinctWakeRegionsInWorld(ctx context.Context, db *sql.DB, worldID string) ([]WakeRegion, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if worldID == "" {
+		rows, err = db.QueryContext(ctx, `SELECT DISTINCT world_id, region_id FROM agent_wake_queue WHERE region_id IS NOT NULL AND world_id IS NULL`)
+	} else {
+		rows, err = db.QueryContext(ctx, `SELECT DISTINCT world_id, region_id FROM agent_wake_queue WHERE region_id IS NOT NULL AND world_id = ?`, worldID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list distinct wake regions in world %q: %w", worldID, err)
+	}
+	defer rows.Close()
+	out := make([]WakeRegion, 0)
+	for rows.Next() {
+		var worldCol, regionCol sql.NullString
+		if err := rows.Scan(&worldCol, &regionCol); err != nil {
+			return nil, fmt.Errorf("scan wake region: %w", err)
+		}
+		out = append(out, WakeRegion{WorldID: worldCol.String, RegionID: regionCol.String})
 	}
 	return out, rows.Err()
 }
