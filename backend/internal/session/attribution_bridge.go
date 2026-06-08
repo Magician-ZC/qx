@@ -3,8 +3,9 @@ package session
 // 文件说明：把 engine/decision 的归因校验（「意外但合理」的代码强制，见设计宪法 §5）接入会话决策链路。
 // 接入策略：影子模式优先——决策附带的 attribution 会被校验并计入 OOC 遥测，但默认不阻断游戏决策；
 // 仅当显式开启强制（SetAttributionEnforcement(true)）时，归因判 OOC 才回退到安全决策。
-// 现阶段快照只填充「人格维(persona_trait)」与「现实压力位(pressure)」这两类 ref_id 稳定可知、
-// LLM 无需暴露内部 ID 即可正确引用的前因；memory/relation/redline 的解析需另接记忆/关系/宪章上下文（后续）。
+// 快照填充：基础态填「人格维(persona_trait)」「现实压力位(pressure)」与「红线(redline，来自离线宪章)」；
+// 生产链路（buildDecisionAttributionContext）再叠加「记忆(memory)」「关系(relation)」「玩家回响(order_echo)」
+// 等需实时存储/上下文的前因。无宪章/无 DB 时各类前因优雅缺省为空，不影响基础校验（向后兼容）。
 
 import (
 	"context"
@@ -169,6 +170,14 @@ func (service *Service) checkAttribution(actor *unit.Record, choice unitDecision
 // 「可引用记忆 ID」prompt 块。记忆/关系来自实时存储，使 memory/relation 类前因得以解析。
 func (service *Service) buildDecisionAttributionContext(ctx context.Context, state State, actor *unit.Record) (decision.Snapshot, string) {
 	snap := buildAttributionSnapshot(actor)
+	// 红线：从该单位离线宪章展平为「红线 ID→原文」填入快照，使 attribution.go 的 CauseRedline
+	// 解析（causeResolves :122）与 relevance 的 redline 锚权重得以生效。纯逻辑、无 DB；
+	// 无宪章/无红线时为空 map（保持向后兼容，不影响人格/压力基础校验）。
+	if actor != nil {
+		if redlines := charterRedlinesAsMap(&state, actor.ID); len(redlines) > 0 {
+			snap.Redlines = redlines
+		}
+	}
 	if service == nil || service.db == nil || actor == nil {
 		return snap, ""
 	}

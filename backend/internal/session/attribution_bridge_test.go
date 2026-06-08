@@ -3,6 +3,7 @@ package session
 // 文件说明：归因接入桥的单元测试——快照构造、线上结构映射、以及 checkAttribution 的影子校验。
 
 import (
+	"context"
 	"testing"
 
 	"qunxiang/backend/internal/engine/decision"
@@ -90,6 +91,42 @@ func TestCheckAttribution(t *testing.T) {
 	}}
 	if v, has := service.checkAttribution(hungry, oocChoice); !has || v.OK || v.Reason != decision.OOCCauseTooWeak {
 		t.Fatalf("未激活压力应判 CAUSE_TOO_WEAK，得到 has=%v %+v", has, v)
+	}
+}
+
+func TestBuildDecisionAttributionContext_Redlines(t *testing.T) {
+	service := &Service{} // 无 DB：仅验证宪章红线纯逻辑填充（早返回前已填）。
+	actor := &unit.Record{ID: "u1", Personality: unit.Personality{Aggression: 0.9}}
+	state := State{}
+	SetUnitCharter(&state, "u1", OfflineCharter{
+		Redlines: []CharterRedline{
+			{ID: "rl_no_harm", Text: "绝不伤害平民"},
+			{Text: "绝不背叛主公"}, // 缺 ID，应补确定性 ID
+		},
+	})
+
+	snap, _ := service.buildDecisionAttributionContext(context.Background(), state, actor)
+	if len(snap.Redlines) != 2 {
+		t.Fatalf("应载入 2 条红线，得到 %d：%+v", len(snap.Redlines), snap.Redlines)
+	}
+	if snap.Redlines["rl_no_harm"] != "绝不伤害平民" {
+		t.Fatalf("显式红线 ID 应保留原文，得到 %q", snap.Redlines["rl_no_harm"])
+	}
+
+	// 端到端：以红线为 primary 的归因应通过校验（snippet 与原文重合）。
+	attr := decision.Attribution{
+		Primary:     decision.CauseRef{Kind: decision.CauseRedline, RefID: "rl_no_harm", Weight: 0.8, SnippetZH: "绝不伤害平民"},
+		NarrativeZH: "她守住底线，未对平民下手",
+	}
+	if v := decision.ValidateAttribution(attr, snap); !v.OK {
+		t.Fatalf("红线归因应通过校验，得到 %+v", v)
+	}
+
+	// 无宪章单位：Redlines 退回空 map（向后兼容）。
+	bare := &unit.Record{ID: "u2", Personality: unit.Personality{Aggression: 0.9}}
+	bareSnap, _ := service.buildDecisionAttributionContext(context.Background(), state, bare)
+	if len(bareSnap.Redlines) != 0 {
+		t.Fatalf("无宪章单位 Redlines 应为空，得到 %d", len(bareSnap.Redlines))
 	}
 }
 

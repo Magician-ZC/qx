@@ -2,16 +2,23 @@ package regionrunner
 
 // 文件说明：region-runner PvE 接入（沙盘 §8.2 / docs/PvE威胁系统.md / docs/region-runner-PvE接入方案.md）——
 // 让被唤醒的离线 **HOT（正活跃）** 单位会在路上撞见 elite 硬茬。决策走 engine/decision.Router 的关键节点闸：
-// HP 危急先反射撤退保命（零 LLM），否则 StrategicFork 升级为遭遇。威胁刷新 MVP 用**简化确定性概率**
-// （完整的 region.threat_level 累积 + 锚加权选址登记后续）。整块 flag-gated（QUNXIANG_REGION_RUNNER_THREATS，默认关）。
+// HP 危急先反射撤退保命（零 LLM），否则 StrategicFork 升级为遭遇。整块 flag-gated（QUNXIANG_REGION_RUNNER_THREATS，默认关）。
+//
+// **威胁刷新（本切片：region.threat_level 真累积 + freshness 反扎堆）**：威胁概率的「region 威胁度项」此前用硬编码常量
+// threatBaseLevel；现改为读 region 注册表的真实 threat_level 累积值（命中威胁经 bumpRegionThreat→BumpThreatLevel 持续 +1，
+// 危险区天然越来越危险=「威胁扎堆」§11.3）。再叠一个 **freshness 反扎堆项**：同区刚出过威胁则短期内压低再次触发概率
+// （进程内 per-region 最近命中 tick，refractory 窗口内乘性衰减），避免威胁在同一区一窝蜂连刷。**破圈下限 threatFloorPerMille
+// 始终保留**（draw<floor 必命中、不受 base/freshness 影响——世界仍处处有危险，不全扎堆活跃区）。
+// 整条「读真 threat_level + freshness」**仅在分片开（QUNXIANG_REGION_SHARDING）+ registry 已注入**时生效；分片关 / registry==nil /
+// region 未登记 → 回退 threatBaseLevel 常量基线，与本切片前**逐结果等价、零行为变化**（既有 elite 触发链不受影响）。确定性：
+// roll 仍是 FNV-64a(sessionID:unitID:tick)，freshness 仅按 per-region 最近命中 tick 做确定性 refractory，不引入全局 rand。
+//
 // 真遭遇结算经**注入式 threatHandler**（main 注入 session.TriggerEliteEncounter，保持 regionrunner 不依赖 session）；
 // 未注入（PvE-1 shadow）则只计遥测、不改单位。
 //
 // 并发硬化（PvE-2 + PvE-3，与 real-2→real-3-0 同款）：触发 handler 前 maybeEncounterThreat 已查一次让位（execGuard=
 // IsExecutionRunning），故已在异步战斗执行中的会话不会触发遭遇。**PvE-3 已落地**：session.ResolveEliteEncounter 的每回合
-// HP/钱包/士气写已改用 status.Mutator.ApplyOptimistic + 冲突重试（applyEliteMutation），覆盖**所有并发写者**（不止异步战斗，
-// 还有 execGuard 不覆盖的部署期 HTTP 写）——遭遇**进行中**会话进入战斗/HTTP 写时，遭遇的写冲突即重读重试、**绝不覆盖**战斗/HTTP
-// 的写（有并发不变量测试证「战斗 hunger 写永不被遭遇覆盖」）。至此战斗可达会话开 THREATS_APPLY 已安全。
+// HP/钱包/士气写已改用 status.Mutator.ApplyOptimistic + 冲突重试（applyEliteMutation），覆盖**所有并发写者**。
 
 import (
 	"context"
@@ -27,13 +34,20 @@ import (
 const (
 	// 锚加权威胁概率参数（PvE-4，‰=千分比）。每次 HOT 唤醒的威胁概率 = region 威胁度项 + 锚密度项，夹 [破圈下限, 上限]。
 	// HOT 单位 ~每 TickSeconds 才唤醒一次，故真实遭遇频率远低于这些 per-tick ‰。
-	threatBaseLevel            = 50 // region 基线威胁度 [0,100]（MVP 常量；完整版随后台世界事件累积 + 上限/冷却）
-	threatLevelPerMilleAtFull  = 20 // threat_level=100 时贡献概率(‰)
-	threatAnchorPerMilleAtFull = 60 // anchor_density=1 时贡献概率(‰)——越在乎，威胁越易找上她
-	threatFloorPerMille        = 5  // 破圈下限(‰)：零锚单位也有的最低威胁概率（世界仍有危险，不全扎堆）
-	threatMaxPerMille          = 80 // 概率上限(‰)
+	threatBaseLevel            = 50  // region 基线威胁度 [0,100]（**回退常量**：分片关/registry==nil/region 未登记时用；分片开则被 region.threat_level 真累积值替换）
+	threatLevelMax             = 100 // region 威胁度归一上限（threat_level 被夹到 [0,threatLevelMax] 喂概率项，超量不再加成）
+	threatLevelPerMilleAtFull  = 20  // threat_level=100 时贡献概率(‰)
+	threatAnchorPerMilleAtFull = 60  // anchor_density=1 时贡献概率(‰)——越在乎，威胁越易找上她
+	threatFloorPerMille        = 5   // 破圈下限(‰)：零锚单位也有的最低威胁概率（世界仍有危险，不全扎堆）；freshness/base 再低也不破此线
+	threatMaxPerMille          = 80  // 概率上限(‰)
 	// hpMaxForThreat 是 HP clamp 上限（mutator FieldHP clampInt(0,100)），喂 Router 的 HP/HPMax 危急护栏。
 	hpMaxForThreat = 100
+
+	// freshness 反扎堆（§11.3）：同区刚出过威胁 → 短期内压低再次触发概率，避免一窝蜂连刷同一区。
+	// 衰减只作用于「base+anchor」项；破圈下限 threatFloorPerMille 不被衰减（世界处处有危险）。仅分片开 + registry 时按
+	// per-region 最近命中 tick 生效；refractory 窗口外或冷启动（无最近命中记录）→ 衰减因子=1（与无 freshness 等价）。
+	threatFreshnessWindowTicks = 8   // refractory 窗口（tick）：上次命中后多少 tick 内仍施加衰减
+	threatFreshnessMinPerMille = 100 // 紧贴上次命中（Δtick=0）时保留的「base+anchor 概率」千分比下限（=10%，即压到 1/10）；窗口内线性回升到 1000(=100%)
 )
 
 // SetThreatHandler 注入「真遭遇结算」回调（main 注入 session.TriggerEliteEncounter 包装）。
@@ -70,22 +84,127 @@ func threatRoll1000(sessionID string, unitID string, tick int64) int {
 	return int(h.Sum64() % 1000)
 }
 
-// threatSpawnPerMille 把 region 威胁度 + 锚密度算成本次唤醒的威胁概率(‰)——anchor 越高威胁越易找上她（天然扎堆她在乎处），
-// 零锚仍有破圈下限（世界仍有危险）。完整版会把 threatBaseLevel 换成随世界事件累积的 region.threat_level 并加 freshness 反扎堆。
-func threatSpawnPerMille(anchorDensity float64) int {
+// clampThreatLevel 把任意 threat_level 累积值夹到 [0,threatLevelMax]，喂概率项（负值视 0、超量封顶）。
+func clampThreatLevel(level int64) int64 {
+	if level < 0 {
+		return 0
+	}
+	if level > threatLevelMax {
+		return threatLevelMax
+	}
+	return level
+}
+
+// spawnPerMilleAtLevel 把 region 威胁度(base, [0,threatLevelMax]) + 锚密度 + freshness 千分比(freshnessPerMille, [0,1000])
+// 算成本次唤醒的威胁概率(‰)。组成：
+//   - base 项 = threatLevelPerMilleAtFull · base/threatLevelMax（region 越危险越易撞——「威胁扎堆」）；
+//   - anchor 项 = threatAnchorPerMilleAtFull · anchorDensity（越在乎威胁越易找上她）；
+//   - 两项之和先按 freshness 千分比乘性衰减（同区刚出过威胁则压低），再夹 [破圈下限, 上限]。
+//
+// **破圈下限恒保留**：哪怕 base=0 且 freshness 压到 0，仍返回 ≥threatFloorPerMille（世界处处有危险，不全扎堆活跃区）。
+func spawnPerMilleAtLevel(base int64, anchorDensity float64, freshnessPerMille int) int {
+	base = clampThreatLevel(base)
 	if anchorDensity < 0 {
 		anchorDensity = 0
 	} else if anchorDensity > 1 {
 		anchorDensity = 1
 	}
-	pm := threatLevelPerMilleAtFull*threatBaseLevel/100 + int(float64(threatAnchorPerMilleAtFull)*anchorDensity+0.5)
-	if pm < threatFloorPerMille {
-		pm = threatFloorPerMille
+	if freshnessPerMille < 0 {
+		freshnessPerMille = 0
+	} else if freshnessPerMille > 1000 {
+		freshnessPerMille = 1000
 	}
-	if pm > threatMaxPerMille {
-		pm = threatMaxPerMille
+	baseTerm := threatLevelPerMilleAtFull * int(base) / threatLevelMax
+	anchorTerm := int(float64(threatAnchorPerMilleAtFull)*anchorDensity + 0.5)
+	// freshness 只衰减「会聚集到活跃区/在乎处」的 base+anchor 项；破圈下限不被衰减。
+	weighted := (baseTerm + anchorTerm) * freshnessPerMille / 1000
+	if weighted < threatFloorPerMille {
+		weighted = threatFloorPerMille
 	}
-	return pm
+	if weighted > threatMaxPerMille {
+		weighted = threatMaxPerMille
+	}
+	return weighted
+}
+
+// threatSpawnPerMille 是回退基线版（分片关/registry 不可用时用）：region 威胁度取硬编码 threatBaseLevel 常量、无 freshness 衰减。
+// 与本切片前**逐结果等价**（保证既有 elite 触发链 + 既有测试零行为变化）。新路径见 maybeEncounterThreat 内的 spawnPerMilleAtLevel。
+func threatSpawnPerMille(anchorDensity float64) int {
+	return spawnPerMilleAtLevel(threatBaseLevel, anchorDensity, 1000)
+}
+
+// regionThreatBaseLevel 读 region 注册表的真实 threat_level 累积值作为本区威胁度基线（替换硬编码 threatBaseLevel）。
+// best-effort + flag-gated：分片关 / registry==nil / regionID 空 / region 未登记 / 读失败 → 返回 (threatBaseLevel, false)
+// 回退常量基线（与本切片前等价）。返回 ok=true 表示用的是真实累积值。
+func (r *Runner) regionThreatBaseLevel(ctx context.Context, regionID string) (int64, bool) {
+	if !shardingEnabled() || r.registry == nil || regionID == "" {
+		return threatBaseLevel, false
+	}
+	reg, err := r.registry.GetRegion(ctx, regionID)
+	if err != nil {
+		// region 未登记是常态（DistinctWakeRegions 兜底来的区可能没登记）→ Debug 即可，回退常量基线。
+		r.log.Debug("region-runner read region threat level", "region", regionID, "error", err)
+		return threatBaseLevel, false
+	}
+	return clampThreatLevel(reg.ThreatLevel), true
+}
+
+// freshnessPerMilleFor 计算同区 freshness 反扎堆千分比 [threatFreshnessMinPerMille,1000]：
+// 距上次命中越近越小（更压低 base+anchor 项），refractory 窗口外 / 无最近命中记录 → 1000（不衰减）。确定性（只看 tick 差）。
+//
+//	Δtick=0 → threatFreshnessMinPerMille（最强压制）；Δtick≥窗口 → 1000（不压制）；窗口内线性回升。
+func freshnessPerMilleFor(lastHitTick int64, tick int64, recorded bool) int {
+	if !recorded {
+		return 1000 // 无最近命中 → 不衰减
+	}
+	elapsed := tick - lastHitTick
+	if elapsed < 0 {
+		elapsed = 0 // 时钟回拨/乱序保护：视为刚命中
+	}
+	if elapsed >= threatFreshnessWindowTicks {
+		return 1000 // 窗口外 → 完全恢复
+	}
+	// 窗口内线性回升：从 min（Δ=0）到 1000（Δ=窗口）。
+	span := 1000 - threatFreshnessMinPerMille
+	return threatFreshnessMinPerMille + int(int64(span)*elapsed/threatFreshnessWindowTicks)
+}
+
+// regionFreshnessPerMille 读本区进程内最近命中 tick，算出 freshness 千分比。分片关 / registry==nil / regionID 空 → 1000（不衰减）。
+// 进程内态（threatRecency sync.Map：regionID→最近命中 tick），随进程重启清空——freshness 是短期 refractory 软抑制，
+// 重启即恢复无害（最坏多触发一两次，破圈下限/上限仍夹紧）。零值 sync.Map 可直接用，故无需在 New 里初始化。
+func (r *Runner) regionFreshnessPerMille(regionID string, tick int64) int {
+	if !shardingEnabled() || r.registry == nil || regionID == "" {
+		return 1000
+	}
+	v, ok := r.threatRecency.Load(regionID)
+	if !ok {
+		return freshnessPerMilleFor(0, tick, false)
+	}
+	return freshnessPerMilleFor(v.(int64), tick, true)
+}
+
+// recordThreatHit 记录本区在 tick 命中威胁（用于 freshness 反扎堆）。单调取最大 tick，避免乱序/并发写把记录拨回。
+// 仅在分片开 + registry 时写（与读路径同门控，flag 关时不污染 map、零行为变化）。
+func (r *Runner) recordThreatHit(regionID string, tick int64) {
+	if !shardingEnabled() || r.registry == nil || regionID == "" {
+		return
+	}
+	for {
+		prev, loaded := r.threatRecency.Load(regionID)
+		if loaded && prev.(int64) >= tick {
+			return // 已有更新或相等的记录，无需回拨
+		}
+		if loaded {
+			if r.threatRecency.CompareAndSwap(regionID, prev, tick) {
+				return
+			}
+			continue // CAS 失败（并发改过）→ 重读重试
+		}
+		if _, dup := r.threatRecency.LoadOrStore(regionID, tick); !dup {
+			return
+		}
+		// LoadOrStore 发现已被并发写入 → 回到循环按单调比较。
+	}
 }
 
 // bumpRegionThreat 把一次威胁命中累计到 region.threat_level（威胁扎堆，§11.3）。best-effort + flag-gated：
@@ -115,6 +234,18 @@ func situationFromRecord(record unit.Record, tick int64) decision.Situation {
 	}
 }
 
+// resolveSpawnThreshold 算本次唤醒的威胁阈值(‰)：分片开 + registry 时用 region.threat_level 真累积值 + freshness 反扎堆 + 锚密度；
+// 否则回退 threatBaseLevel 常量基线 + 锚密度（与本切片前等价）。anchorDensity 由调用方按需查（命中区间才查，省 DB）。
+func (r *Runner) resolveSpawnThreshold(ctx context.Context, regionID string, anchorDensity float64, tick int64) int {
+	base, real := r.regionThreatBaseLevel(ctx, regionID)
+	if !real {
+		// 回退路径：与 threatSpawnPerMille(anchorDensity) 逐结果一致（base=threatBaseLevel、无 freshness 衰减）。
+		return spawnPerMilleAtLevel(base, anchorDensity, 1000)
+	}
+	fresh := r.regionFreshnessPerMille(regionID, tick)
+	return spawnPerMilleAtLevel(base, anchorDensity, fresh)
+}
+
 // maybeEncounterThreat：HOT 单位确定性 roll 威胁；命中则过 Router——HP 危急撤退保命 / 否则关键节点遭遇。
 // 返回 handled=true 表示本次唤醒被威胁消耗（调用方据返回 tier 重排、不再走日常 ambient）。
 // flag 关 / 非 HOT / 未命中 → handled=false（继续日常 ambient）。真遭遇仅在注入了 handler 时发生（PvE-2）；
@@ -123,26 +254,29 @@ func (r *Runner) maybeEncounterThreat(ctx context.Context, job *agentqueue.Decis
 	if !r.threatsEnabled || currentTier != scheduler.TierHot {
 		return false, scheduler.TierCold
 	}
-	// 锚加权（PvE-4）：越在乎的角色威胁越易找上她。先抽样、仅当 draw 落在「锚相关区间」[floor,max) 才查锚密度——
-	// draw≥max 必不命中、draw<floor 必命中（破圈），都无需查密度，省掉约 92% 的 anchorDensity DB 查询。
-	// （anchorDensity 变化慢，未来可进一步缓存；当前按需查已足够稀疏。）
+	// 锚加权（PvE-4）+ region.threat_level 真累积（本切片）：先抽样、仅当 draw 落在「可变阈值带」[floor,max) 才查
+	// region threat_level / freshness / 锚密度——draw≥max 必不命中、draw<floor 必命中（破圈），都无需查，省掉约 92% DB 查询。
+	// 关键不变量：base/freshness/anchor 调高调低只会把阈值落在 [floor,max] 内，故 draw≥max 短路必不命中、draw<floor 必命中
+	// 对任意 base/freshness 都成立（破圈下限恒保留），与「直接 draw < resolveSpawnThreshold(...)」逐结果等价。
 	draw := threatRoll1000(job.SessionID, job.UnitID, tick)
 	if draw >= threatMaxPerMille {
 		return false, scheduler.TierCold // 超过任何可能阈值 → 必不命中
 	}
-	if draw >= threatFloorPerMille { // 破圈下限以上：按锚密度阈值判定（以下则必命中）
+	if draw >= threatFloorPerMille { // 破圈下限以上：按 region 威胁度+freshness+锚密度阈值判定（以下则必命中）
 		density := 0.0
 		if r.anchorDensity != nil {
 			density = r.anchorDensity(ctx, job.UnitID)
 		}
-		if draw >= threatSpawnPerMille(density) {
+		if draw >= r.resolveSpawnThreshold(ctx, job.RegionID, density, tick) {
 			return false, scheduler.TierCold
 		}
 	}
 	atomic.AddInt64(&r.st.threatsRolled, 1)
-	// 威胁扎堆（§11.3）：命中威胁 → 把该 region 的 threat_level +1 累计，让威胁在高活跃区天然扎堆（后续刷新可读 region.threat_level
-	// 加权）。best-effort + flag-gated：分片关 / registry==nil / region 未登记时静默跳过，绝不影响遭遇结算。
+	// 威胁扎堆（§11.3）：命中威胁 → ① region.threat_level +1 累计（让威胁在高活跃区天然扎堆，下次刷新读到更高基线）；
+	// ② 记本区最近命中 tick（freshness 反扎堆：短期内压低同区再次触发，避免一窝蜂连刷）。两者一升一抑，长期扎堆+短期错峰。
+	// best-effort + flag-gated：分片关 / registry==nil / region 未登记时静默跳过，绝不影响遭遇结算。
 	r.bumpRegionThreat(ctx, job.RegionID)
+	r.recordThreatHit(job.RegionID, tick)
 
 	dec := r.threatRouter.Route(situationFromRecord(record, tick))
 	if dec.Intent.Action == decision.ActionFlee {

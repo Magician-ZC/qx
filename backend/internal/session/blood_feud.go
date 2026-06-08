@@ -12,12 +12,17 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/worldbus"
 )
@@ -39,6 +44,13 @@ const (
 
 	// bloodFeudGriefMorale 最亲近哀悼者的哀恸士气下挫幅度（负向，经 Mutator clamp 落地）。
 	bloodFeudGriefMorale = -0.06
+
+	// bloodFeudMaxHop 血仇沿关系图传播的最大跳数（对齐 relevance.MaxHops=2，防全图洪泛）。
+	// hop=0 直系哀悼者；hop=1「在乎死者的人」的至亲；hop=2「在乎『在乎死者的人』的人」（二手消息）。
+	bloodFeudMaxHop = relevance.MaxHops
+
+	// bloodFeudHopFanout 每一跳从一个已知哀悼者出发，最多再扩展的邻居数（控指数爆炸）。
+	bloodFeudHopFanout = 8
 )
 
 // bloodFeudEnabled 读 QUNXIANG_BLOOD_FEUD（true/1/yes/on 视为开），默认关 → propagateBloodFeud 整段 no-op、零行为变化、零 DB 写。
@@ -51,14 +63,25 @@ func bloodFeudEnabled() bool {
 	}
 }
 
-// mournerBond 是一个哀悼者对死者的关系快照（四轴）+ 传播跳数，用于推导「该继承多少敌意」。
+// mournerBond 是一个哀悼者对「上一跳节点」的关系快照（四轴）+ 传播跳数，用于推导「该继承多少敌意」。
+// hop=0 时四轴是哀悼者对**死者**的关系；hop>0 时是哀悼者对**上一跳哀悼者**（FromUnit）的关系——
+// 即「在乎『在乎死者的人』」，二手消息按 HopFidelity 失真衰减。
 type mournerBond struct {
 	MournerID string
+	FromUnit  string // 这一跳消息从谁传来：hop=0 为死者本人；hop>0 为上一跳哀悼者（propagation_log 的 from_unit）
 	Trust     float64
 	Fear      float64
 	Affection float64
 	Rivalry   float64
 	Hop       int // 0=直系（直接对死者有关系记录）；>0=经关系图多跳传播（递减可信度）
+}
+
+// bloodFeudNullableUnit 把空 unit id 映射为 SQL NULL（propagation_log.from_unit 可空：源头跳无上游）。
+func bloodFeudNullableUnit(id string) any {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return id
 }
 
 // careRelevanceForDeceased 把哀悼者对死者的关系四轴，经 engine/relevance 翻译成「牵挂相关度」∈ [0,1]。
@@ -130,10 +153,19 @@ func (service *Service) propagateBloodFeud(
 		return // 无凶手（自然死/环境死）或自戕 → 无世仇可传
 	}
 
+	// 多跳关系图传播：hop=0 直系哀悼者 → hop=1「在乎死者的人」的至亲 → hop=2「在乎『在乎死者的人』的人」。
+	// 每跳带 from_unit（消息从谁传来）+ HopFidelity(hop)=0.6^hop 的二手失真，强度随跳衰减。
 	bonds := service.loadMournerBonds(ctx, deceased.ID, perpetratorID, bloodFeudMournerLimit)
 	if len(bonds) == 0 {
 		return
 	}
+
+	sessionID := ""
+	if state != nil {
+		sessionID = state.ID
+	}
+	// origin_event_id：以「死者+凶手」派生确定性源 id，使同一桩死亡的多跳传播留痕可串联回溯（无随机、可复现）。
+	originEventID := bloodFeudOriginEventID(sessionID, deceased.ID, perpetratorID)
 
 	perp := unit.Record{ID: perpetratorID}
 	reason := deceased.DisplayName() + " 之死，血债待偿"
@@ -143,6 +175,9 @@ func (service *Service) propagateBloodFeud(
 		if rivalryDelta <= 0 && fearDelta <= 0 {
 			continue // 不在乎死者 / 纯敌视者：不继承血仇
 		}
+		// 0) 传播留痕：这一跳的边（from_unit→该哀悼者）+ 跳数 + HopFidelity 失真，进 propagation_log（best-effort）。
+		service.logBloodFeudPropagation(ctx, sessionID, originEventID, b.FromUnit, b.MournerID, b.Hop)
+
 		// 1) 哀悼者 → 凶手：继承敌意（rivalry+ / fear+），经既有 applyRelationShift（四轴、clamp±10、留痕）。
 		mourner := unit.Record{ID: b.MournerID}
 		_, _ = service.applyRelationShift(ctx, state, &mourner, &perp, relationDelta{
@@ -151,7 +186,8 @@ func (service *Service) propagateBloodFeud(
 		}, reason)
 
 		// 2) 最亲近的几位哀悼者：哀恸士气下挫（经 status.Mutator，绝不直改 unit.Status）。
-		if griefApplied < bloodFeudMaxGriefMourners && careRelevanceForDeceased(b) >= bloodFeudGriefThreshold {
+		//    仅直系（hop=0）才施加哀恸——二手消息不致深切悲恸。
+		if b.Hop == 0 && griefApplied < bloodFeudMaxGriefMourners && careRelevanceForDeceased(b) >= bloodFeudGriefThreshold {
 			if service.applyBloodFeudGrief(ctx, state, b.MournerID, deceased, byID) {
 				griefApplied++
 			}
@@ -160,6 +196,41 @@ func (service *Service) propagateBloodFeud(
 		// 3) 世界总线留痕 + 命运卡（best-effort，各自吞错）。
 		service.surfaceBloodFeud(ctx, state, worldID, b.MournerID, perpetratorID, deceased)
 	}
+}
+
+// bloodFeudOriginEventID 由 (session|deceased|perpetrator) 派生确定性传播源 id，
+// 使同一桩死亡引发的多跳传播在 propagation_log 中共享 origin_event_id，可回溯串联（无随机、可复现）。
+func bloodFeudOriginEventID(sessionID, deceasedID, perpetratorID string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("blood_feud_origin:" + sessionID + ":" + deceasedID + ":" + perpetratorID))
+	return fmt.Sprintf("bf_%016x", h.Sum64())
+}
+
+// logBloodFeudPropagation 把血仇传播的一跳（from→to，hop，fidelity=0.6^hop）追加进 propagation_log（append-only 留痕）。
+// best-effort：缺 db / to 空 → 跳过；写失败吞错，绝不影响传播继续。确定性行 id 由 (origin|from|to|hop) 派生（幂等去重）。
+func (service *Service) logBloodFeudPropagation(ctx context.Context, sessionID, originEventID, fromUnit, toUnit string, hop int) {
+	if service == nil || service.db == nil || strings.TrimSpace(toUnit) == "" {
+		return
+	}
+	fidelity := relevance.HopFidelity(hop)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("blood_feud_prop:" + originEventID + ":" + fromUnit + ":" + toUnit + ":" + strconv.Itoa(hop)))
+	rowID := fmt.Sprintf("pl_%016x", h.Sum64())
+	// 定宽 UTC 时间串（字典序==时间序，双驱动 ORDER BY created_at 一致；MySQL 列默认空串故须显式写）。
+	createdAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+	if dbdialect.IsMySQL(service.db) {
+		_, _ = service.db.ExecContext(ctx,
+			`INSERT INTO propagation_log (id, session_id, origin_event_id, from_unit, to_unit, hop, fidelity, created_at)
+			 VALUES (?,?,?,?,?,?,?,?)
+			 ON DUPLICATE KEY UPDATE fidelity=VALUES(fidelity)`,
+			rowID, sessionID, originEventID, bloodFeudNullableUnit(fromUnit), toUnit, hop, fidelity, createdAt)
+		return
+	}
+	_, _ = service.db.ExecContext(ctx,
+		`INSERT INTO propagation_log (id, session_id, origin_event_id, from_unit, to_unit, hop, fidelity, created_at)
+		 VALUES (?,?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET fidelity=excluded.fidelity`,
+		rowID, sessionID, originEventID, bloodFeudNullableUnit(fromUnit), toUnit, hop, fidelity, createdAt)
 }
 
 // applyBloodFeudGrief 给一位哀悼者施加哀恸士气下挫（经 status.Mutator，reason=BLOOD_FEUD_GRIEF）。
@@ -229,9 +300,16 @@ func (service *Service) surfaceBloodFeud(ctx context.Context, state *State, worl
 	})
 }
 
-// loadMournerBonds 读取「在乎死者」的人对死者的关系四轴（直系 hop=0），按关系强度降序，排除凶手本人与死者本人。
-// 当前仅取直系哀悼者（与死者有直接关系记录）；多跳传播的可信度衰减由 bloodFeudInheritance 的 Hop 字段承载，
-// 留作后续接入（取关系图二跳邻居）。best-effort：查询失败返回空（调用方据此 no-op）。
+// loadMournerBonds 沿关系图做**多跳**哀悼者发现（确定性 BFS，hop 0→bloodFeudMaxHop）：
+//   - hop=0：直接在乎死者的人（relations.target=死者），FromUnit=死者；
+//   - hop=1：在乎「直系哀悼者」的人（relations.target=某直系哀悼者），即「在乎『在乎死者的人』的人」，FromUnit=该直系哀悼者；
+//   - hop=2：再外扩一圈（二手再二手）。
+//
+// 二手消息失真由 mournerBond.Hop 承载——careRelevanceForDeceased/bloodFeudInheritance 经 relevance.HopFidelity(hop)=0.6^hop
+// 让 hop 越远的哀悼者继承的敌意越弱。每跳从一个已知哀悼者扇出 bloodFeudHopFanout 个最强邻居（控指数爆炸），
+// 全图去重（一个人只按其**最浅**跳数记一次，先到先得）。返回按 (hop 升序, 关系强度降序) 排列，hop=0 在前。
+//
+// best-effort：任一跳查询失败只截断该跳、返回已发现的；凶手本人/死者本人/已访问者跳过。确定性：仅靠关系强度排序，无随机。
 func (service *Service) loadMournerBonds(ctx context.Context, deceasedID string, perpetratorID string, limit int) []mournerBond {
 	if service == nil || service.db == nil || strings.TrimSpace(deceasedID) == "" {
 		return nil
@@ -239,34 +317,84 @@ func (service *Service) loadMournerBonds(ctx context.Context, deceasedID string,
 	if limit <= 0 {
 		limit = bloodFeudMournerLimit
 	}
+
+	bonds := make([]mournerBond, 0, limit)
+	visited := map[string]bool{deceasedID: true, perpetratorID: true} // 死者/凶手不作哀悼者
+	// frontier：当前跳已确定的「上一跳节点」集合（hop=0 的前沿是死者本人）。
+	frontier := []string{deceasedID}
+
+	for hop := 0; hop <= bloodFeudMaxHop; hop++ {
+		if len(bonds) >= limit || len(frontier) == 0 {
+			break
+		}
+		// 每跳从 frontier 出发收集邻居（在乎 frontier 节点的人）作为本跳哀悼者，并作为下一跳的前沿。
+		nextFrontier := make([]string, 0, len(frontier)*bloodFeudHopFanout)
+		// hop=0 直系哀悼者用整 limit；hop>0 每个上游节点限 bloodFeudHopFanout 扇出。
+		perNodeLimit := bloodFeudHopFanout
+		if hop == 0 {
+			perNodeLimit = limit
+		}
+		for _, fromUnit := range frontier {
+			if len(bonds) >= limit {
+				break
+			}
+			neighbors := service.loadCarersOf(ctx, fromUnit, perNodeLimit)
+			for _, nb := range neighbors {
+				if len(bonds) >= limit {
+					break
+				}
+				if nb.MournerID == "" || visited[nb.MournerID] {
+					continue // 全图去重：只按最浅跳数记一次
+				}
+				visited[nb.MournerID] = true
+				nb.Hop = hop
+				nb.FromUnit = fromUnit
+				bonds = append(bonds, nb)
+				nextFrontier = append(nextFrontier, nb.MournerID)
+			}
+		}
+		frontier = nextFrontier
+	}
+	return bonds
+}
+
+// loadCarersOf 读「在乎 targetID 的人」对 targetID 的关系四轴（relations.target=targetID），按关系强度降序取前 limit。
+// 多跳 BFS 的一跳扩展原语：hop=0 时 targetID=死者→得直系哀悼者；hop>0 时 targetID=上一跳哀悼者→得二手哀悼者。
+// best-effort：查询失败返回空（调用方据此截断该跳）。Hop/FromUnit 由调用方填充（本函数只取关系快照）。
+func (service *Service) loadCarersOf(ctx context.Context, targetID string, limit int) []mournerBond {
+	if service == nil || service.db == nil || strings.TrimSpace(targetID) == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = bloodFeudHopFanout
+	}
 	rows, err := service.db.QueryContext(
 		ctx,
 		`SELECT source_unit_id, trust, fear, affection, rivalry FROM relations
 		 WHERE target_unit_id = ?
-		 ORDER BY (ABS(trust) + ABS(fear) + ABS(affection) + ABS(rivalry)) DESC
+		 ORDER BY (ABS(trust) + ABS(fear) + ABS(affection) + ABS(rivalry)) DESC, source_unit_id ASC
 		 LIMIT ?`,
-		deceasedID, limit,
+		targetID, limit,
 	)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
-	bonds := make([]mournerBond, 0, limit)
+	out := make([]mournerBond, 0, limit)
 	for rows.Next() {
 		var b mournerBond
 		if scanErr := rows.Scan(&b.MournerID, &b.Trust, &b.Fear, &b.Affection, &b.Rivalry); scanErr != nil {
 			continue
 		}
-		if b.MournerID == "" || b.MournerID == deceasedID || b.MournerID == perpetratorID {
-			continue // 死者本人 / 凶手自己不哀悼
+		if b.MournerID == "" || b.MournerID == targetID {
+			continue
 		}
-		b.Hop = 0 // 直系哀悼者
-		bonds = append(bonds, b)
+		out = append(out, b)
 	}
 	if rows.Err() != nil {
 		return nil
 	}
-	return bonds
+	return out
 }
 
 // BloodFeudEntry 是某角色的一条世仇关系（她对某人怀有的、以 rivalry/fear 为主的强敌意）。
@@ -318,4 +446,136 @@ func (service *Service) ListBloodFeuds(ctx context.Context, unitID string, limit
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// ── 血仇衍生撮合：让世仇成为撮合候选来源（设计 docs/事件耦合与跨玩家关联.md §2.2 的「钩子驱动撮合」）──
+//
+// 直觉：两个对**同一个人**怀有血仇的角色，天然有「共同的敌人」这条强叙事钩子——可被撮合进一个
+// common_enemy / 复仇同盟类社会客体（「敌人的敌人是朋友」）。本段产出这类候选，交给既有
+// MatchIntoSocialObject 打分→过门→arbitration 确定性择人。flag-gated（QUNXIANG_BLOOD_FEUD 关→空）、
+// 确定性（仅靠关系强度 + sessionID 派生的钩子，无随机）、best-effort（查询失败返回空）。
+
+const (
+	// bloodFeudMatchKind 血仇衍生社会客体的类型（共敌同盟）。
+	bloodFeudMatchKind = "common_enemy"
+	// bloodFeudMatchLabelPrefix 标签前缀（后接共同仇敌的 id，使不同仇敌产出不同确定性社会客体）。
+	bloodFeudMatchLabelPrefix = "共敌·"
+	// bloodFeudMatchMinAllies 共敌同盟最少需要的成员数（一个人不成「同盟」）。
+	bloodFeudMatchMinAllies = 2
+)
+
+// BloodFeudMatchGroup 是一组「对同一仇敌怀有血仇」的候选 + 其撮合元数据，供 Wire 阶段喂给 MatchIntoSocialObject。
+type BloodFeudMatchGroup struct {
+	EnemyID    string           // 共同仇敌的 unit id（社会客体的撮合锚）
+	Kind       string           // 社会客体类型（common_enemy）
+	Label      string           // 社会客体标签（共敌·<enemyID>）
+	Candidates []MatchCandidate // 对该仇敌怀有血仇的角色们（四因子已填，可直接撮合）
+}
+
+// BloodFeudMatchCandidates 扫描候选单位的世仇关系，按「共同仇敌」聚类，产出 common_enemy 撮合候选组。
+// 对每个被≥bloodFeudMatchMinAllies 名候选共同怀恨的仇敌，组一个候选组；组内每名角色的四因子：
+//   - RelationIntersect = 其对该共敌的世仇强度归一（恨得越深越该入伙）；
+//   - HookFit = sessionID+enemy+unit 派生的确定性「复仇钩子」契合度（无全局 rand，可复现）；
+//   - GeoNear/DensityAdj 由 Wire 阶段按情境补全（这里不读地理/锚密度，保持本文件自洽与确定性）。
+//
+// flag 关 / 无 db / 候选不足 → 返回 nil（调用方据此 no-op）。确定性：仇敌按 id 升序、组内候选按 id 升序。best-effort。
+func (service *Service) BloodFeudMatchCandidates(ctx context.Context, sessionID string, candidateUnits []unit.Record) []BloodFeudMatchGroup {
+	if !bloodFeudEnabled() {
+		return nil // flag 关：零行为变化
+	}
+	if service == nil || service.db == nil || len(candidateUnits) < bloodFeudMatchMinAllies {
+		return nil
+	}
+
+	// 共敌 → 怀恨者列表（每项含怀恨者 id 与其对该共敌的世仇强度）。
+	// 候选池即 candidateUnits（只在传入的角色之间撮合共敌同盟；仇敌本身无须在池内）。
+	type hater struct {
+		unitID  string
+		rivalry float64
+	}
+	byEnemy := make(map[string][]hater)
+	for i := range candidateUnits {
+		uid := candidateUnits[i].ID
+		if uid == "" {
+			continue
+		}
+		feuds, err := service.ListBloodFeuds(ctx, uid, bloodFeudMournerLimit)
+		if err != nil {
+			continue // best-effort：该角色查询失败只跳过她
+		}
+		for _, f := range feuds {
+			if f.TargetUnitID == "" || f.TargetUnitID == uid {
+				continue
+			}
+			byEnemy[f.TargetUnitID] = append(byEnemy[f.TargetUnitID], hater{unitID: uid, rivalry: f.Rivalry})
+		}
+	}
+	if len(byEnemy) == 0 {
+		return nil
+	}
+
+	// 仇敌按 id 升序遍历（确定性），对每个被≥min 名候选共恨的仇敌组一个候选组。
+	enemyIDs := make([]string, 0, len(byEnemy))
+	for enemyID := range byEnemy {
+		enemyIDs = append(enemyIDs, enemyID)
+	}
+	sortStrings(enemyIDs)
+
+	groups := make([]BloodFeudMatchGroup, 0, len(enemyIDs))
+	for _, enemyID := range enemyIDs {
+		haters := byEnemy[enemyID]
+		if len(haters) < bloodFeudMatchMinAllies {
+			continue // 只有一个人恨他，不成共敌同盟
+		}
+		// 组内按怀恨者 id 升序（确定性，插入排序）。
+		for i := 1; i < len(haters); i++ {
+			for j := i; j > 0 && haters[j-1].unitID > haters[j].unitID; j-- {
+				haters[j-1], haters[j] = haters[j], haters[j-1]
+			}
+		}
+		cands := make([]MatchCandidate, 0, len(haters))
+		for _, h := range haters {
+			cands = append(cands, MatchCandidate{
+				UnitID:            h.unitID,
+				RelationIntersect: bloodFeudHatredNorm(h.rivalry), // 恨得越深越该入伙
+				HookFit:           bloodFeudRevengeHook(sessionID, enemyID, h.unitID),
+				// GeoNear / DensityAdj 留给 Wire 阶段按情境补（本文件不读地理/锚密度）。
+			})
+		}
+		groups = append(groups, BloodFeudMatchGroup{
+			EnemyID:    enemyID,
+			Kind:       bloodFeudMatchKind,
+			Label:      bloodFeudMatchLabelPrefix + enemyID,
+			Candidates: cands,
+		})
+	}
+	return groups
+}
+
+// bloodFeudHatredNorm 把对共敌的 rivalry（[-10,10] 量级）归一为 [0,1] 的「入伙意愿」（仅取正向，rivalry≤0 即 0）。
+func bloodFeudHatredNorm(rivalry float64) float64 {
+	if rivalry <= 0 {
+		return 0
+	}
+	v := rivalry / 10.0
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// bloodFeudRevengeHook 用 sessionID+enemy+unit 的 FNV 派生稳定的 [0,1]「复仇钩子」契合度（无全局 rand，可复现）。
+func bloodFeudRevengeHook(sessionID, enemyID, unitID string) float64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("blood_feud_revenge_hook:" + sessionID + ":" + enemyID + ":" + unitID))
+	return float64(h.Sum64()%10000) / 10000.0
+}
+
+// sortStrings 对字符串切片做升序原地排序（确定性遍历用；不引 sort 包以保持本文件依赖最小）。
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
 }

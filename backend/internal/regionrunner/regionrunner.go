@@ -209,6 +209,9 @@ type Runner struct {
 	threatRouter   decision.Router                                           // 关键节点闸（HP 危急撤退 / StrategicFork 升级）
 	threatHandler  func(ctx context.Context, sessionID, unitID string) error // 真遭遇结算（nil=shadow 只计遥测）
 	anchorDensity  func(ctx context.Context, unitID string) float64          // 锚密度查询（PvE-4 锚加权；nil=密度恒 0）
+	// 威胁刷新 freshness 反扎堆（见 threat.go）：regionID → 最近一次命中威胁的 tick（进程内态，零值 sync.Map 可直接用、无需 New 初始化）。
+	// 仅分片开 + registry 时读写；同区刚出过威胁则短期内压低再次触发概率，避免一窝蜂连刷。重启清空无害（短期 refractory 软抑制）。
+	threatRecency sync.Map
 }
 
 // New 构造 region-runner。now 用 time.Now；execGuard 默认恒 false（无战斗让位，测试/未接 session 时）。

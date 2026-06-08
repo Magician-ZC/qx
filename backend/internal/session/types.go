@@ -187,16 +187,45 @@ type GroundLootDrop struct {
 
 // Directive 结构体用于承载该模块的核心数据。
 type Directive struct {
-	ID           string        `json:"id"`
-	Turn         int           `json:"turn"`
-	Phase        turns.Phase   `json:"phase"`
-	Kind         DirectiveKind `json:"kind,omitempty"`
-	Text         string        `json:"text"`
-	Priority     string        `json:"priority,omitempty"`
-	TargetUnitID string        `json:"target_unit_id,omitempty"`
-	IssuedAt     time.Time     `json:"issued_at"`
-	IssuedBy     string        `json:"issued_by"`
-	AppliesTo    string        `json:"applies_to"`
+	ID           string         `json:"id"`
+	Turn         int            `json:"turn"`
+	Phase        turns.Phase    `json:"phase"`
+	Kind         DirectiveKind  `json:"kind,omitempty"`
+	Scope        DirectiveScope `json:"scope,omitempty"` // 指令作用域：空=即时回合指令（默认）；offline_charter=离线宪章长效授权
+	Text         string         `json:"text"`
+	Priority     string         `json:"priority,omitempty"`
+	TargetUnitID string         `json:"target_unit_id,omitempty"`
+	IssuedAt     time.Time      `json:"issued_at"`
+	IssuedBy     string         `json:"issued_by"`
+	AppliesTo    string         `json:"applies_to"`
+}
+
+// DirectiveScope 标记一条指令的作用域/时效域。
+// 默认空值代表「即时回合指令」（沿用原有 Doctrine/Task/Order 当回合生效语义，向后兼容）；
+// offline_charter 代表「离线宪章」——玩家不在场时单位据此自治（长效授权，写进 OfflineCharter 而非随回合刷新）。
+type DirectiveScope string
+
+// 常量定义区：集中声明指令作用域取值。
+const (
+	DirectiveScopeImmediate      DirectiveScope = ""                // 即时回合指令（默认零值，向后兼容旧存档）
+	DirectiveScopeOfflineCharter DirectiveScope = "offline_charter" // 离线宪章：玩家不在场时的长效自治授权
+)
+
+// CharterRedline 是离线宪章里的一条红线（绝对禁区/底线），供归因校验器作锚（snap.Redlines）与硬门拦截。
+type CharterRedline struct {
+	ID       string `json:"id"`
+	Text     string `json:"text"`
+	Severity string `json:"severity,omitempty"` // 严重度：soft/hard 等（空=默认普通），由上层逻辑解释
+}
+
+// OfflineCharter 是单个单位的「离线宪章」——玩家不在场时单位据此自治的三段长效授权。
+// 三段语义：LongTermGoals 长期目标（驱动目标重估/记忆写入）、Redlines 红线（绝对禁区，喂归因校验 snap.Redlines）、
+// SocialMandates 社交授权（允许/鼓励的社会行为，如「可代我结盟」「勿与某派结仇」）。
+// per-unit 归属，挂进 State.UnitCharters[unitID]；整块随 state_json 持久化（全 omitempty 保旧存档反序列化）。
+type OfflineCharter struct {
+	LongTermGoals  []string         `json:"long_term_goals,omitempty"`
+	Redlines       []CharterRedline `json:"redlines,omitempty"`
+	SocialMandates []string         `json:"social_mandates,omitempty"`
 }
 
 // DirectiveKind 类型定义用于统一该模块的数据表达。
@@ -564,8 +593,11 @@ type State struct {
 	GroundLootDrops      []GroundLootDrop   `json:"ground_loot_drops,omitempty"`
 	GlobalDirective      Directive          `json:"global_directive"`
 	DirectiveHistory     []Directive        `json:"directive_history"`
-	DialogueHistory      []DialogueMessage  `json:"dialogue_history"`
-	DecisionTraces       []DecisionTrace    `json:"decision_traces"`
+	// UnitCharters 是每单位的离线宪章（unitID → OfflineCharter），玩家不在场时单位据此自治。
+	// 长效授权（区别于随回合刷新的 Directive），整块随 state_json 持久化；omitempty 保旧存档反序列化。
+	UnitCharters    map[string]OfflineCharter `json:"unit_charters,omitempty"`
+	DialogueHistory []DialogueMessage         `json:"dialogue_history"`
+	DecisionTraces  []DecisionTrace           `json:"decision_traces"`
 	LLMInteractions      []LLMInteraction   `json:"llm_interactions"`
 	PigeonQueue          []PigeonDispatch   `json:"pigeon_queue"`
 	Pregnancies          []PregnancyState   `json:"pregnancies,omitempty"`

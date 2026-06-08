@@ -3,10 +3,13 @@ package session
 // 文件说明：把 villageseed 生成的「出生即 20 人关系网」持久化进本局（设计宪法 §4.5）。
 // 复用既有底座：unit.BootstrapRecord 建人、units.Save 落库、world.Join 入世界、applyRelationShift 织关系。
 // 出身/种子记忆/人生目标写进 Biography（决策 prompt 会读到）；秘密与目标作为锚由 M2.3 的 relevance_anchors 接手。
+// 出生仇怨/宿敌另写入可查询的结构化记忆（rememberBirthBond/rememberBirthSelf 调既有 rememberUnitWithSource API），
+// 让「出生即结仇」进入记忆检索/衰减/闪回链路，而不只停在关系行与锚里。
 
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"strings"
@@ -17,6 +20,9 @@ import (
 	"qunxiang/backend/internal/villageseed"
 	"qunxiang/backend/internal/world"
 )
+
+// villageBirthTurn 是出生关系网记忆的回合标签：村庄在建局即成形，记忆挂在第 1 回合（最早的人生底色）。
+const villageBirthTurn = 1
 
 // SeededVillager 是一名已落库的村民，连同其原始种子档案（供上层接锚/叙事）。
 type SeededVillager struct {
@@ -51,6 +57,8 @@ func (service *Service) SeedVillage(ctx context.Context, sessionID string, facti
 		rec.Identity.Age = m.Age
 		rec.Identity.Lineage = m.Archetype
 		rec.Identity.Biography = fmt.Sprintf("%s出身。%s 心里一直惦记着一件事：%s。", m.Archetype, m.SeedMemory, m.LifeGoal)
+		// 按出身原型/人生目标精化六维野心（覆盖 BootstrapRecord 的 wanderer 基线，让村民野心有出身倾向）。
+		rec.Ambition = unit.DeriveAmbition(seed+int64(i)*1009, m.Archetype, m.LifeGoal)
 		if err := service.units.Save(ctx, rec); err != nil {
 			return out, fmt.Errorf("save villager %d: %w", i, err)
 		}
@@ -78,13 +86,103 @@ func (service *Service) SeedVillage(ctx context.Context, sessionID string, facti
 		if intensity >= 8 {
 			_ = service.UpsertAnchor(ctx, src.ID, relevance.DebtGrudgeLove, tgt.ID, clampFloat(intensity/24.0, 0, 1), b.Kind+"："+tgt.Identity.Name, relationAnchorHalfLife)
 		}
+		// 把这份出生恩怨写成可检索/可衰减/可闪回的真实记忆：源村民「记得」对方与这段关系。
+		// 仇怨（宿敌/猜忌/债主）情绪权重更高、重要度加成更大，让它能被记忆链路召回并触发闪回。
+		// best-effort：记忆写入失败绝不打断 20 人关系网生成（仇怨记忆是关系网之上的增量层）。
+		service.rememberBirthBond(ctx, &records[b.From], worldID, seed, b, tgt.Identity.Name)
 	}
 
 	// 每人的人生目标沉淀为持久 goal 锚（M3/事件标注目标后即可命中；现在先建好）。
+	// 同时把「定调的种子记忆」写成真实记忆——这是每名村民最早的人生底色，可被检索/衰减/闪回。
 	for i, m := range v.Members {
 		_ = service.UpsertAnchor(ctx, records[i].ID, relevance.Goal, "goal:"+records[i].ID, clampFloat(0.5+m.Traits.Ambition*0.5, 0, 1), m.LifeGoal, 0)
+		service.rememberBirthSelf(ctx, &records[i], m)
 	}
 	return out, nil
+}
+
+// birthBondMemorySource 按关系类型把出生恩怨归到记忆来源标签：
+// 仇怨类（宿敌/猜忌/债主）走 village_birth_feud，便于上层按来源筛「与谁结仇」；温情类走 village_birth_bond。
+func birthBondMemorySource(kind string) (source string, isFeud bool) {
+	switch kind {
+	case "宿敌", "猜忌", "债主":
+		return "village_birth_feud", true
+	default:
+		return "village_birth_bond", false
+	}
+}
+
+// birthBondMemoryText 确定性地把一条出生关系渲染成一句带对方名字与恩怨语义的记忆文本。
+// 文本含「仇/恨/信任/背叛」等关键词，使下游 inferMemoryCategory/inferMemoryEmotionWeight 能正确归类、加权，
+// 从而让出生仇怨真正进入记忆检索/衰减/闪回链路（而不是只在关系行与锚里）。
+// 确定性：同一 (worldID, seed, bond) 永远渲染同一句话（用项目约定的 FNV-64a 哈希挑措辞变体，不用全局随机）。
+func birthBondMemoryText(worldID string, seed int64, b villageseed.Bond, targetName string) string {
+	salt := fmt.Sprintf("birthbond|%s|%d|%d->%d|%s", worldID, seed, b.From, b.To, b.Kind)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(salt))
+	sum := h.Sum64()
+	pick := func(variants []string) string { return variants[sum%uint64(len(variants))] }
+
+	switch b.Kind {
+	case "宿敌":
+		return pick([]string{
+			fmt.Sprintf("我和%s是宿敌，这份仇我一辈子也忘不了。", targetName),
+			fmt.Sprintf("一提起%s我就来气——我们之间的仇，迟早要了断。", targetName),
+			fmt.Sprintf("%s是我的死对头，我恨不得避开她，又咽不下这口气。", targetName),
+		})
+	case "猜忌":
+		return pick([]string{
+			fmt.Sprintf("我一直信不过%s，她让我心里发怵，得提防着点。", targetName),
+			fmt.Sprintf("%s和我之间总隔着层猜忌，我怕她哪天会背叛我。", targetName),
+			fmt.Sprintf("我对%s始终留着戒心，谁知道她安的什么心。", targetName),
+		})
+	case "债主":
+		return pick([]string{
+			fmt.Sprintf("我欠了%s一笔债，每次见她都抬不起头，又怕又愧。", targetName),
+			fmt.Sprintf("%s是我的债主，她攥着我的把柄，我不敢得罪。", targetName),
+			fmt.Sprintf("我还欠着%s的人情债，这事一直压在我心头。", targetName),
+		})
+	case "青梅竹马":
+		return fmt.Sprintf("%s是我的青梅竹马，我们约好长大谁也不许先走，我打心底信任她。", targetName)
+	case "血亲手足":
+		return fmt.Sprintf("%s是我的血亲手足，打断骨头连着筋，我护她胜过护自己。", targetName)
+	case "生死之交":
+		return fmt.Sprintf("我和%s是生死之交，是能把后背交给对方的人。", targetName)
+	case "恩师":
+		return fmt.Sprintf("%s是教过我本事的恩师，这份师恩我得记着。", targetName)
+	case "暗恋":
+		return fmt.Sprintf("我偷偷喜欢着%s，这份心事一直没敢说出口。", targetName)
+	default:
+		return fmt.Sprintf("我和%s之间有一段说不清的%s。", targetName, b.Kind)
+	}
+}
+
+// rememberBirthBond 把一条出生关系写成源村民的真实结构化记忆（best-effort，失败不打断建局）。
+// 仇怨类记忆给 +2 重要度加成（更难衰减、更易闪回），温情类给 +1；都带对方名字以便记忆链路检索关联。
+func (service *Service) rememberBirthBond(ctx context.Context, src *unit.Record, worldID string, seed int64, b villageseed.Bond, targetName string) {
+	if service == nil || src == nil || strings.TrimSpace(targetName) == "" {
+		return
+	}
+	source, isFeud := birthBondMemorySource(b.Kind)
+	boost := 1
+	if isFeud {
+		boost = 2
+	}
+	summary := birthBondMemoryText(worldID, seed, b, targetName)
+	service.rememberUnitWithSourceBestEffort(ctx, src, villageBirthTurn, summary, source, boost)
+}
+
+// rememberBirthSelf 把村民「定调的种子记忆」写成真实记忆——最早的人生底色，可被检索/衰减/闪回。
+// best-effort：失败不打断建局。来源 village_birth_self，给 +1 重要度加成。
+func (service *Service) rememberBirthSelf(ctx context.Context, rec *unit.Record, m villageseed.Member) {
+	if service == nil || rec == nil {
+		return
+	}
+	summary := strings.TrimSpace(m.SeedMemory)
+	if summary == "" {
+		return
+	}
+	service.rememberUnitWithSourceBestEffort(ctx, rec, villageBirthTurn, summary, "village_birth_self", 1)
 }
 
 // SeedVillageBestEffort 是 onboarding 用的吞错包装：调 SeedVillage 生成 20 人关系网，

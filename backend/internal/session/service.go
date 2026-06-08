@@ -15,6 +15,7 @@ import (
 
 	"qunxiang/backend/internal/ai"
 	combatdomain "qunxiang/backend/internal/combat"
+	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/engine/turns"
@@ -399,29 +400,37 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 		repositionRecordsForMap(playerRecords, state.PlayerFactionID, state.Map)
 		repositionRecordsForMap(enemyRecords, state.EnemyFactionID, state.Map)
 
+		// 先在切片元素上原地补给 + 模板兜底叙事，再批量身份叙事补全（一次去重并发），最后逐个落库。
+		// 这样落库的单位直接带真叙事，避免「先存模板再异步补」的视觉延迟。批量补全 best-effort、缓存命中即跳过 LLM。
+		identityTargets := make([]*unit.Record, 0, len(playerRecords)+len(enemyRecords))
 		for index := range playerRecords {
-			record := playerRecords[index]
-			if err := addOpeningSupply(&record, index); err != nil {
+			if err := addOpeningSupply(&playerRecords[index], index); err != nil {
 				return Snapshot{}, err
 			}
-			appendOpeningSupplyLog(&state, record)
-			service.primeRecordNarrative(&record)
-			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
+			appendOpeningSupplyLog(&state, playerRecords[index])
+			service.primeRecordNarrative(&playerRecords[index])
+			identityTargets = append(identityTargets, &playerRecords[index])
 		}
 		for index := range enemyRecords {
-			record := enemyRecords[index]
-			if err := addOpeningSupply(&record, index); err != nil {
+			if err := addOpeningSupply(&enemyRecords[index], index); err != nil {
 				return Snapshot{}, err
 			}
-			appendOpeningSupplyLog(&state, record)
-			service.primeRecordNarrative(&record)
-			if err := service.units.Save(ctx, record); err != nil {
+			appendOpeningSupplyLog(&state, enemyRecords[index])
+			service.primeRecordNarrative(&enemyRecords[index])
+			identityTargets = append(identityTargets, &enemyRecords[index])
+		}
+		service.EnrichUnitIdentityNarrativesBestEffort(ctx, &state, identityTargets)
+		for index := range playerRecords {
+			if err := service.units.Save(ctx, playerRecords[index]); err != nil {
 				return Snapshot{}, err
 			}
-			state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
+			state.PlayerUnitIDs = append(state.PlayerUnitIDs, playerRecords[index].ID)
+		}
+		for index := range enemyRecords {
+			if err := service.units.Save(ctx, enemyRecords[index]); err != nil {
+				return Snapshot{}, err
+			}
+			state.EnemyUnitIDs = append(state.EnemyUnitIDs, enemyRecords[index].ID)
 		}
 		narrativeRefreshTargets = append(narrativeRefreshTargets, state.PlayerUnitIDs...)
 		narrativeRefreshTargets = append(narrativeRefreshTargets, state.EnemyUnitIDs...)
@@ -462,21 +471,28 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 			enemyRecords = append(enemyRecords, record)
 		}
 
+		// 默认 3v3：同样在落库前批量身份叙事补全（best-effort、缓存命中跳过 LLM），让单位直接带真叙事。
+		identityTargets := make([]*unit.Record, 0, len(playerRecords)+len(enemyRecords))
 		for index := range playerRecords {
-			record := playerRecords[index]
-			service.primeRecordNarrative(&record)
-			if err := service.units.Save(ctx, record); err != nil {
-				return Snapshot{}, err
-			}
-			state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
+			service.primeRecordNarrative(&playerRecords[index])
+			identityTargets = append(identityTargets, &playerRecords[index])
 		}
 		for index := range enemyRecords {
-			record := enemyRecords[index]
-			service.primeRecordNarrative(&record)
-			if err := service.units.Save(ctx, record); err != nil {
+			service.primeRecordNarrative(&enemyRecords[index])
+			identityTargets = append(identityTargets, &enemyRecords[index])
+		}
+		service.EnrichUnitIdentityNarrativesBestEffort(ctx, &state, identityTargets)
+		for index := range playerRecords {
+			if err := service.units.Save(ctx, playerRecords[index]); err != nil {
 				return Snapshot{}, err
 			}
-			state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
+			state.PlayerUnitIDs = append(state.PlayerUnitIDs, playerRecords[index].ID)
+		}
+		for index := range enemyRecords {
+			if err := service.units.Save(ctx, enemyRecords[index]); err != nil {
+				return Snapshot{}, err
+			}
+			state.EnemyUnitIDs = append(state.EnemyUnitIDs, enemyRecords[index].ID)
 		}
 		narrativeRefreshTargets = append(narrativeRefreshTargets, state.PlayerUnitIDs...)
 		narrativeRefreshTargets = append(narrativeRefreshTargets, state.EnemyUnitIDs...)
@@ -616,16 +632,18 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 
 	state.PlayerUnitIDs = []string{}
 	state.EnemyUnitIDs = []string{}
+	// 捏人确认路径：组装玩家选中 + 敌方阵容的可寻址副本，补给后批量身份叙事补全（best-effort、缓存命中跳过 LLM），
+	// 再逐个落库——让玩家亲手捏的角色与敌方一上场即带真传记/招募词，避免「先模板后异步补」的视觉延迟。
+	playerSave := make([]unit.Record, 0, len(picked))
+	enemySave := make([]unit.Record, 0, requiredPick)
+	identityTargets := make([]*unit.Record, 0, len(picked)+requiredPick)
 	for index := range picked {
 		record := picked[index]
 		if err := addOpeningSupply(&record, index); err != nil {
 			return Snapshot{}, err
 		}
 		appendOpeningSupplyLog(&state, record)
-		if err := service.units.Save(ctx, record); err != nil {
-			return Snapshot{}, err
-		}
-		state.PlayerUnitIDs = append(state.PlayerUnitIDs, record.ID)
+		playerSave = append(playerSave, record)
 	}
 	for index := 0; index < len(state.EnemyDraftPool) && index < requiredPick; index++ {
 		record := state.EnemyDraftPool[index]
@@ -633,10 +651,26 @@ func (service *Service) ApplyOpeningDraft(ctx context.Context, sessionID string,
 			return Snapshot{}, err
 		}
 		appendOpeningSupplyLog(&state, record)
-		if err := service.units.Save(ctx, record); err != nil {
+		enemySave = append(enemySave, record)
+	}
+	for index := range playerSave {
+		identityTargets = append(identityTargets, &playerSave[index])
+	}
+	for index := range enemySave {
+		identityTargets = append(identityTargets, &enemySave[index])
+	}
+	service.EnrichUnitIdentityNarrativesBestEffort(ctx, &state, identityTargets)
+	for index := range playerSave {
+		if err := service.units.Save(ctx, playerSave[index]); err != nil {
 			return Snapshot{}, err
 		}
-		state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
+		state.PlayerUnitIDs = append(state.PlayerUnitIDs, playerSave[index].ID)
+	}
+	for index := range enemySave {
+		if err := service.units.Save(ctx, enemySave[index]); err != nil {
+			return Snapshot{}, err
+		}
+		state.EnemyUnitIDs = append(state.EnemyUnitIDs, enemySave[index].ID)
 	}
 	state.PlayerDraftPool = []unit.Record{}
 	state.EnemyDraftPool = []unit.Record{}
@@ -839,6 +873,11 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		if err := service.refreshSessionMemoryDecay(ctx, &state, units); err != nil {
 			return Snapshot{}, err
 		}
+		// 自治长线结算（best-effort，绝不中断主链路）：在回合边界对每个单位
+		//   ① 周期目标重估 reassessGoalIfDue（goal_reassess.go，cadence=24，未到期内部 no-op；无 LLM 时走确定性 fallback 落高显著度记忆）；
+		//   ② 自然衰老人格漂移 ApplyPersonalityDrift(aging)（personality_drift.go，单次每维 ≤0.03、单日每维 ≤0.10，确定性 FNV，不直改受保护字段）。
+		// 失败只吞错、不污染回合推进；与 hunger/memory-decay 同批，确定性可复现。
+		service.settleAutonomyAtDeploymentBoundary(ctx, &state, units)
 		service.refreshThreats(ctx, &state, units)               // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
 		service.surfaceCrossEventsAtBoundary(ctx, &state, units) // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
 		service.scanAndMatch(ctx, &state, units)                 // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
@@ -861,6 +900,134 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 	}
 
 	return service.GetSnapshot(ctx, sessionID)
+}
+
+// settleAutonomyAtDeploymentBoundary 在 Execution→Deployment 回合边界对每个单位做自治长线结算：
+//   - reassessGoalIfDue：周期目标重估（goal_reassess.go），cadence=24，未到期内部自动 no-op。
+//   - ApplyPersonalityDrift(aging)：自然衰老人格漂移（personality_drift.go），步长/单日额度封顶，确定性。
+//
+// 全程 best-effort：单个单位失败只吞错、不影响其余单位与回合推进；与 hunger/memory-decay 同处边界批结算。
+// 仅对活着的单位结算（衰老/目标重估对已退场单位无意义）。
+func (service *Service) settleAutonomyAtDeploymentBoundary(ctx context.Context, state *State, units []unit.Record) {
+	if service == nil || state == nil || len(units) == 0 {
+		return
+	}
+	turn := state.TurnState.Turn
+	for index := range units {
+		record := &units[index]
+		if record.ID == "" || record.Status.LifeState == unit.LifeStateDead {
+			continue
+		}
+		// 周期目标重估（未到期内部 no-op；无 LLM 走确定性 fallback；落「高显著度记忆」）。
+		_ = service.reassessGoalIfDue(ctx, state, record, turn)
+		// 自然衰老人格漂移（确定性 FNV；步长 ≤0.03/维、单日 ≤0.10/维；经 PERSONALITY_DRIFT 流程事件留痕）。
+		_, _ = service.ApplyPersonalityDrift(ctx, state.ID, record.ID, DriftReasonAging, turn)
+	}
+}
+
+// GetUnitCharterForSession 读取某单位的离线宪章（HTTP 读端点用）。返回宪章 + 是否曾登记。
+// 归属由调用方（router）按会话/鉴权校验后再调；本方法只按 sessionID 载入 state 后委托 GetUnitCharter。
+func (service *Service) GetUnitCharterForSession(ctx context.Context, sessionID, unitID string) (OfflineCharter, bool, error) {
+	if service == nil {
+		return OfflineCharter{}, false, fmt.Errorf("session service is not available")
+	}
+	state, _, err := service.loadSession(ctx, sessionID)
+	if err != nil {
+		return OfflineCharter{}, false, err
+	}
+	charter, ok := GetUnitCharter(&state, unitID)
+	return charter, ok, nil
+}
+
+// SetUnitCharterForSession 写入/覆盖某单位的离线宪章（HTTP 写端点用），落库并写 CHARTER_ACTIVATED/CHARTER_UPDATED 留痕。
+// charter 写入即经 NormalizeCharter（去空白、补稳定红线 ID），保证持久化往返一致与归因可引用。
+// 归属由调用方（router）按会话/鉴权 + 单位归属本会话校验后再调。
+func (service *Service) SetUnitCharterForSession(ctx context.Context, sessionID, unitID string, charter OfflineCharter) (OfflineCharter, error) {
+	if service == nil {
+		return OfflineCharter{}, fmt.Errorf("session service is not available")
+	}
+	if strings.TrimSpace(unitID) == "" {
+		return OfflineCharter{}, fmt.Errorf("unit id is required")
+	}
+	state, _, err := service.loadSession(ctx, sessionID)
+	if err != nil {
+		return OfflineCharter{}, err
+	}
+	_, existed := GetUnitCharter(&state, unitID)
+	SetUnitCharter(&state, unitID, charter)
+	stored, _ := GetUnitCharter(&state, unitID)
+	if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
+		return OfflineCharter{}, err
+	}
+	// 授权变更留痕（流程事件旁路，不改受保护字段）：首次设立=CHARTER_ACTIVATED，更新=CHARTER_UPDATED。best-effort。
+	code := events.ReasonCharterActivated
+	if existed {
+		code = events.ReasonCharterUpdated
+	}
+	if service.db != nil {
+		_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+			SessionID:     sessionID,
+			OwnerUnitID:   unitID,
+			RelatedUnitID: unitID,
+			Code:          code,
+			Category:      events.CategoryPlayer,
+			Payload: map[string]any{
+				"long_term_goals": len(stored.LongTermGoals),
+				"redlines":        len(stored.Redlines),
+				"social_mandates": len(stored.SocialMandates),
+			},
+		})
+	}
+	return stored, nil
+}
+
+// ClearUnitCharterForSession 撤销某单位的离线宪章（HTTP DELETE 用），落库并写 CHARTER_UPDATED 留痕（撤销视为更新）。
+func (service *Service) ClearUnitCharterForSession(ctx context.Context, sessionID, unitID string) error {
+	if service == nil {
+		return fmt.Errorf("session service is not available")
+	}
+	state, _, err := service.loadSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if _, existed := GetUnitCharter(&state, unitID); !existed {
+		return nil // 本就没有宪章：no-op。
+	}
+	ClearUnitCharter(&state, unitID)
+	if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
+		return err
+	}
+	if service.db != nil {
+		_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+			SessionID:     sessionID,
+			OwnerUnitID:   unitID,
+			RelatedUnitID: unitID,
+			Code:          events.ReasonCharterUpdated,
+			Category:      events.CategoryPlayer,
+			Payload:       map[string]any{"cleared": true},
+		})
+	}
+	return nil
+}
+
+// RecordPlayerInterventionWithDrift 在记录一次玩家接管/嘱咐（echo.go 的 RecordPlayerIntervention）之后，
+// best-effort 对被接管单位施加一次「intervention」成因的人格漂移（personality_drift.go）——玩家的介入会潜移默化改变她。
+// 漂移失败/读不到回合一律吞错，绝不影响接管事件本身的落库（接管是真实动作、漂移是旁路增益）。
+// 返回接管事件 ID（与 RecordPlayerIntervention 一致），供前端关联回响。
+func (service *Service) RecordPlayerInterventionWithDrift(ctx context.Context, sessionID, unitID, summary string) (string, error) {
+	id, err := service.RecordPlayerIntervention(ctx, sessionID, unitID, summary)
+	if err != nil {
+		return id, err
+	}
+	// 取会话当前回合喂确定性漂移（载不到则用 0：仍确定性、无随机）。best-effort。
+	turn := 0
+	if service.sessions != nil {
+		if state, getErr := service.sessions.Get(ctx, sessionID); getErr == nil {
+			turn = state.TurnState.Turn
+		}
+	}
+	_, _ = service.ApplyPersonalityDrift(ctx, sessionID, unitID, DriftReasonIntervention, turn)
+	return id, nil
 }
 
 // RequestAdvancePhase 处理玩家“下一阶段”请求：单人局满足当前阶段方针即可推进；多人局先记录准备，双方都准备后推进。
@@ -2193,6 +2360,12 @@ func (service *Service) executeDecision(
 		appendLog(state, "pregnancy_hold", "我正在孕期，不能参与战斗或建筑。", actor.ID, "")
 		return service.applyActionHungerCost(ctx, state, actor, "孕期休整")
 	}
+	// Freeze List 拦截（freeze_list.go，flag QUNXIANG_FREEZE_LIST 默认关 → 整段 no-op）：高代价离线处置
+	// （卖/赠传家宝、触碰离线宪章红线、违背社交禁令）命中时绝不直接落地，转命运待决策上交玩家定夺，
+	// 单位本回合回退安全决策（继续待命）。best-effort：判定/上交失败一律退回正常落地，绝不中断主循环。
+	if service.maybeFreezeOfflineAction(ctx, state, actor, decision) {
+		return nil
+	}
 	switch decision.Action {
 	case DecisionActionAttack:
 		return service.executeEngage(ctx, state, byID, actor, targetIDs, decision, modifiers)
@@ -2251,6 +2424,103 @@ func (service *Service) executeDecision(
 		}
 		return nil
 	}
+}
+
+// maybeFreezeOfflineAction 在动作落地前判定是否该把它冻结上交命运待决策（Freeze List，freeze_list.go）。
+// 返回 true 表示「已拦截、动作不应落地」（调用方应直接 return nil，单位本回合回退安全决策）。
+//
+// flag QUNXIANG_FREEZE_LIST 默认关 → 直接返回 false（零行为变化）。仅对「高代价离线处置」类动作构造判定：
+//   - 交易/赠予（DecisionActionTrade）：从单位库存解析标的物的 Pinned 标记（传家宝硬门）+ 宪章红线/社交禁令匹配；
+//   - 表白/家庭（romance/family）与（未来的）叛变：映射到 decision.GatedAction，由 GateSurprise 决定是否须上交玩家。
+//
+// best-effort：判定纯函数确定性；上交命运失败（FreezeAndSurrenderToFate 返回 error）一律退回正常落地（返回 false），
+// 绝不中断主循环、绝不因拦截链异常吞掉单位的正常行动。
+func (service *Service) maybeFreezeOfflineAction(ctx context.Context, state *State, actor *unit.Record, dec unitDecisionPayload) bool {
+	if service == nil || state == nil || actor == nil || !freezeListEnabled() {
+		return false
+	}
+	itemID := strings.TrimSpace(dec.ItemID)
+	itemPinned := itemID != "" && actorItemPinned(*actor, itemID)
+	kind := gatedActionForDecision(dec, itemPinned)
+	isDisposalTrade := tradeIsDisposal(dec)
+	// 仅「门控转折动作（恋爱/卖传家宝）」或「交出己方资产的处置类交易（卖/赠/付金币）」才进入判定；
+	// 普通买入、非交易动作直接放行（修：此前把所有交易无差别标为高代价处置 → 开 flag 后连买入/卖一捆草料都被冻结）。
+	if kind == "" && !isDisposalTrade {
+		return false
+	}
+	charter, _ := GetUnitCharter(state, actor.ID)
+	action := FreezeAction{
+		Kind:            kind,
+		ItemID:          itemID,
+		ItemName:        strings.TrimSpace(dec.ItemName),
+		ItemPinned:      itemPinned,
+		TargetFactionID: "",
+		Intent:          decisionLogText(dec),
+		// IsHighStakesDisposal 不再靠裸「是否交易」判定（会误伤普通买卖）；改由 Pinned 标记 / 宪章红线 /
+		// 社交禁令三条确定信号在 shouldFreezeAction 内拦截。裸金额阈值易误伤，故此处恒 false。
+		IsHighStakesDisposal: false,
+	}
+	res := shouldFreezeAction(charter, action)
+	if !res.Freeze {
+		return false
+	}
+	if _, err := service.FreezeAndSurrenderToFate(ctx, state.ID, actor, action, res); err != nil {
+		// 上交失败：退回正常落地，绝不让单位本回合凭空丢动作。
+		appendLog(state, "freeze_skip", "她本想自作主张处置一件大事，但我没拦下来，仍按原计划行事。", actor.ID, "")
+		return false
+	}
+	appendLog(state, "freeze_intercept", fmt.Sprintf("我替你拦下了 %s 正要自作主张的大事，已转交你定夺。", actor.DisplayName()), actor.ID, "")
+	return true
+}
+
+// gatedActionForDecision 把决策动作映射到 decision.GatedAction（门控转折动作）；非门控返回空串。
+// 交易仅在「处置类（卖/赠/付金币）且标的带 Pinned 标记」时才视作 sell_pinned 门控——普通买卖不进门控，
+// 否则 GateSurprise 会把每一笔交易当「卖锚物」拦下（修：此前对所有交易恒返回 ActionSellPinned）。
+func gatedActionForDecision(dec unitDecisionPayload, itemPinned bool) decision.GatedAction {
+	switch dec.Action {
+	case DecisionActionRomance:
+		return decision.ActionRomance
+	case DecisionActionTrade:
+		if itemPinned && tradeIsDisposal(dec) {
+			return decision.ActionSellPinned
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// tradeIsDisposal 判定一笔交易是否属「交出己方资产/钱财」的处置方向（卖出/赠出/付金币）——
+// 买入/换入不算处置。仅处置方向的交易才进入 Freeze List 的红线/禁令/Pinned 判定（普通买卖不冻）。
+func tradeIsDisposal(dec unitDecisionPayload) bool {
+	if dec.Action != DecisionActionTrade {
+		return false
+	}
+	switch dec.TradeKind {
+	case TradeActionKindSell, TradeActionKindGift, TradeActionKindGold:
+		return true
+	default:
+		return false
+	}
+}
+
+// actorItemPinned 检查单位库存（装备栏 + 背包）中某物品是否被标记为 Pinned（传家宝硬门）。
+func actorItemPinned(record unit.Record, itemID string) bool {
+	itemID = strings.ToLower(strings.TrimSpace(itemID))
+	if itemID == "" {
+		return false
+	}
+	for _, stack := range record.Inventory.Equipment {
+		if strings.ToLower(strings.TrimSpace(stack.ItemID)) == itemID && stack.Pinned {
+			return true
+		}
+	}
+	for _, stack := range record.Inventory.Backpack {
+		if strings.ToLower(strings.TrimSpace(stack.ItemID)) == itemID && stack.Pinned {
+			return true
+		}
+	}
+	return false
 }
 
 // decisionLogText 按优先级提取可展示的 AI 文本（next_action/speak/memory/reasoning）。
@@ -2788,6 +3058,16 @@ func (service *Service) applyAttack(
 			service.propagateBloodFeud(ctx, state, *target, attacker.ID, state.WorldID, byID)
 			// 接入世界后：这一击作为跨玩家事件写进不可篡改的世界总线（best-effort，gate 在 WorldID）。
 			service.recordWorldizedKill(ctx, state, attacker, target)
+			// 编年史关键事件留痕（chronicle.go，best-effort）：一场死亡是双方传记里的「回到那一刻」锚点。
+			// 给凶手与逝者各记一笔，吞错不影响结算（listChronicle/anchorMoment 读侧供命运 Copilot/分享传记卡取材）。
+			_ = service.recordChronicleEntry(ctx, state.ID, attacker.ID, state.TurnState.Turn, "kill",
+				fmt.Sprintf("我在第 %d 回合的交战中击倒了 %s。", state.TurnState.Turn, target.DisplayName()))
+			_ = service.recordChronicleEntry(ctx, state.ID, target.ID, state.TurnState.Turn, "death",
+				fmt.Sprintf("我在第 %d 回合倒在了 %s 手中。", state.TurnState.Turn, attacker.DisplayName()))
+			// 重大经历人格漂移（personality_drift.go，ordeal）：杀人与濒死都会让性情悄然改变。best-effort、确定性、封顶。
+			// 逝者已 LifeStateDead，对其漂移仍有意义（落她生前最后一次性情记号供回响/传记），步长极小且经流程事件留痕。
+			_, _ = service.ApplyPersonalityDrift(ctx, state.ID, attacker.ID, DriftReasonOrdeal, state.TurnState.Turn)
+			_, _ = service.ApplyPersonalityDrift(ctx, state.ID, target.ID, DriftReasonOrdeal, state.TurnState.Turn)
 		}
 
 		appendLog(

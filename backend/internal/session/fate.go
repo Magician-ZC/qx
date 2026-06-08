@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/analytics"
+	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/narration"
 	"qunxiang/backend/internal/engine/relevance"
@@ -26,6 +27,12 @@ import (
 const (
 	relationIntensityNorm  = 20.0 // 关系强度（四轴绝对值之和，[-10,10] 量级）归一化分母
 	relationAnchorHalfLife = 14.0 // 关系锚半衰期（天）
+
+	// redlineAnchorWeight 是宪法 §4.1 红线锚的权重：红线是「绝对禁区」，单根即应足够牵动她（取满权 1.0，
+	// 经 relevance.RelativeImportance(Redline) 折算后仍是高位贡献）；severity 缺省也不下调（红线无小事）。
+	redlineAnchorWeight = 1.0
+	// redlineAnchorHalfLife<=0 表示红线锚不衰减（与 relevance.Anchor 约定一致：红线/传承是恒久的弦）。
+	redlineAnchorHalfLife = 0.0
 
 	// 命运分（FateScore）三因子的阻尼下限（设计宪法 §4.2）。
 	// 不可逆度/情绪强度被建成「阻尼系数 ∈ [floor,1]」而非裸权重：高 stakes 事件取≈1（不衰减 careRelevance、
@@ -72,21 +79,54 @@ type FateInboxItem struct {
 	// CountdownHours 是「距过期还剩几小时」（向下取整、已过期为 0），纯函数派生、确定性，供前端渲染倒计时条。
 	ExpiresAt      string `json:"expires_at"`
 	CountdownHours int    `json:"countdown_hours"`
+	// 情境化 Copilot 选项（§4.5）：入箱时按事件类型/红线/关系生成的情境化 choice（id+文案+后果类）。
+	// 为空（旧存档/无情境）时前端回落旧三键（let_her/urge/acknowledge）。omitempty 保向后兼容。
+	Choices []FateChoiceOut `json:"choices,omitempty"`
 }
 
-// buildRelevanceAnchors 从角色的对外关系构造相关性锚（当前=关系锚；geo/redline/goal 待世界化接入）。
+// FateChoiceOut 是回给前端的一个情境化选项：id 供 resolve、label 供渲染、resolve_class 标后果类（透明化）。
+type FateChoiceOut struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	ResolveClass string `json:"resolve_class"`
+}
+
+// buildRelevanceAnchors 从角色的对外关系/持久锚构造相关性锚（关系锚 + relevance_anchors 表的目标/红线/债仇爱/血脉）。
+// 无 State 上下文版本：宪法 §4.1 的「离线宪章红线」锚需要 State.UnitCharters，故由 buildRelevanceAnchorsWithState
+// 在能拿到 state 时补上；此处传 nil，保持对 anchors.go/旧测试的向后兼容。
 func (service *Service) buildRelevanceAnchors(ctx context.Context, unitID string) []relevance.Anchor {
+	return service.buildRelevanceAnchorsWithState(ctx, nil, unitID)
+}
+
+// buildRelevanceAnchorsWithState 在 buildRelevanceAnchors 的关系锚 + 持久锚之上，叠加由 state.UnitCharters 派生的
+// **离线宪章红线锚**（宪法 §4.1：红线是「绝对禁区」，应实打实牵动她的命运）。state 为 nil 时退化为旧行为（无红线锚）。
+func (service *Service) buildRelevanceAnchorsWithState(ctx context.Context, state *State, unitID string) []relevance.Anchor {
 	anchors := make([]relevance.Anchor, 0)
 	if service == nil || service.db == nil {
 		return anchors
 	}
-	// 1) 持久锚（目标/红线/债仇爱/血脉——非关系锚，只有 relevance_anchors 表能存）。
 	seen := map[string]bool{}
+	// 1) 持久锚（目标/红线/债仇爱/血脉——非关系锚，只有 relevance_anchors 表能存）。
 	for _, a := range service.loadPersistentAnchors(ctx, unitID) {
 		anchors = append(anchors, a)
 		seen[string(a.Kind)+"|"+a.Ref] = true
 	}
-	// 2) 实时关系锚（由 relations 表派生；同 (kind,ref) 已有持久锚则不重复）。
+	// 2) 离线宪章红线锚（宪法 §4.1）：从该单位 charter 的每条红线生成一根 Redline 锚，让红线权重真正参与 FateScore。
+	//    Ref 用稳定的红线 ID（fallbackRedlineID 派生过），半衰期 0=不衰减（红线恒久）。与持久锚去重（同 kind|ref 不重复）。
+	for id := range charterRedlinesAsMap(state, unitID) {
+		key := string(relevance.Redline) + "|" + id
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		anchors = append(anchors, relevance.Anchor{
+			Kind:         relevance.Redline,
+			Ref:          id,
+			Weight:       redlineAnchorWeight,
+			HalfLifeDays: redlineAnchorHalfLife,
+		})
+	}
+	// 3) 实时关系锚（由 relations 表派生；同 (kind,ref) 已有持久锚则不重复）。
 	for _, r := range service.loadTopOutgoingRelations(ctx, unitID, 16) {
 		key := string(relevance.Relation) + "|" + r.TargetUnitID
 		if seen[key] {
@@ -121,16 +161,44 @@ func eventRelevanceWithAnchor(anchors []relevance.Anchor, ev FateEvent) (float64
 	topKind := ""
 	topWeight := -1.0
 	for _, a := range anchors {
-		// 任何锚（关系/债仇爱/血脉…）只要其 Ref 命中事件的 actor/target/region，就算命中。
-		if a.Ref != "" && (a.Ref == ev.ActorID || a.Ref == ev.TargetID) {
-			hits = append(hits, relevance.Hit{Anchor: a})
-			if a.Weight > topWeight {
-				topWeight = a.Weight
-				topKind = string(a.Kind)
-			}
+		if !anchorHitByEvent(a, ev) {
+			continue
+		}
+		hits = append(hits, relevance.Hit{Anchor: a})
+		if a.Weight > topWeight {
+			topWeight = a.Weight
+			topKind = string(a.Kind)
 		}
 	}
 	return relevance.Score(hits, 1.0), topKind
+}
+
+// anchorHitByEvent 判定一根锚是否被事件点亮。
+//   - 红线锚（Ref=红线 ID，不是 unitID）：当事件 reason-code 属于「红线触线类」（背叛/叛变/势力崩塌/倒地/创伤
+//     等覆水难收的越线事）即命中——这正是宪法 §4.1「红线被触碰理应实打实牵动她」的机制落地。
+//   - 其余锚（关系/债仇爱/血脉/目标/地方…）：其 Ref 命中事件 actor/target 即命中（沿用原 ID 匹配）。
+func anchorHitByEvent(a relevance.Anchor, ev FateEvent) bool {
+	if a.Kind == relevance.Redline {
+		return eventTripsRedlineClass(ev.ReasonCode)
+	}
+	return a.Ref != "" && (a.Ref == ev.ActorID || a.Ref == ev.TargetID)
+}
+
+// eventTripsRedlineClass 判定一条事件的 reason-code 是否属于「会触碰典型红线」的类别（覆水难收/越线的重大事）。
+// 与 fateReasonIsIrreversibleClass 同源精神：背叛/势力崩塌/角色死亡/倒地濒死/创伤/被强令越线。确定性、纯函数。
+func eventTripsRedlineClass(code events.ReasonCode) bool {
+	switch code {
+	case events.ReasonRelationBetray, // 背叛/叛变（最典型的红线触线）
+		events.ReasonFactionCollapse, // 势力崩塌
+		events.ReasonCharacterDied,   // 角色死亡
+		events.ReasonCombatDown,      // 倒地濒死/阵亡
+		events.ReasonEmotionTrauma,   // 创伤
+		events.ReasonCommandForced,   // 被强令做了高风险/越线的事
+		events.ReasonRedlineTrip:     // 显式判定的触线事件
+		return true
+	default:
+		return false
+	}
 }
 
 // SurfaceFateEvent 把一条世界事件按相关性路由进某角色的命运层。
@@ -139,6 +207,9 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	if service == nil || service.db == nil || owner == nil {
 		return FateRouting{}, fmt.Errorf("surface fate event: missing dependencies")
 	}
+	// best-effort 载入 state：用于 ① 离线宪章红线锚（§4.1）；② 真实在世天数（attachmentForUnit 内自取）；③ provenance。
+	// 载入失败/sessions 未注入时退化为 nil（行为与旧路径一致，绝不阻断路由）。
+	state := service.loadStateForFate(ctx, sessionID)
 	var rel float64
 	anchorKind := ""
 	if ev.ActorID == owner.ID || ev.TargetID == owner.ID {
@@ -151,8 +222,13 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 			rel = 1
 		}
 	} else {
-		// 发生在别人身上 → 经她的锚翻译牵挂相关度，并记下命中里最重的锚类别（翻译矩阵用）。
-		rel, anchorKind = eventRelevanceWithAnchor(service.buildRelevanceAnchors(ctx, owner.ID), ev)
+		// 发生在别人身上 → 经她的锚（含离线宪章红线锚）翻译牵挂相关度，并记下命中里最重的锚类别（翻译矩阵用）。
+		rel, anchorKind = eventRelevanceWithAnchor(service.buildRelevanceAnchorsWithState(ctx, state, owner.ID), ev)
+	}
+	// §5「为什么会这样」对玩家可见：归因因果句缺省时，用可解析前因（命中锚类别 + 事件摘要）派生一句，
+	// 让命运卡（fateCard）的「（…）」尾注非空（修「字段恒空=死管线」）。调用方显式给了 AttributionZH 则尊重之。
+	if strings.TrimSpace(ev.AttributionZH) == "" {
+		ev.AttributionZH = deriveFateProvenance(ev, anchorKind)
 	}
 	// FateScore 三因子（设计宪法 §4.2）：不可逆度 × 牵挂相关度 × 情绪强度，三者 ∈ [0,1]。
 	// careRelevance=rel（上面算出的关系/重要度相关性）；irreversibility/emotion 是 [floor,1] 的阻尼系数，
@@ -182,10 +258,19 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		"source_target":     ev.TargetID,
 		"reason":            string(ev.ReasonCode),
 	}
+	// 归因因果句随 payload 落库（§4.3 provenance 凭证 + 渲染管线）：非空才写，保持向后兼容（旧消费方忽略未知键）。
+	if cause := strings.TrimSpace(ev.AttributionZH); cause != "" {
+		payload["attribution_zh"] = cause
+	}
 	if route == relevance.RoutePending {
 		code = events.ReasonPendingDecision
 		out.DecisionID = "fd_" + uuid.NewString()
 		payload["decision_id"] = out.DecisionID
+		// 情境化 Copilot（§4.5）：按事件类型/红线/关系生成情境化选项，连同其后果类（resolve_class）写进 payload，
+		// 供 ResolveFateDecision 在玩家选了某情境 id 时反查后果。仍保留旧三键（let_her/urge/acknowledge）始终可用。
+		if choices := buildFateChoices(ev, anchorKind); len(choices) > 0 {
+			payload["choices"] = fateChoicesToPayload(choices)
+		}
 	}
 	if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
 		SessionID:     sessionID,
@@ -277,8 +362,9 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 			return nil, fmt.Errorf("scan fate inbox: %w", err)
 		}
 		var payload struct {
-			DecisionID string `json:"decision_id"`
-			Narrative  string `json:"narrative"`
+			DecisionID string          `json:"decision_id"`
+			Narrative  string          `json:"narrative"`
+			Choices    []payloadChoice `json:"choices"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
 		if payload.DecisionID == "" || resolved[payload.DecisionID] {
@@ -290,6 +376,7 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 			OccurredAt:     occurredAt,
 			ExpiresAt:      fateExpiresAt(occurredAt),
 			CountdownHours: fateCountdownHours(occurredAt),
+			Choices:        payloadChoicesToOut(payload.Choices),
 		})
 	}
 	return items, rows.Err()
@@ -304,6 +391,8 @@ type FateFeedItem struct {
 	// 仅 pending 卡有意义（M2 防轰炸②）：过期时间与剩余小时数，让首屏待决策卡显示倒计时。高光/回响卡置零。
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	CountdownHours int    `json:"countdown_hours,omitempty"`
+	// 仅 pending 卡有意义（§4.5）：情境化 Copilot 选项。空时前端回落旧三键。omitempty 保向后兼容。
+	Choices []FateChoiceOut `json:"choices,omitempty"`
 }
 
 // OpenFateFeed 返回某角色命运四槽的最近卡片（高光 + 未决待决策 + 回响），按时间倒序。供前端首屏渲染。
@@ -335,8 +424,9 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 			return nil, fmt.Errorf("scan fate feed: %w", err)
 		}
 		var payload struct {
-			DecisionID string `json:"decision_id"`
-			Narrative  string `json:"narrative"`
+			DecisionID string          `json:"decision_id"`
+			Narrative  string          `json:"narrative"`
+			Choices    []payloadChoice `json:"choices"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
 		item := FateFeedItem{Narrative: payload.Narrative, OccurredAt: occurredAt}
@@ -349,6 +439,7 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 			item.DecisionID = payload.DecisionID
 			item.ExpiresAt = fateExpiresAt(occurredAt) // M2②：仅待决策卡带倒计时
 			item.CountdownHours = fateCountdownHours(occurredAt)
+			item.Choices = payloadChoicesToOut(payload.Choices)
 		case string(events.ReasonEchoLink):
 			item.Kind = "echo"
 		default:
@@ -476,7 +567,8 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	}
 
 	// 1) 归属校验：以权威 PENDING_DECISION 事件的 owner 为准（忽略客户端传入 unitID），不存在即拒绝。
-	ownerID, found, err := service.pendingDecisionOwner(ctx, decisionID)
+	//    同时取回该 pending 的权威 payload（reason-code 类别 / 情境化 choices / provenance），供情境选项反查与不可逆守门。
+	ownerID, meta, found, err := service.pendingDecisionMeta(ctx, decisionID)
 	if err != nil {
 		return err
 	}
@@ -485,7 +577,19 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	}
 	unitID = ownerID
 
-	// 2) 原子抢占：唯一赢家继续；重复/并发者幂等 no-op 返回（不重复施加后果）。
+	// 1.5) 情境化 Copilot（§4.5）：玩家可能传的是情境化选项 id（如 avenge / mourn / forbid…）。
+	//      先把它映射回基础后果类（resolve_class ∈ {let_her,urge,acknowledge}）——映射不到则回落原值走旧三键。向后兼容。
+	resolveClass := resolveFateChoiceClass(resolveType, meta.Choices)
+
+	// 1.6) §4.3 provenance 强制（对齐 generateUnitDecision 的归因强制思路）：不可逆类后果（死亡/叛变/势力崩塌）
+	//      要求该 pending 携带可解析前因（payload.attribution_zh 非空）。无源则**拒绝**自动兜底——绝不在没有「为什么」的
+	//      情况下让一桩覆水难收的命运被悄悄落子。仅约束「越界干预(urge)」这种会施加不可逆负向后果的处理；
+	//      let_her/acknowledge（放手/知悉）是安全降级路径，始终放行（与归因校验「不过则回退安全决策」同构）。
+	if fateReasonIsIrreversibleClass(meta.ReasonCode) && isUrgeResolve(resolveClass) && strings.TrimSpace(meta.AttributionZH) == "" {
+		return fmt.Errorf("resolve fate decision: irreversible consequence requires provenance (decision %s, reason %s)", decisionID, meta.ReasonCode)
+	}
+
+	// 2) 原子抢占：唯一赢家继续；重复/并发者幂等 no-op 返回（不重复施加后果）。落 resolveType 原文，保留玩家选的情境 id 供复盘。
 	won, err := service.claimFateDecision(ctx, decisionID, unitID, resolveType)
 	if err != nil {
 		return err
@@ -512,11 +616,20 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	})
 
 	// 4) 真后果：赢家才经 Mutator 改 morale/loyalty（字段级 clamp + 标准化事件留痕，可被复算）。
-	// M3 后果分级闸：先算该角色的牵挂等级，再用 fateConsequenceLayer 据牵挂调节后果幅度（urge 越界代价随牵挂单调放大）。
+	// M3 后果分级闸：先算该角色的牵挂等级（含真实在世天数），再用 fateConsequenceLayer 据牵挂调节后果幅度
+	// （urge 越界代价随牵挂单调放大）；用基础后果类 resolveClass（情境 id 已折算）取后果。
 	attachment := service.attachmentForUnit(ctx, unitID)
+	consequences := fateConsequenceLayer(resolveClass, attachment)
+	// 4.5) D0-D3 真分级闸（与 threat.go:applyDefeatPenalty 一致）：把不可逆类的负向后果经 encounter.DegradePenalty
+	//      降级到该角色当前允许的最重层——萍水相逢/陪伴尚浅的角色被硬锁在「可恢复」，绝不一刀切毁玩家心血。
+	//      可逆类后果（日常暖意/小幅波动）不进闸，照原样落地。
+	if fateReasonIsIrreversibleClass(meta.ReasonCode) {
+		days := service.daysAliveForUnit(ctx, unitID)
+		consequences = gateFateConsequencesByPenalty(consequences, attachment, days)
+	}
 	var consequenceErr error
 	if service.mutator != nil {
-		for _, c := range fateConsequenceLayer(resolveType, attachment) {
+		for _, c := range consequences {
 			if _, err := service.mutator.Apply(ctx, status.Mutation{
 				UnitID:     unitID,
 				Turn:       0, // 待决策在回合循环外处理，turn 用 0 标记
@@ -526,7 +639,7 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 				ReasonText: c.ReasonText,
 				Actors:     []string{unitID},
 			}); err != nil {
-				consequenceErr = fmt.Errorf("apply fate consequence (%s/%s): %w", resolveType, c.Field, err)
+				consequenceErr = fmt.Errorf("apply fate consequence (%s/%s): %w", resolveClass, c.Field, err)
 				break
 			}
 		}
@@ -534,9 +647,51 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	return consequenceErr
 }
 
+// gateFateConsequencesByPenalty 把一组命运后果里的「负向」项经 D0-D3 后果分级闸（encounter.PenaltyCap/DegradePenalty）
+// 按 |delta| 量级映射到候选层，再降级到该角色当前允许的最重层，并按降级后的层重标 |delta|——绝不让萍水相逢的角色
+// 挨到不该挨的不可逆重击（与 threat.go 的 defeatMoraleHitForLayer 同一套层→幅度映射）。正向后果原样保留。
+func gateFateConsequencesByPenalty(consequences []fateConsequence, care float64, daysAlive int) []fateConsequence {
+	out := make([]fateConsequence, len(consequences))
+	copy(out, consequences)
+	for i := range out {
+		if out[i].Delta >= 0 {
+			continue // 正向后果（暖意/打起精神）不进惩罚闸
+		}
+		candidate := penaltyLayerForMagnitude(absFloat(out[i].Delta))
+		gated := encounter.DegradePenalty(candidate, care, daysAlive)
+		// 降级后按层重标负向幅度（层越低代价越轻）；同层则原样。
+		out[i].Delta = -fatePenaltyMagnitudeForLayer(gated)
+	}
+	return out
+}
+
+// penaltyLayerForMagnitude 把一个负向 |delta| 量级映射到 D0-D3 候选层（与 fatePenaltyMagnitudeForLayer 互逆，阈值同源）。
+func penaltyLayerForMagnitude(mag float64) int {
+	switch {
+	case mag >= 0.30:
+		return 3
+	case mag >= 0.08:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// fatePenaltyMagnitudeForLayer 把降级后的 D0-D3 层映射回负向后果幅度（层越高代价越重）。确定性、纯函数。
+func fatePenaltyMagnitudeForLayer(layer int) float64 {
+	switch {
+	case layer >= 3:
+		return 0.30
+	case layer == 2:
+		return 0.08
+	default:
+		return 0.02
+	}
+}
+
 // attachmentForUnit 估算某角色当前的牵挂等级 [0,100]（M3 后果分级闸的输入）。best-effort：
-// 载入单位取其忠诚（共鸣项）喂 ComputeAttachment；载入失败返回 0（无放大，退回基础后果，保守）。
-// 在回合循环外调用，无 turn 上下文，daysAlive 项以 BornTurn 不可知 → 传 0（牵挂主由忠诚/共创驱动）。
+// 载入单位取其忠诚（共鸣项）+ 真实在世天数喂 ComputeAttachment；载入失败返回 0（无放大，退回基础后果，保守）。
+// daysAlive 由 daysAliveForUnit 真实化（state.TurnState.Turn − unit.Social.BornTurn），不再硬传 0。
 func (service *Service) attachmentForUnit(ctx context.Context, unitID string) float64 {
 	if service == nil || service.units == nil || unitID == "" {
 		return 0
@@ -545,7 +700,44 @@ func (service *Service) attachmentForUnit(ctx context.Context, unitID string) fl
 	if err != nil {
 		return 0
 	}
-	return service.ComputeAttachment(ctx, unitID, rec.Status.Loyalty, 0)
+	days := service.daysAliveForUnit(ctx, unitID)
+	return service.ComputeAttachment(ctx, unitID, rec.Status.Loyalty, days)
+}
+
+// daysAliveForUnit 估算某角色的真实在世天数（回合代理，与 threat.go 用 state.TurnState.Turn 同口径）。
+// 真实化（修原 daysAlive 硬传 0 的注释自承缺陷）：从该单位所在会话载入 state，取 state.TurnState.Turn − 该单位
+// 的 Social.BornTurn（不为负）。无法定位 state/会话（如 sessions 未注入的单元测试）或 BornTurn 未记 → 退回 0
+// （最接近可得量：牵挂仍由忠诚/共创驱动，绝不夸大、保守）。best-effort、确定性、不阻断主流程。
+func (service *Service) daysAliveForUnit(ctx context.Context, unitID string) int {
+	if service == nil || service.units == nil || unitID == "" {
+		return 0
+	}
+	rec, err := service.units.GetByID(ctx, unitID)
+	if err != nil {
+		return 0
+	}
+	state := service.loadStateForFate(ctx, rec.SessionID)
+	if state == nil {
+		return 0
+	}
+	days := state.TurnState.Turn - rec.Social.BornTurn
+	if days < 0 {
+		return 0
+	}
+	return days
+}
+
+// loadStateForFate 在命运路径上 best-effort 载入某会话的 state（供红线锚/真实在世天数/归因 provenance）。
+// sessions 仓库未注入（单元测试）或会话不存在/解码失败 → 返回 nil；调用方据此优雅退化到无 state 行为，绝不阻断。
+func (service *Service) loadStateForFate(ctx context.Context, sessionID string) *State {
+	if service == nil || service.sessions == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	state, err := service.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	return &state
 }
 
 // expiredPendingRow 是一条「超期未决」的待决策，过期兜底据此自动关掉它。
@@ -661,33 +853,48 @@ func (service *Service) resolvedDecisionEventID(ctx context.Context, unitID, dec
 	return "", false
 }
 
-// pendingDecisionOwner 按 decisionID 查权威 PENDING_DECISION 事件，返回其归属单位（owner）。
+// pendingDecisionMeta 是一条权威 PENDING_DECISION 事件的命运元数据，供 ResolveFateDecision 做情境选项反查与不可逆守门。
+type pendingDecisionMeta struct {
+	ReasonCode    events.ReasonCode // 底层事件 reason-code（判定是否不可逆类）
+	AttributionZH string            // 归因因果句（§4.3 provenance 强制凭证；空=无可解析前因）
+	Choices       []fateChoice      // 入箱时生成的情境化选项（id→后果类映射）
+}
+
+// pendingDecisionMeta 按 decisionID 查权威 PENDING_DECISION 事件，返回其归属单位（owner）及命运元数据。
 // 用 payload_json LIKE 收窄候选（decisionID 为唯一 UUID），再在 Go 侧精确比对 decision_id——双驱动安全、不依赖 JSON 函数。
-func (service *Service) pendingDecisionOwner(ctx context.Context, decisionID string) (string, bool, error) {
+func (service *Service) pendingDecisionMeta(ctx context.Context, decisionID string) (string, pendingDecisionMeta, bool, error) {
 	rows, err := service.db.QueryContext(
 		ctx,
 		`SELECT actor_unit_id, payload_json FROM events WHERE reason_code = ? AND payload_json LIKE ?`,
 		string(events.ReasonPendingDecision), "%"+decisionID+"%",
 	)
 	if err != nil {
-		return "", false, fmt.Errorf("query pending decision owner: %w", err)
+		return "", pendingDecisionMeta{}, false, fmt.Errorf("query pending decision meta: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var owner sql.NullString
 		var payloadJSON string
 		if err := rows.Scan(&owner, &payloadJSON); err != nil {
-			return "", false, fmt.Errorf("scan pending decision owner: %w", err)
+			return "", pendingDecisionMeta{}, false, fmt.Errorf("scan pending decision meta: %w", err)
 		}
 		var payload struct {
-			DecisionID string `json:"decision_id"`
+			DecisionID    string          `json:"decision_id"`
+			Reason        string          `json:"reason"`
+			AttributionZH string          `json:"attribution_zh"`
+			Choices       []payloadChoice `json:"choices"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
 		if payload.DecisionID == decisionID { // LIKE 可能因 _/% 通配略微过宽，以精确比对为准
-			return owner.String, true, nil
+			meta := pendingDecisionMeta{
+				ReasonCode:    events.ReasonCode(payload.Reason),
+				AttributionZH: payload.AttributionZH,
+				Choices:       payloadChoicesToFateChoices(payload.Choices),
+			}
+			return owner.String, meta, true, nil
 		}
 	}
-	return "", false, rows.Err()
+	return "", pendingDecisionMeta{}, false, rows.Err()
 }
 
 // claimFateDecision 以 decision_id 为主键原子抢占 fate_decision_resolutions：INSERT 成功=唯一赢家(true)；
@@ -917,4 +1124,131 @@ func fateCard(ev FateEvent, route relevance.FateRoute, anchorKind string) string
 		card += "（" + cause + "）"
 	}
 	return card
+}
+
+// ===== §5 provenance 派生（让「为什么会这样」对玩家可见）=====
+
+// deriveFateProvenance 在调用方未显式给出归因因果句时，用「可解析前因」（命中锚类别 + 事件摘要）派生一句 ≤40 字的
+// 因果句。**可解析**=句子里的每一节都来自真实数据（锚类别由 eventRelevanceWithAnchor 命中得来、摘要是事件原文），
+// 绝不凭空编戏剧性意外（对齐 §5「意外但合理」的代码强制）。确定性、纯函数、无 LLM。无可用前因时返回空串（跳过尾注）。
+func deriveFateProvenance(ev FateEvent, anchorKind string) string {
+	prefix := provenancePrefixForAnchor(anchorKind)
+	summary := strings.TrimSpace(ev.Summary)
+	switch {
+	case prefix != "" && summary != "":
+		return prefix + "：" + summary
+	case prefix != "":
+		return prefix
+	case summary != "":
+		// 自身事件（无外部锚命中）：直接以事件原文作前因句（她自己的事一定相关，因果即事件本身）。
+		return summary
+	default:
+		return ""
+	}
+}
+
+// provenancePrefixForAnchor 把命中里最重的锚类别翻译成「凭什么牵动她」的引子（§4.1 六类锚 → 因果引子）。
+func provenancePrefixForAnchor(anchorKind string) string {
+	switch relevance.AnchorKind(anchorKind) {
+	case relevance.Relation:
+		return "因为这事关她在乎的人"
+	case relevance.Redline:
+		return "因为这触到了她划下的红线"
+	case relevance.Goal:
+		return "因为这关乎她一直想做成的事"
+	case relevance.DebtGrudgeLove:
+		return "因为这桩债/仇/情未了"
+	case relevance.Geo:
+		return "因为这就发生在她所在的地方"
+	case relevance.Legacy:
+		return "因为这牵动她的血脉/传家之物"
+	default:
+		return ""
+	}
+}
+
+// ===== §4.5 情境化 Copilot：按事件类型/红线/关系生成情境化待决策选项 =====
+
+// fateChoice 是一个情境化待决策选项：玩家可见的 id/label，以及它折算到的基础后果类（resolveClass）。
+type fateChoice struct {
+	ID           string // 情境化选项 id（如 avenge / mourn / forbid…），resolve 时回传
+	Label        string // 玩家可见文案
+	ResolveClass string // 折算到的基础后果类 ∈ {let_her, urge, acknowledge}
+}
+
+// payloadChoice 是 fateChoice 的落库/反序列化镜像（写入 PENDING_DECISION 的 payload.choices）。
+type payloadChoice struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	ResolveClass string `json:"resolve_class"`
+}
+
+// buildFateChoices 按事件类型/命中锚类别生成情境化选项（§4.5）。每个情境选项都显式映射到一个基础后果类，
+// 既给玩家「贴合此刻」的措辞，又保证后果可复算、与旧三键同构。确定性、纯函数、无 LLM。
+//   - 不可逆类（死亡/叛变/势力崩塌）：给「为TA复仇/送TA最后一程/由她去」三选，分别 urge/acknowledge/let_her。
+//   - 触红线类（红线锚命中或触线事件）：给「严令她止步/默许她的选择」两选（urge/let_her）。
+//   - 其余（日常牵挂）：给「叮嘱她/由她做主/只是知悉」三选（urge/let_her/acknowledge）。
+func buildFateChoices(ev FateEvent, anchorKind string) []fateChoice {
+	switch {
+	case fateReasonIsIrreversibleClass(ev.ReasonCode):
+		return []fateChoice{
+			{ID: "avenge", Label: "为TA讨一个公道", ResolveClass: "urge"},
+			{ID: "mourn", Label: "送TA最后一程", ResolveClass: "acknowledge"},
+			{ID: "let_her", Label: "由她自己面对", ResolveClass: "let_her"},
+		}
+	case relevance.AnchorKind(anchorKind) == relevance.Redline || eventTripsRedlineClass(ev.ReasonCode):
+		return []fateChoice{
+			{ID: "forbid", Label: "严令她止步于此", ResolveClass: "urge"},
+			{ID: "allow", Label: "默许她自己的抉择", ResolveClass: "let_her"},
+		}
+	default:
+		return []fateChoice{
+			{ID: "urge", Label: "叮嘱她按你的意思办", ResolveClass: "urge"},
+			{ID: "let_her", Label: "放手让她自己做主", ResolveClass: "let_her"},
+			{ID: "acknowledge", Label: "只是知悉，不干预", ResolveClass: "acknowledge"},
+		}
+	}
+}
+
+// resolveFateChoiceClass 把玩家传入的 resolveType（可能是情境选项 id，也可能是旧三键）折算成基础后果类。
+//   - 若它命中本 pending 携带的某个情境 choice 的 id → 用该 choice 的 ResolveClass。
+//   - 否则原样返回（让 fateConsequencesFor/isUrgeResolve 的旧三键同义词集兜底）——向后兼容旧三键调用。
+func resolveFateChoiceClass(resolveType string, choices []fateChoice) string {
+	id := strings.TrimSpace(resolveType)
+	for _, c := range choices {
+		if c.ID == id && strings.TrimSpace(c.ResolveClass) != "" {
+			return c.ResolveClass
+		}
+	}
+	return resolveType
+}
+
+// fateChoicesToPayload 把 []fateChoice 转为可 JSON 落库的 []map（payload.choices）。
+func fateChoicesToPayload(choices []fateChoice) []map[string]any {
+	out := make([]map[string]any, 0, len(choices))
+	for _, c := range choices {
+		out = append(out, map[string]any{"id": c.ID, "label": c.Label, "resolve_class": c.ResolveClass})
+	}
+	return out
+}
+
+// payloadChoicesToFateChoices 把反序列化的 []payloadChoice 还原为 []fateChoice（供 resolveFateChoiceClass 反查）。
+func payloadChoicesToFateChoices(in []payloadChoice) []fateChoice {
+	out := make([]fateChoice, 0, len(in))
+	for _, c := range in {
+		out = append(out, fateChoice{ID: c.ID, Label: c.Label, ResolveClass: c.ResolveClass})
+	}
+	return out
+}
+
+// payloadChoicesToOut 把反序列化的 []payloadChoice 转为回前端的 []FateChoiceOut。
+func payloadChoicesToOut(in []payloadChoice) []FateChoiceOut {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]FateChoiceOut, 0, len(in))
+	for _, c := range in {
+		out = append(out, FateChoiceOut{ID: c.ID, Label: c.Label, ResolveClass: c.ResolveClass})
+	}
+	return out
 }

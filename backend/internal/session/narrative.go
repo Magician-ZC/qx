@@ -103,16 +103,45 @@ func (service *Service) enrichUnitIdentityNarrativeBestEffort(
 	record.Identity.RecruitmentPitch = payload.RecruitmentPitch
 }
 
-// enrichUnitIdentityNarrativesBatchBestEffort 批量补全单位身份叙事。
-// 优先走批量接口，降级时逐个请求并应用本地回退。
+// unitIdentityPlan 描述一条待补全的单位身份叙事计划（含缓存指纹与已组装的 LLM 请求三元组）。
 type unitIdentityPlan struct {
 	key          string
 	record       *unit.Record
+	signature    string
 	systemPrompt string
 	userPrompt   string
 	request      ai.CompletionRequest
 }
 
+// EnrichUnitIdentityNarrativesBestEffort 批量补全一批单位的身份叙事（biography + recruitment_pitch）。
+//
+// 这是开局建局 / 捏人确认主链路的统一身份补全入口（供 Wire 阶段在 service.go 接线，签名见返回说明）：
+//   - 先按指纹查 unit_narrative_cache：命中即复用，跳过 LLM；
+//   - 未命中者走 ai.GenerateJSONBatch 指纹去重并发（>1 个时），单个或无 batcher 时逐个 GenerateJSON；
+//   - 任一环节失败一律落本地模板回退（fallbackUnitBiography / fallbackRecruitmentPitch），并写回缓存命中项；
+//   - 全程 best-effort：内部 panic 被 recover，绝不阻断/拖垮建局事务；records 中已有完整叙事的会被跳过。
+//
+// records 中的 *unit.Record 会被原地改写（写入 Identity.Biography / Identity.RecruitmentPitch），
+// 调用方落库前应已持有这些指针；state 仅用于记交互审计与日志，可为 nil。
+func (service *Service) EnrichUnitIdentityNarrativesBestEffort(
+	ctx context.Context,
+	state *State,
+	records []*unit.Record,
+) {
+	if service == nil || len(records) == 0 {
+		return
+	}
+	// best-effort 护栏：身份补全是开局旁路增益，任何 panic（LLM 客户端、批处理、缓存层）都不得冒泡污染建局主事务。
+	defer func() {
+		if recovered := recover(); recovered != nil && state != nil {
+			appendLog(state, "unit_profile_panic", fmt.Sprintf("单位身份叙事补全发生异常，已回退本地模板：%v", recovered), "", "")
+		}
+	}()
+	service.enrichUnitIdentityNarrativesBatchBestEffort(ctx, state, records)
+}
+
+// enrichUnitIdentityNarrativesBatchBestEffort 批量补全单位身份叙事。
+// 优先复用缓存，其次走批量接口，降级时逐个请求并应用本地回退；成功结果写回缓存供后续开局复用。
 func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 	ctx context.Context,
 	state *State,
@@ -130,6 +159,13 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		if strings.TrimSpace(record.Identity.Biography) != "" && strings.TrimSpace(record.Identity.RecruitmentPitch) != "" {
 			continue
 		}
+		signature := unitNarrativeSignature(*record)
+		// 缓存命中即直接复用，跳过本次 LLM 调用（与 primeRecordNarrative / refreshRecordNarrativeInPlace 同源）。
+		if payload, ok := service.loadCachedUnitNarrative(ctx, signature); ok {
+			record.Identity.Biography = payload.Biography
+			record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+			continue
+		}
 		systemPrompt, userPrompt, request := buildUnitIdentityNarrativeRequest(*record)
 		key := strings.TrimSpace(record.ID)
 		if key == "" {
@@ -138,6 +174,7 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		plans = append(plans, unitIdentityPlan{
 			key:          key,
 			record:       record,
+			signature:    signature,
 			systemPrompt: systemPrompt,
 			userPrompt:   userPrompt,
 			request:      request,
@@ -157,8 +194,7 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 				plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
 				continue
 			}
-			plan.record.Identity.Biography = payload.Biography
-			plan.record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+			service.applyUnitIdentityPayload(ctx, state, plan, payload)
 		}
 		return
 	}
@@ -202,8 +238,7 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 			continue
 		}
 		service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, batchResult.Result, payload.RecruitmentPitch, ""))
-		plan.record.Identity.Biography = payload.Biography
-		plan.record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+		service.applyUnitIdentityPayload(ctx, state, plan, payload)
 	}
 	for key, plan := range planByKey {
 		if _, ok := handled[key]; ok || plan.record == nil {
@@ -212,6 +247,28 @@ func (service *Service) enrichUnitIdentityNarrativesBatchBestEffort(
 		service.appendUnitIdentityLLMInteraction(ctx, state, buildUnitIdentityBatchInteraction(state, plan, ai.CompletionResult{}, "", "unit profile batch result missing"))
 		plan.record.Identity.Biography = fallbackUnitBiography(*plan.record)
 		plan.record.Identity.RecruitmentPitch = fallbackRecruitmentPitch(*plan.record)
+	}
+}
+
+// applyUnitIdentityPayload 把一次成功的身份叙事结果写回单位记录并 best-effort 落缓存。
+// 缓存写入失败不影响记录改写，仅在 state 存在时记一条日志。
+func (service *Service) applyUnitIdentityPayload(
+	ctx context.Context,
+	state *State,
+	plan unitIdentityPlan,
+	payload unitIdentityNarrativePayload,
+) {
+	if plan.record == nil {
+		return
+	}
+	plan.record.Identity.Biography = payload.Biography
+	plan.record.Identity.RecruitmentPitch = payload.RecruitmentPitch
+	signature := strings.TrimSpace(plan.signature)
+	if signature == "" {
+		signature = unitNarrativeSignature(*plan.record)
+	}
+	if cacheErr := service.saveCachedUnitNarrative(ctx, signature, payload); cacheErr != nil && state != nil {
+		appendLog(state, "unit_profile_cache_error", fmt.Sprintf("%s 的人物档案缓存写入失败：%v", plan.record.DisplayName(), cacheErr), plan.record.ID, "")
 	}
 }
 

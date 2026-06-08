@@ -450,3 +450,34 @@ CREATE TABLE IF NOT EXISTS world_ticks (
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
   PRIMARY KEY (world_id, region_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 编年史物化表（双驱动地基）：把散落事件物化成可读编年史条目，供传记/分享卡/命运 Copilot 取材。
+-- append-only；kind 区分类别，text 为人读叙事。无 units 外键（跨分片/离线角色），归属由业务层负责。
+CREATE TABLE IF NOT EXISTS chronicle_entries (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  unit_id VARCHAR(191) NULL,
+  turn INT NOT NULL DEFAULT 0,
+  kind VARCHAR(64) NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_chronicle_entries_session (session_id, created_at),
+  INDEX idx_chronicle_entries_unit (unit_id, turn)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 关系图传播留痕表（双驱动地基）：血仇/哀恸/相关性沿关系图扩散的每一跳留痕，供调试/复盘/反作弊审计。
+-- origin_event_id 传播源；from_unit→to_unit 这一跳的边；hop 跳数；fidelity=0.6^hop 可信度。
+-- append-only；无 units 外键（跨分片/离线角色），归属由业务层负责。
+CREATE TABLE IF NOT EXISTS propagation_log (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  origin_event_id VARCHAR(191) NOT NULL DEFAULT '',
+  from_unit VARCHAR(191) NULL,
+  to_unit VARCHAR(191) NULL,
+  hop INT NOT NULL DEFAULT 0,
+  fidelity DOUBLE NOT NULL DEFAULT 0,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_propagation_log_session (session_id, created_at),
+  INDEX idx_propagation_log_origin (origin_event_id),
+  INDEX idx_propagation_log_to (to_unit)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

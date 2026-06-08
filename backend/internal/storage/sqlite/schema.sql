@@ -511,3 +511,37 @@ CREATE TABLE IF NOT EXISTS world_ticks (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (world_id, region_id)
 );
+
+-- 编年史物化表（双驱动地基）：把散落事件物化成「可读编年史」条目，供传记/分享卡/命运 Copilot 取材。
+-- append-only 留痕；kind 区分编年史类别（如 chronicle_record/birth/death/vengeance…），text 为人读叙事。
+-- 刻意不设 units 外键：unit_id 可能是跨分片/已离线角色，归属完整性由业务层负责。
+CREATE TABLE IF NOT EXISTS chronicle_entries (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  unit_id TEXT,
+  turn INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_chronicle_entries_session ON chronicle_entries(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chronicle_entries_unit ON chronicle_entries(unit_id, turn);
+
+-- 关系图传播留痕表（双驱动地基）：血仇/哀恸/相关性沿关系图扩散的每一跳留痕，供调试/复盘/反作弊审计。
+-- origin_event_id 是传播源事件；from_unit→to_unit 是这一跳的边；hop 跳数；fidelity=HopFidelity(hop)=0.6^hop 可信度。
+-- append-only；刻意不设 units 外键（跨分片/离线角色），归属完整性由业务层负责。
+CREATE TABLE IF NOT EXISTS propagation_log (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  origin_event_id TEXT NOT NULL DEFAULT '',
+  from_unit TEXT,
+  to_unit TEXT,
+  hop INTEGER NOT NULL DEFAULT 0,
+  fidelity REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_propagation_log_session ON propagation_log(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_propagation_log_origin ON propagation_log(origin_event_id);
+CREATE INDEX IF NOT EXISTS idx_propagation_log_to ON propagation_log(to_unit);

@@ -84,6 +84,25 @@ const (
 	// MODERATION_WARNING：警告——对被举报单位小幅下调士气示警；MODERATION_BAN：封禁——重罚士气与忠诚。
 	ReasonModerationWarning ReasonCode = "MODERATION_WARNING"
 	ReasonModerationBan     ReasonCode = "MODERATION_BAN"
+
+	// 本波（offline_charter + 编年史 + 传播 + 自治）新增流程事件码——除特别注明外均经 EmitProcessEvent
+	// 留痕，**不改保护状态字段、不走 status.Mutator**（流程事件旁路）。
+	// GOAL_REASSESS：单位据离线宪章长期目标做目标重估，把结论写进记忆（流程+写记忆）。
+	ReasonGoalReassess ReasonCode = "GOAL_REASSESS"
+	// CHRONICLE_RECORD：一条事件被物化进编年史（chronicle_entries），供传记/分享卡取材。
+	ReasonChronicleRecord ReasonCode = "CHRONICLE_RECORD"
+	// BLOOD_FEUD_PROPAGATE：血仇/敌意沿关系图传播的一跳（propagation_log 留痕；区别于落士气的 BLOOD_FEUD_GRIEF）。
+	ReasonBloodFeudPropagate ReasonCode = "BLOOD_FEUD_PROPAGATE"
+	// FREEZE_INTERCEPT：离线自治选择触碰宪章红线/Pinned 硬门被冻结拦截（如卖传家宝/叛变），回退安全决策。
+	ReasonFreezeIntercept ReasonCode = "FREEZE_INTERCEPT"
+	// CHARTER_ACTIVATED：玩家离场，单位据离线宪章进入自治授权态（长效授权生效留痕）。
+	ReasonCharterActivated ReasonCode = "CHARTER_ACTIVATED"
+	// CHARTER_UPDATED：玩家更新/撤销了某单位的离线宪章（授权变更留痕）。
+	ReasonCharterUpdated ReasonCode = "CHARTER_UPDATED"
+	// AMBITION_SHIFT：六维野心向量随经历/人格漂移发生迁移（流程留痕，野心非保护状态字段）。
+	ReasonAmbitionShift ReasonCode = "AMBITION_SHIFT"
+	// REDLINE_TRIP：某行为触发了宪章红线（被归因校验/硬门判为越线），用于回响与复盘留痕。
+	ReasonRedlineTrip ReasonCode = "REDLINE_TRIP"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -134,6 +153,14 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonLoyaltyStrain, Category: CategoryRelation, DisplayName: "离心", DefaultReasonText: "某些经历让她对你生了疏离", StatDomains: []string{"loyalty"}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonModerationWarning, Category: CategoryGovernance, DisplayName: "治理警告", DefaultReasonText: "因一桩举报被裁定示警，她的士气受了些影响", StatDomains: []string{"morale"}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonModerationBan, Category: CategoryGovernance, DisplayName: "治理封禁", DefaultReasonText: "因一桩举报被裁定封禁，她的士气与归属感重挫", StatDomains: []string{"morale", "loyalty"}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonGoalReassess, Category: CategoryLifecycle, DisplayName: "目标重估", DefaultReasonText: "她对照心中的长远图景，重新掂量了眼下该做的事", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonChronicleRecord, Category: CategoryLifecycle, DisplayName: "编年记述", DefaultReasonText: "这一笔被记进了编年史", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonBloodFeudPropagate, Category: CategoryRelation, DisplayName: "血仇蔓延", DefaultReasonText: "一桩血仇沿着人心传到了她这里", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
+		{Code: ReasonFreezeIntercept, Category: CategoryLifecycle, DisplayName: "红线拦截", DefaultReasonText: "她正要做的事触到了底线，被拦了下来", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonCharterActivated, Category: CategoryPlayer, DisplayName: "宪章生效", DefaultReasonText: "你不在的时候，她将依你立下的章程自行其是", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonCharterUpdated, Category: CategoryPlayer, DisplayName: "宪章变更", DefaultReasonText: "你重新拟定了她离场后的行事章程", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonAmbitionShift, Category: CategoryLifecycle, DisplayName: "野心流转", DefaultReasonText: "经历沉淀，她内心所求悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonRedlineTrip, Category: CategoryLifecycle, DisplayName: "触碰红线", DefaultReasonText: "一桩行为越过了她（或你）立下的红线", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 	}
 }
 

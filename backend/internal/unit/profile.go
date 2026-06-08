@@ -121,12 +121,27 @@ type MemoryProfile struct {
 	Highlights     []string `json:"highlights"`
 }
 
+// Ambition 是单位的六维野心向量，各分量 [0,1]，刻画其内在驱动力，可被人格漂移调节、供离线自治目标重估参考。
+// power 权势、vengeance 复仇、wealth 财富、lineage 血脉、mastery 精进、freedom 自由。
+// 全 omitempty——旧存档无此字段反序列化为零值（全 0=无明显野心），向后兼容。
+type Ambition struct {
+	Power     float64 `json:"power,omitempty"`
+	Vengeance float64 `json:"vengeance,omitempty"`
+	Wealth    float64 `json:"wealth,omitempty"`
+	Lineage   float64 `json:"lineage,omitempty"`
+	Mastery   float64 `json:"mastery,omitempty"`
+	Freedom   float64 `json:"freedom,omitempty"`
+}
+
 // ItemStack 结构体用于承载该模块的核心数据。
 type ItemStack struct {
 	ItemID     string `json:"item_id"`
 	Quantity   int    `json:"quantity"`
 	CustomName string `json:"custom_name,omitempty"`
 	Level      int    `json:"level,omitempty"`
+	// Pinned 标记「传家宝」——绝不被离线自治逻辑自动卖/赠（喂归因 GateSurprise 的 ActionSellPinned 硬门）。
+	// omitempty：旧存档无此字段反序列化为 false（默认可正常交易），向后兼容。
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // Inventory 结构体用于承载该模块的核心数据。
@@ -141,6 +156,7 @@ type Profile struct {
 	Stats       Stats         `json:"stats"`
 	Skills      SkillSet      `json:"skills"`
 	Personality Personality   `json:"personality"`
+	Ambition    Ambition      `json:"ambition,omitempty"` // 六维野心向量；可被人格漂移调节，供离线自治目标重估参考
 	Social      SocialState   `json:"social"`
 	Status      Status        `json:"status"`
 	Memory      MemoryProfile `json:"memory"`
@@ -155,10 +171,14 @@ type Record struct {
 	Stats       Stats         `json:"stats"`
 	Skills      SkillSet      `json:"skills"`
 	Personality Personality   `json:"personality"`
+	Ambition    Ambition      `json:"ambition,omitempty"` // 六维野心向量（与 Profile.Ambition 对齐），可被人格漂移调节
 	Social      SocialState   `json:"social"`
 	Status      Status        `json:"status"`
 	Memory      MemoryProfile `json:"memory"`
 	Inventory   Inventory     `json:"inventory"`
+	// Pinned 标记「不可自动处置」的角色（如传家血脉/受保护单位）——离线自治逻辑绝不自动卖/弃/送走。
+	// omitempty：旧存档无此字段反序列化为 false，向后兼容。
+	Pinned bool `json:"pinned,omitempty"`
 	// Version 是乐观并发版本号（M7.3-real-3-0），仅由 GetByID 从 version 列填充、供 SaveOptimistic 做条件写；
 	// 非 blob 字段、不参与序列化语义（json 仅为完整性）。其它读路径（ListBySession 等）不填，留 0。
 	Version int64 `json:"version,omitempty"`
@@ -180,6 +200,7 @@ func (record Record) Profile() Profile {
 		Stats:       record.Stats,
 		Skills:      record.Skills,
 		Personality: record.Personality,
+		Ambition:    record.Ambition,
 		Social:      record.Social,
 		Status:      record.Status,
 		Memory:      record.Memory,
@@ -193,4 +214,6 @@ type profileDocument struct {
 	Skills   SkillSet      `json:"skills"`
 	Social   SocialState   `json:"social"`
 	Memory   MemoryProfile `json:"memory"`
+	Ambition Ambition      `json:"ambition,omitempty"` // 六维野心向量（自发行为引力源），随 profile blob 持久化
+	Pinned   bool          `json:"pinned,omitempty"`   // 角色级「不可自动处置」标记（离线自治绝不自动卖/弃/送走）
 }

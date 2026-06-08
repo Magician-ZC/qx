@@ -53,3 +53,27 @@ func TestLifecycleReasonCodesRegistered(t *testing.T) {
 		t.Fatalf("CHARACTER_DIED 应标注 lives_remaining 域，得到 %v", def.StatDomains)
 	}
 }
+
+func TestCharterWaveReasonCodesRegistered(t *testing.T) {
+	// 本波（offline_charter/编年史/传播/自治）新增码必须可 Lookup——否则相关流程留痕/校验会被拒绝。
+	want := []ReasonCode{
+		ReasonGoalReassess, ReasonChronicleRecord, ReasonBloodFeudPropagate, ReasonFreezeIntercept,
+		ReasonCharterActivated, ReasonCharterUpdated, ReasonAmbitionShift, ReasonRedlineTrip,
+	}
+	for _, code := range want {
+		def, ok := Lookup(code)
+		if !ok {
+			t.Fatalf("本波 reason code 未登记: %s", code)
+		}
+		if def.Code != code {
+			t.Fatalf("Lookup(%s) 返回了 %s", code, def.Code)
+		}
+	}
+	// 这些都是流程事件码（不改保护字段），StatDomains 应为空（非 nil）。
+	for _, code := range want {
+		def, _ := Lookup(code)
+		if len(def.StatDomains) != 0 {
+			t.Fatalf("流程事件码 %s 不应标注 StatDomains（不改保护字段），得到 %v", code, def.StatDomains)
+		}
+	}
+}

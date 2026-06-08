@@ -30,7 +30,13 @@ const (
 	sigmoidK      = 6.0 // sigmoid 陡度
 )
 
+// DefaultReturnVisits 是回访次数的安全默认值。调用方在「回访计数尚未埋点/查询失败」时
+// 应显式传入该默认，让该维度退化为「无贡献」而非凭空抬升牵挂——保守、可回退。
+const DefaultReturnVisits = 0
+
 // Compute 返回牵挂等级 [0,100]。对每个输入单调不减；零输入→低牵挂，满输入→接近 100。
+// 回访（in.ReturnVisits）是「回访越多牵挂越深」维度的真实入参：调用方应从 return_visit 计数喂入，
+// 暂未接通时传 DefaultReturnVisits。负数被夹为 0。
 func Compute(in Inputs) float64 {
 	res := clamp01(in.Resonance)
 	days := saturate(float64(maxInt(0, in.DaysAlive)), daysHalfLife) // 1 - exp(-d/τ) ∈ [0,1)
@@ -40,6 +46,19 @@ func Compute(in Inputs) float64 {
 	raw := wResonance*res + wDaysAlive*days + wVisits*visits + wCoCreate*coc // ∈ [0,1]
 	att := 100.0 / (1.0 + math.Exp(-sigmoidK*(raw-0.5)))
 	return math.Round(att*100) / 100
+}
+
+// ComputeWithSignals 是位置参数形式的便捷入口，专为「把真实回访计数喂进牵挂」的接线场景设计：
+// resonance=共鸣[0,1]、daysAlive=在世天数、returnVisits=真实回访次数（来自 return_visit 计数，
+// 未埋点时传 DefaultReturnVisits）、coCreations=共创次数。语义与 Compute(Inputs{...}) 完全一致，
+// 仅把回访从可被忽略的结构体字段提升为显式必填参数，避免调用方再硬编码 0 而漏掉该维度。
+func ComputeWithSignals(resonance float64, daysAlive, returnVisits, coCreations int) float64 {
+	return Compute(Inputs{
+		Resonance:    resonance,
+		DaysAlive:    daysAlive,
+		ReturnVisits: returnVisits,
+		CoCreations:  coCreations,
+	})
 }
 
 func clamp01(v float64) float64 {

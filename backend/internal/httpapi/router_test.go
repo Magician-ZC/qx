@@ -58,6 +58,28 @@ func TestEliteEncounterRouteRegistered(t *testing.T) {
 	}
 }
 
+func TestCharterRoutesRegistered(t *testing.T) {
+	router := newTestRouter(t)
+	// GET：路由已注册且 handler 运行 —— 对不存在的会话取宪章应 404（GetSnapshot 失败），而非 405/未注册。
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/sessions/nope/units/ghost/charter", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("不存在会话取宪章应 404（证明路由已注册 + 鉴权/会话守卫生效），得到 %d (%s)", w.Code, w.Body.String())
+	}
+	// PUT：同样对不存在会话写宪章应 404（先过 GetSnapshot 会话守卫）。
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, jsonReq(http.MethodPut, "/api/sessions/nope/units/ghost/charter", `{"long_term_goals":["守土"]}`))
+	if w2.Code != http.StatusNotFound {
+		t.Fatalf("不存在会话写宪章应 404（会话守卫先于落库），得到 %d (%s)", w2.Code, w2.Body.String())
+	}
+	// DELETE：撤销同理 404。
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, httptest.NewRequest(http.MethodDelete, "/api/sessions/nope/units/ghost/charter", nil))
+	if w3.Code != http.StatusNotFound {
+		t.Fatalf("不存在会话撤销宪章应 404，得到 %d (%s)", w3.Code, w3.Body.String())
+	}
+}
+
 func TestWorldRoutesRoundTrip(t *testing.T) {
 	router := newTestRouter(t)
 

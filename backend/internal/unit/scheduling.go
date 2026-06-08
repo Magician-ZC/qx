@@ -149,6 +149,8 @@ func decodeUnitRow(scan func(dest ...any) error) (Record, error) {
 		record.Social.ChildUnitIDs = []string{}
 	}
 	record.Memory = profile.Memory
+	record.Ambition = profile.Ambition
+	record.Pinned = profile.Pinned
 	if record.Identity.Name == "" {
 		record.Identity.Name = displayName
 	}

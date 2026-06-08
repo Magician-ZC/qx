@@ -148,6 +148,8 @@ func BootstrapRecord(seed int64, sessionID string, factionID string, name string
 			Equipment: map[string]ItemStack{},
 			Backpack:  []ItemStack{},
 		},
+		// 六维野心向量确定性派生（unit.Ambition 在全代码库的唯一写入源，覆盖所有建人路径）。
+		Ambition: DeriveAmbition(seed, "wanderer", ""),
 	}
 }
 
@@ -221,6 +223,8 @@ func marshalUnitBlobs(record Record) (profile, personality, statusJSON, inventor
 		Skills:   record.Skills,
 		Social:   record.Social,
 		Memory:   record.Memory,
+		Ambition: record.Ambition,
+		Pinned:   record.Pinned,
 	})
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("marshal unit profile: %w", err)
@@ -432,6 +436,8 @@ func (repository *Repository) GetByID(ctx context.Context, unitID string) (Recor
 		record.Social.ChildUnitIDs = []string{}
 	}
 	record.Memory = profile.Memory
+	record.Ambition = profile.Ambition
+	record.Pinned = profile.Pinned
 	if record.Identity.Name == "" {
 		record.Identity.Name = displayName
 	}
@@ -507,6 +513,8 @@ func (repository *Repository) ListBySession(ctx context.Context, sessionID strin
 		record.Stats = profile.Stats
 		record.Skills = profile.Skills
 		record.Memory = profile.Memory
+		record.Ambition = profile.Ambition
+		record.Pinned = profile.Pinned
 		if record.Identity.Name == "" {
 			record.Identity.Name = displayName
 		}

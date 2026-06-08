@@ -1546,6 +1546,73 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"unit": rec})
 	})
+
+	// ---- 离线宪章（offline_charter）读写：玩家不在场时单位据此自治的三段长效授权 ----
+	// 会话作用域 + 鉴权 + 单位归属校验（同 feuds 端点范式）：拒绝跨会话/任意 unitId 越权读写他人宪章。
+	// 三段：long_term_goals（长期目标，驱动目标重估）、redlines（红线，喂归因校验/Freeze List 硬门）、social_mandates（社交授权）。
+	//
+	// resolveCharterUnit 解析并鉴权：返回 (snapshot.ID, 已校验属本会话的 unitID, true)；失败时已写好响应。
+	resolveCharterUnit := func(c *gin.Context) (string, string, bool) {
+		snapshot, err := newSessionService().GetSnapshot(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return "", "", false
+		}
+		if _, ok := resolveCommanderFaction(c, snapshot.ID, snapshot.PlayerFactionID); !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role token"})
+			return "", "", false
+		}
+		unitID := strings.TrimSpace(c.Param("unitId"))
+		rec, err := unit.NewRepository(deps.Store).GetByID(c.Request.Context(), unitID)
+		if err != nil || strings.TrimSpace(rec.SessionID) != snapshot.ID {
+			c.JSON(http.StatusNotFound, gin.H{"error": "unit not found in session"})
+			return "", "", false
+		}
+		return snapshot.ID, unitID, true
+	}
+	// 读：返回该单位当前的离线宪章（未设立时 charter 为空三段，exists=false）。
+	router.GET("/api/sessions/:id/units/:unitId/charter", func(c *gin.Context) {
+		sessionID, unitID, ok := resolveCharterUnit(c)
+		if !ok {
+			return
+		}
+		charter, exists, err := newSessionService().GetUnitCharterForSession(c.Request.Context(), sessionID, unitID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"charter": charter, "exists": exists})
+	})
+	// 写：设立/覆盖该单位的离线宪章（写入即 NormalizeCharter，落库并写 CHARTER_ACTIVATED/CHARTER_UPDATED 留痕）。
+	router.PUT("/api/sessions/:id/units/:unitId/charter", func(c *gin.Context) {
+		sessionID, unitID, ok := resolveCharterUnit(c)
+		if !ok {
+			return
+		}
+		var body session.OfflineCharter
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid charter payload"})
+			return
+		}
+		stored, err := newSessionService().SetUnitCharterForSession(c.Request.Context(), sessionID, unitID, body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"charter": stored})
+	})
+	// 撤销：删除该单位的离线宪章（撤销长效授权，写 CHARTER_UPDATED 留痕）。
+	router.DELETE("/api/sessions/:id/units/:unitId/charter", func(c *gin.Context) {
+		sessionID, unitID, ok := resolveCharterUnit(c)
+		if !ok {
+			return
+		}
+		if err := newSessionService().ClearUnitCharterForSession(c.Request.Context(), sessionID, unitID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
 	router.POST("/api/fate/decisions/:decisionId/resolve", func(c *gin.Context) {
 		var request struct {
 			SessionID   string `json:"session_id"`
@@ -1586,7 +1653,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		id, err := newSessionService().RecordPlayerIntervention(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Summary)
+		// 接管落事件 + best-effort 触发「intervention」成因人格漂移（玩家介入潜移默化改变她；漂移失败不影响接管）。
+		id, err := newSessionService().RecordPlayerInterventionWithDrift(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Summary)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
