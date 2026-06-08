@@ -283,6 +283,43 @@ func (s *Service) UpsertSKU(ctx context.Context, sku SKU) (string, error) {
 	return sku.ID, err
 }
 
+// SeedDefaultSKUs 幂等播种一组默认售卖项目，修复「SKU 目录从未播种 → ListSKUs 永远空 → 充值面板无商品」缺口（审计 PRD §3）。
+// 复用 UpsertSKU（INSERT...ON CONFLICT/DUPLICATE，天然幂等）：每个 SKU 用稳定 id（"sku_*"），重复调用只刷新字段、不产生重复行。
+//
+// 反 P2W（设计宪法 / PRD §3「绝不卖战斗或命运胜负优势」）：本目录只售
+//   - 会员订阅（叙事/陪伴增量服务，不改战斗胜负或命运掷骰）；
+//   - 一次性「叙事密度包 / 信鸽加速」等纯叙事节奏权益；
+//   - 外观类（角色皮肤）。
+//
+// 严禁出现任何直接或间接增益战斗 Score / 命运仲裁胜率 / 掉落排他权的 SKU——后者由 arbitration（胜率∝Score、付费不进）与
+// encounter（ContributionScore 付费不进）在机制层兜底，本目录在商品层先行自律。
+// best-effort：仅运营/启动期灌目录用，不受 enabled flag 限制（与 UpsertSKU 同，纯目录写）。
+func (s *Service) SeedDefaultSKUs(ctx context.Context) error {
+	if s.db == nil {
+		return fmt.Errorf("billing: nil db")
+	}
+	// 价格单位为分（cents）。订阅类带 ISO-8601 period（P1M/P3M/P1Y）→ grantEntitlement 据此算到期；
+	// 一次性/消耗品/外观 period 留空 → 永久权益（subscriptionExpiry 返 nil）。
+	defaults := []SKU{
+		// —— 会员订阅（叙事陪伴增量，反 P2W：不触碰战斗/命运胜负）——
+		{ID: "sku_member_monthly", Kind: "subscription", Name: "天命会员·月卡", PriceCents: 3000, Period: "P1M", Active: true},
+		{ID: "sku_member_quarterly", Kind: "subscription", Name: "天命会员·季卡", PriceCents: 8000, Period: "P3M", Active: true},
+		{ID: "sku_member_yearly", Kind: "subscription", Name: "天命会员·年卡", PriceCents: 29800, Period: "P1Y", Active: true},
+		// —— 一次性叙事密度 / 节奏权益（consumable，period 空 → 永久领取，纯叙事不改胜负）——
+		{ID: "sku_narrative_density_pack", Kind: "consumable", Name: "叙事密度包", PriceCents: 1800, Period: "", Active: true},
+		{ID: "sku_pigeon_express", Kind: "consumable", Name: "信鸽加急·五连", PriceCents: 600, Period: "", Active: true},
+		// —— 外观（entitlement，纯装饰，绝无属性）——
+		{ID: "sku_cosmetic_banner_pack", Kind: "entitlement", Name: "阵营旗帜外观包", PriceCents: 1200, Period: "", Active: true},
+	}
+	for _, sku := range defaults {
+		// CreatedAt 留空 → UpsertSKU 首次插入填 nowTimestamp；ON CONFLICT 路径不更新 created_at（保留首播时间）。
+		if _, err := s.UpsertSKU(ctx, sku); err != nil {
+			return fmt.Errorf("billing: seed sku %q: %w", sku.ID, err)
+		}
+	}
+	return nil
+}
+
 // getSKU 读单个 SKU（Purchase 用以取金额）。
 func (s *Service) getSKU(ctx context.Context, skuID string) (SKU, error) {
 	var sku SKU

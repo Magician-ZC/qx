@@ -109,6 +109,18 @@ type obedienceResolution struct {
 	RejectProbability float64
 	RiskScore         float64
 	Modifiers         actionModifiers
+	// HasPlayerDirective 标记本次决策处于「玩家方针/任务/即时令」管辖下（actor 属玩家阵营且
+	// directiveContextForActor 非空）。忠诚闭环（loyalty_loop.go）据此判定是否应结算忠诚——
+	// 无玩家指令时单位的行为是纯自主，不触发「越按越不听 / 顺其本心」的任何忠诚反馈。
+	HasPlayerDirective bool
+	// ForcedByImmediateOrder 标记本次顺从是被玩家即时令（order，已扣指挥力的付费动作）强制压下来的：
+	// 单位本回合收到点名即时令、走 activeImmediateOrderForUnit 早返回路径（无掷骰、无抗命空间）。
+	ForcedByImmediateOrder bool
+	// WouldDefyUnderForce 仅在 ForcedByImmediateOrder=true 时有意义：表示「若没有这道即时令、
+	// 单位本会被自身倾向驱使抗命」（按与主路径一致的抗命概率算出的影子判定 ≥ 强令阈值）。
+	// 这是「越按越不听」忠诚负反馈的触发位——被强令做了违心的事才扣忠诚，强令做了它本来也想做的
+	// 事则不扣。确定性：复用 directiveOrderRisk + 各 reject modifier，无随机。
+	WouldDefyUnderForce bool
 }
 
 // resolveDirectiveCompliance 根据方针风险与单位状态评估执行顺从度。
@@ -152,8 +164,21 @@ func resolveDirectiveComplianceWithRoll(
 	if directiveText == "" {
 		return resolution
 	}
+	resolution.HasPlayerDirective = true
 	if forcedOrder, ok := activeImmediateOrderForUnit(state, actor.ID); ok {
 		resolution.Note = fmt.Sprintf("收到即时令：%s", strings.TrimSpace(forcedOrder.Text))
+		resolution.ForcedByImmediateOrder = true
+		// 影子判定「若没有这道强令、单位本会不会抗命」：复用主路径的风险+抗命概率口径，
+		// 但即时令路径无掷骰（强制压下来），故用「抗命概率是否过强令阈值」作为「越按越不听」的触发位。
+		shadowRisk := directiveOrderRisk(state, byID, actor, decision, directiveText)
+		resolution.RiskScore = shadowRisk
+		if shadowRisk >= 0.9 {
+			shadowReject := directiveRejectProbability(state, byID, actor, decision, shadowRisk)
+			resolution.RejectProbability = shadowReject
+			// forcedDefianceThreshold：影子抗命概率达到此阈即认定「本会违心抗命」。取与主路径
+			// reluctant/refused 同量级的保守阈值，避免把「略有顾虑也照做」误判成被强压。
+			resolution.WouldDefyUnderForce = shadowReject >= forcedDefianceThreshold
+		}
 		return resolution
 	}
 
@@ -163,15 +188,7 @@ func resolveDirectiveComplianceWithRoll(
 		return resolution
 	}
 
-	personalityMod := personalityRejectModifier(*actor)
-	statusMod := statusRejectModifier(*actor)
-	memoryMod := memoryRejectModifier(state, byID, actor, decision)
-	loyaltyMod := loyaltyRejectModifier(*actor)
-
-	rejectProbability := clamp01(0.05 * personalityMod * statusMod * risk * memoryMod * loyaltyMod)
-	if rejectProbability > 0.85 {
-		rejectProbability = 0.85
-	}
+	rejectProbability := directiveRejectProbability(state, byID, actor, decision, risk)
 	resolution.RejectProbability = rejectProbability
 	if roll >= rejectProbability {
 		return resolution
@@ -219,6 +236,33 @@ func resolveDirectiveComplianceWithRoll(
 	}
 
 	return resolution
+}
+
+// forcedDefianceThreshold 是「被即时令强压时，影子抗命概率达到此阈即认定单位本会违心抗命」
+// 的判定阈。取 0.3：与主路径 band<0.40 进入 reluctant（违心执行）同量级，保守地只把「明显本会抗命」
+// 的强令算作「越按越不听」的扣忠诚触发，避免把「略有顾虑仍照做」误伤为被强压。
+const forcedDefianceThreshold = 0.3
+
+// directiveRejectProbability 按与主路径完全一致的口径计算单位对当前指令的抗命概率。
+// 抽取自 resolveDirectiveComplianceWithRoll 主分支，供主分支与「即时令强压影子判定」共用，
+// 保证「越按越不听」的判定与真实抗命判定同源。纯函数、确定性（仅依赖人格/状态/记忆/忠诚修正与风险）。
+func directiveRejectProbability(
+	state State,
+	byID map[string]*unit.Record,
+	actor *unit.Record,
+	decision unitDecisionPayload,
+	risk float64,
+) float64 {
+	personalityMod := personalityRejectModifier(*actor)
+	statusMod := statusRejectModifier(*actor)
+	memoryMod := memoryRejectModifier(state, byID, actor, decision)
+	loyaltyMod := loyaltyRejectModifier(*actor)
+
+	rejectProbability := clamp01(0.05 * personalityMod * statusMod * risk * memoryMod * loyaltyMod)
+	if rejectProbability > 0.85 {
+		rejectProbability = 0.85
+	}
+	return rejectProbability
 }
 
 // deterministicDirectiveRoll 生成与会话上下文绑定的稳定掷骰值。

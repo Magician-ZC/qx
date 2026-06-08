@@ -3,6 +3,7 @@ package httpapi
 // 文件说明：HTTP API 路由总装入口，连接会话服务、账户服务、地形接口与实时推送广播。
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -99,6 +100,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	var billingSvc *billing.Service
 	if billingEnabled {
 		billingSvc = billing.NewService(deps.Store)
+		// 播种默认 SKU 目录（幂等，best-effort）——否则 ListSKUs 永远空、充值面板无商品。仅 flag 开时播种，零行为变化。
+		_ = billingSvc.SeedDefaultSKUs(context.Background())
 	}
 	complianceSvc := compliance.NewService(deps.Store)
 

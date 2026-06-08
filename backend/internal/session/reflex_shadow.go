@@ -67,6 +67,11 @@ func reflexShortCircuitResult() ai.CompletionResult {
 
 // buildReflexSituation 从会话上下文构造反射层输入快照（纯函数，不依赖 DB/LLM）。
 // 保守填充：未知的前因一律取「更需要 LLM」的方向，使影子统计不高估可省比例。
+//
+// 关键节点升级信号（FirstContact/HasNewOrder/SocialOffer/StrategicFork）按 GDD §7.2「<2% 上 LLM」要求，
+// 用**廉价可知**近似填充，使 Router 升级闸在会话内真正触发（关键节点上 LLM、日常安静 tick 仍短路），
+// 而非只靠 EnemyInSight&&PlayerWatching 的战斗短路。口径一律保守：只在 state/actor/targetIDs 已有信息
+// 明确支持时才点亮信号，宁可少升级也不误升级（不引入新 DB 查询，不依赖单位映射表）。
 func buildReflexSituation(state State, actor *unit.Record, targetIDs []string) decision.Situation {
 	enemyInSight := len(targetIDs) > 0 || actor.Status.InCombat
 	return decision.Situation{
@@ -79,8 +84,62 @@ func buildReflexSituation(state State, actor *unit.Record, targetIDs []string) d
 		EnemyInSight:   enemyInSight,
 		EnemyAdjacent:  actor.Status.InCombat,
 		PlayerWatching: true, // 战斗会话默认玩家在场目睹（高光时点应上 LLM）
-		// FirstContact/HasNewOrder/SocialOffer/StrategicFork 现阶段无廉价可知信号，留空（偏向需要 LLM）。
+		FirstContact:   reflexFirstContact(actor, targetIDs),
+		HasNewOrder:    reflexHasNewOrder(state, actor),
+		SocialOffer:    reflexSocialOffer(state, actor),
+		StrategicFork:  reflexStrategicFork(actor, targetIDs),
 	}
+}
+
+// reflexFirstContact 近似「本回合首次遭遇敌对」：视野内有敌（targetIDs 非空）但本单位尚未进入交战
+// （!InCombat）。单位记忆无 combat 标签，故以「敌已现身却未锁定近战」作为「初次接触、尚未交手」的廉价代理。
+// 一旦进入交战（InCombat=true）即不再算首次接触（后续 tick 由 EnemyInSight 路径处理）。空敌列表恒为 false。
+func reflexFirstContact(actor *unit.Record, targetIDs []string) bool {
+	return len(targetIDs) > 0 && !actor.Status.InCombat
+}
+
+// reflexHasNewOrder 近似「玩家刚下达新 order」：本单位本回合持有未消费的即时令（玩家已付指挥力）。
+// 复用 activeImmediateOrderForUnit（不新增查询）。这与 reflexShortCircuitApplies 的早退 gate 同源，
+// 在影子统计/Router 升级路径里也保证「付费命令必上 LLM、绝不静默吞掉」。
+func reflexHasNewOrder(state State, actor *unit.Record) bool {
+	_, has := activeImmediateOrderForUnit(state, actor.ID)
+	return has
+}
+
+// reflexSocialOffer 近似「收到社交/交易/恋爱/结盟邀约」：本回合 DialogueHistory 中存在**他人对本单位**
+// 发起、本单位尚未回应的对白（UnitID==actor 且 Speaker!=actor）。这是 state 上已落地的廉价证据，
+// 不需单位映射/相邻扫描。无对白记录（如空 state）恒为 false，故安静 tick 不误升级。
+func reflexSocialOffer(state State, actor *unit.Record) bool {
+	for index := len(state.DialogueHistory) - 1; index >= 0; index-- {
+		message := state.DialogueHistory[index]
+		if message.Turn != state.TurnState.Turn {
+			// DialogueHistory 大体按回合追加；遇到更早回合即可停止回扫（廉价）。
+			if message.Turn < state.TurnState.Turn {
+				break
+			}
+			continue
+		}
+		if message.UnitID == actor.ID && message.Speaker != "" && message.Speaker != actor.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// reflexStrategicFork 近似「战略岔路（多候选且后果重）」：视野内同时有多个敌目标（≥2，需取舍），
+// 或处于交战且 HP 已跌入「高于撤退线但仍危急」的灰区（fleeRatio<HP/HPMax≤0.5）——此时既不触发保命反射、
+// 后果又重，值得一次 LLM。单目标/平稳 HP/无敌时恒为 false，安静 tick 不误升级。
+func reflexStrategicFork(actor *unit.Record, targetIDs []string) bool {
+	if len(targetIDs) >= 2 {
+		return true
+	}
+	if actor.Status.InCombat && reflexHPMaxConvention > 0 {
+		ratio := float64(actor.Status.HP) / float64(reflexHPMaxConvention)
+		if ratio > 0.25 && ratio <= 0.5 {
+			return true
+		}
+	}
+	return false
 }
 
 // recordReflexShadow 影子记录一次决策：若反射层本可零成本处理（NeedsLLM=false），计入可省。

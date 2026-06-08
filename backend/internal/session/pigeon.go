@@ -265,6 +265,7 @@ func (service *Service) generatePigeonChoice(
 
 	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
 		Task:           ai.TaskDowntime,
+		Importance:     ai.ImportanceCheap, // 闲时信鸽=低 stakes（分tier路由 flag 开时走廉价档/短超时；默认关零影响）
 		SchemaName:     "session_pigeon_choice",
 		ResponseSchema: pigeonChoiceSchema,
 		SystemPrompt:   systemPrompt,

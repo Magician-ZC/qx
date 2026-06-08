@@ -178,6 +178,7 @@ func (service *Service) generateEnemyGlobalDirective(
 
 	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
 		Task:           ai.TaskStrategy,
+		Importance:     ai.ImportanceCritical, // 阵营全局战略=关键节点（分tier路由 flag 开时走强档/长超时；默认关零影响）
 		SchemaName:     "session_enemy_global_directive",
 		ResponseSchema: enemyStrategySchema,
 		SystemPrompt:   systemPrompt,

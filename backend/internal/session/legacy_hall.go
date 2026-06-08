@@ -282,6 +282,7 @@ func (service *Service) generateHallBiography(
 
 	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
 		Task:           ai.TaskBackstory,
+		Importance:     ai.ImportanceCheap, // 名人堂传记=低频低 stakes（分tier路由 flag 开时走廉价档；默认关零影响）
 		SchemaName:     "session_hall_biography",
 		ResponseSchema: hallBiographySchema,
 		SystemPrompt:   systemPrompt,
