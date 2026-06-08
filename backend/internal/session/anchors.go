@@ -7,12 +7,34 @@ package session
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 const anchorDefaultHalfLifeDays = 14.0
+
+// anchorDensitySaturation 控制锚密度饱和速度：Σ(weight·RelativeImportance) 达此值时密度≈0.63、约 2 倍时≈0.86。
+const anchorDensitySaturation = 1.5
+
+// AnchorDensity 返回某角色「在乎程度」的归一密度 [0,1]——锚（目标/红线/债仇爱/血脉 + 实时关系）越多越强、密度越高。
+// 供 region-runner 锚加权威胁刷新（威胁天然扎堆她在乎的地方，PvE-4）：注入式 provider，故放 session（relevance 域知识）。
+// 每类锚按 relevance.RelativeImportance 加权（红线/血脉重于泛泛关系），Σ 经饱和函数压进 [0,1] 不溢出。
+func (service *Service) AnchorDensity(ctx context.Context, unitID string) float64 {
+	if service == nil {
+		return 0
+	}
+	anchors := service.buildRelevanceAnchors(ctx, unitID)
+	var sum float64
+	for _, a := range anchors {
+		sum += a.Weight * relevance.RelativeImportance(a.Kind)
+	}
+	if sum <= 0 {
+		return 0
+	}
+	return 1 - math.Exp(-sum/anchorDensitySaturation)
+}
 
 // UpsertAnchor 写入/更新一条相关性锚（按 (character, kind, ref) 主键累不重复）。weight 夹到 [0,1]。
 func (service *Service) UpsertAnchor(ctx context.Context, characterID string, kind relevance.AnchorKind, ref string, weight float64, label string, halfLifeDays float64) error {

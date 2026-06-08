@@ -60,3 +60,18 @@ if threatsEnabled && currentTier==HOT && rollThreat(sessionID, unitID, tick):
 ## 红线（沿用）
 威胁 `power/hp_pool/Threshold` 是配置常量、付费不进（与受保护字段同级）；遭遇 `combat_roll` 确定性、付费全盲；
 受保护字段经 `status.Mutator` 留痕；失败 `DegradePenalty` D0-D3 硬锁不可逆（lives 永不归零）。
+
+## PvE-4：锚加权威胁刷新（威胁天然扎堆她在乎的地方）
+
+把 PvE-1 的固定概率 `rollThreat`（3%）换成锚加权——**越在乎（anchor 越多越强）的角色，越容易在路上撞见威胁**
+（设计 `PvE威胁系统.md` line 34 的 `threat_spawn_score` 在 region-runner 的 per-unit 落地）。
+
+- **anchor_density**（`session.AnchorDensity(ctx, unitID)`）：`buildRelevanceAnchors`（持久锚目标/红线/债仇爱/血脉 +
+  实时关系锚）→ `Σ weight·relevance.RelativeImportance(kind)` → 饱和归一 `1-exp(-Σ/k)` 到 [0,1]。注入式 provider，保持
+  regionrunner 不依赖 session。
+- **per-unit 概率**：`threatRoll1000(sid,uid,tick)`（确定性 FNV 均匀抽样 0-999）< `threatSpawnPerMille(density)`：
+  `pm = level项(threat_level/100·20‰) + anchor项(density·60‰)`，夹 [破圈下限 5‰, 上限 80‰]。
+  → 零锚单位 ≈1%（破圈：世界仍有危险），满锚 ≈7%（扎堆她在乎处）。
+- **threat_level**：MVP 用常量 `threatBaseLevel`（完整版随后台世界事件累积 + 上限/冷却，登记后续）。
+- **freshness**（反扎堆，记录上次遭遇 tick 压低重复）：登记后续；当前靠概率 roll 的天然分散。
+- **flag** 沿用 `QUNXIANG_REGION_RUNNER_THREATS`；provider 在 THREATS 开时即注入（shadow 也加权）。

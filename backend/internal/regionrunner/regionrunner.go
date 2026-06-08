@@ -178,10 +178,11 @@ type Runner struct {
 	llmSpentMicroUSD  int64         // 已花（atomic，micro-USD）
 	llmLatched        int32         // 预算耗尽闩（atomic，1=此后全转反射）
 
-	// PvE 接入（默认关；main 按 QUNXIANG_REGION_RUNNER_THREATS 开，threatHandler 由 PvE-2 注入，见 threat.go）。
+	// PvE 接入（默认关；main 按 QUNXIANG_REGION_RUNNER_THREATS 开，threatHandler/anchorDensity 由 PvE-2/4 注入，见 threat.go）。
 	threatsEnabled bool                                                      // 是否对 HOT 单位 roll 威胁
 	threatRouter   decision.Router                                           // 关键节点闸（HP 危急撤退 / StrategicFork 升级）
 	threatHandler  func(ctx context.Context, sessionID, unitID string) error // 真遭遇结算（nil=shadow 只计遥测）
+	anchorDensity  func(ctx context.Context, unitID string) float64          // 锚密度查询（PvE-4 锚加权；nil=密度恒 0）
 }
 
 // New 构造 region-runner。now 用 time.Now；execGuard 默认恒 false（无战斗让位，测试/未接 session 时）。

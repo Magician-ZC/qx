@@ -15,10 +15,12 @@ import (
 	"qunxiang/backend/internal/unit"
 )
 
-// firstTick 找首个对 (sid,uid) roll 命中(hit=true)或未命中(hit=false)的 tick（确定性，故可定位）。
+// firstTick 找首个对 (sid,uid) 在零锚(密度0)阈值下命中(hit=true)/未命中(hit=false)的 tick（确定性，故可定位）。
+// 零锚阈值 = threatSpawnPerMille(0)，即无 provider（density 0）时 maybeEncounterThreat 用的阈值。
 func firstTick(sid, uid string, hit bool) int64 {
+	pm := threatSpawnPerMille(0)
 	for t := int64(1); t < 1_000_000; t++ {
-		if rollThreat(sid, uid, t) == hit {
+		if (threatRoll1000(sid, uid, t) < pm) == hit {
 			return t
 		}
 	}
@@ -37,21 +39,89 @@ func healthyRec() unit.Record {
 	return rec
 }
 
-func TestRollThreatDeterministicAndDistribution(t *testing.T) {
+func TestThreatRoll1000DeterministicAndUniform(t *testing.T) {
 	for _, tk := range []int64{1, 42, 9999} { // 确定性：同输入必同结果
-		if rollThreat("s1", "u1", tk) != rollThreat("s1", "u1", tk) {
-			t.Fatalf("rollThreat 应确定性，tick=%d 两次不一致", tk)
+		if threatRoll1000("s1", "u1", tk) != threatRoll1000("s1", "u1", tk) {
+			t.Fatalf("threatRoll1000 应确定性，tick=%d 两次不一致", tk)
 		}
 	}
-	hits := 0 // 分布：~3% 命中（粗区间，防概率常量误改一个数量级）
-	const n = 20000
+	const n = 20000 // 均匀性：取值落 [0,1000)、均值 ~500（粗检防哈希/取模错）
+	sum := 0
 	for tk := int64(0); tk < n; tk++ {
-		if rollThreat("sess", "unit", tk) {
-			hits++
+		v := threatRoll1000("sess", "unit", tk)
+		if v < 0 || v >= 1000 {
+			t.Fatalf("threatRoll1000 应落 [0,1000)，得 %d", v)
+		}
+		sum += v
+	}
+	if mean := float64(sum) / n; mean < 450 || mean > 550 {
+		t.Fatalf("均匀抽样均值应 ~500，实测 %.1f", mean)
+	}
+}
+
+func TestThreatSpawnPerMille_AnchorWeighted(t *testing.T) {
+	zero := threatSpawnPerMille(0)
+	full := threatSpawnPerMille(1)
+	if zero < threatFloorPerMille {
+		t.Fatalf("零锚应≥破圈下限 %d，得 %d", threatFloorPerMille, zero)
+	}
+	if full <= zero {
+		t.Fatalf("满锚应比零锚更易撞威胁（扎堆她在乎处）：full=%d zero=%d", full, zero)
+	}
+	if full > threatMaxPerMille {
+		t.Fatalf("应夹上限 %d，得 %d", threatMaxPerMille, full)
+	}
+	if mid := threatSpawnPerMille(0.5); mid < zero || mid > full {
+		t.Fatalf("应随锚密度单调：mid=%d 不在 [%d,%d]", mid, zero, full)
+	}
+	if threatSpawnPerMille(2) != full || threatSpawnPerMille(-1) != zero {
+		t.Fatalf("密度应夹 [0,1]")
+	}
+}
+
+// TestMaybeEncounterThreat_AnchorClustering 是 PvE-4 核心：同一 tick（draw 落在零锚阈值之上、满锚阈值之下），
+// 高密度（在乎得多）单位撞威胁、零锚单位不撞——证「威胁天然扎堆她在乎的地方」。
+func TestMaybeEncounterThreat_AnchorClustering(t *testing.T) {
+	lo, hi := threatSpawnPerMille(0), threatSpawnPerMille(1)
+	var tick int64 = -1
+	for tk := int64(1); tk < 1_000_000; tk++ {
+		if d := threatRoll1000("s1", "u1", tk); d >= lo && d < hi {
+			tick = tk
+			break
 		}
 	}
-	if rate := float64(hits) / float64(n); rate < 0.015 || rate > 0.05 {
-		t.Fatalf("命中率应 ~3%%（threatChancePerMille=30），实测 %.4f", rate)
+	if tick < 0 {
+		t.Fatal("找不到落在 [零锚阈值, 满锚阈值) 区间的 tick")
+	}
+
+	rHi, ctx := newRunner(t, Config{TickSeconds: 1, Threats: true})
+	rHi.SetAnchorDensityProvider(func(context.Context, string) float64 { return 1.0 }) // 在乎得多
+	if handled, _ := rHi.maybeEncounterThreat(ctx, hotJob(), healthyRec(), scheduler.TierHot, tick); !handled {
+		t.Fatalf("高锚密度单位在该 tick 应撞威胁（draw<%d）", hi)
+	}
+
+	rLo, ctx2 := newRunner(t, Config{TickSeconds: 1, Threats: true}) // 无 provider → 密度 0
+	if handled, _ := rLo.maybeEncounterThreat(ctx2, hotJob(), healthyRec(), scheduler.TierHot, tick); handled {
+		t.Fatalf("零锚单位在该 tick 不应撞威胁（draw≥%d）——威胁应扎堆在乎多的人身上", lo)
+	}
+}
+
+// TestMaybeEncounterThreat_GateEquivalence 守护「省 ~92% 密度查询」的优化门控（draw≥max 短路 / draw<floor 必命中 /
+// [floor,max) 才查密度判定）与朴素 `draw < threatSpawnPerMille(density)` 在大量 tick 上**逐结果等价**——
+// 防优化引入 off-by-one（如 draw>max 写成 draw≥max 错位、漏掉 draw<floor 的破圈命中）。覆盖 draw 全程含 floor/max 边界。
+func TestMaybeEncounterThreat_GateEquivalence(t *testing.T) {
+	for _, density := range []float64{0, 0.5, 1.0} {
+		r, ctx := newRunner(t, Config{TickSeconds: 1, Threats: true})
+		r.SetAnchorDensityProvider(func(context.Context, string) float64 { return density })
+		pm := threatSpawnPerMille(density)
+		for tk := int64(1); tk <= 4000; tk++ {
+			want := threatRoll1000("s1", "u1", tk) < pm // 朴素判定
+			got, _ := r.maybeEncounterThreat(ctx, hotJob(), healthyRec(), scheduler.TierHot, tk)
+			if got != want {
+				t.Fatalf("density=%.1f tick=%d：优化门控=%v 朴素=%v 不等价（draw=%d pm=%d）",
+					density, tk, got, want, threatRoll1000("s1", "u1", tk), pm)
+			}
+		}
 	}
 }
 

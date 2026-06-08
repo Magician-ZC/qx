@@ -64,16 +64,19 @@ func main() {
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
 	regionRunner.SetExecutionGuard(session.IsExecutionRunning) // 让位聚焦战斗：在战会话的单位由战斗循环管
-	// PvE-2 真触发（默认关）：QUNXIANG_REGION_RUNNER_THREATS（roll）+ QUNXIANG_REGION_RUNNER_THREATS_APPLY 都开，才注入
-	// 真 elite 遭遇结算（命中→改 HP/钱包、分赃/惩罚、命运卡）；仅 THREATS 开=shadow（只 roll+计遥测，不真打）。
+	// PvE（默认关）：QUNXIANG_REGION_RUNNER_THREATS 开即 roll 威胁——注入 AnchorDensity 做锚加权（PvE-4，威胁扎堆她在乎处）；
+	// 再开 QUNXIANG_REGION_RUNNER_THREATS_APPLY 才注入真 elite 遭遇结算（PvE-2，命中→改 HP/钱包、分赃/惩罚、命运卡），仅 THREATS=shadow。
 	// ⚠️ 威胁 roll 还依赖 QUNXIANG_REGION_RUNNER_APPLY=true（roll 在 applyAmbientL1 内）——完整真打需 ENABLED+APPLY+THREATS+THREATS_APPLY 四者皆开。
-	// region-runner 专用的长生命 Service（造人/战斗用同一 db）。遭遇前 maybeEncounterThreat 已查让位收窄并发窗口。
-	if regionThreatsEnabled && envBool("QUNXIANG_REGION_RUNNER_THREATS_APPLY") {
+	// region-runner 专用的长生命 Service（造人/战斗/锚查询用同一 db）。遭遇前 maybeEncounterThreat 已查让位收窄并发窗口。
+	if regionThreatsEnabled {
 		threatSvc := session.NewService(db, aiService)
-		regionRunner.SetThreatHandler(func(ctx context.Context, sessionID, unitID string) error {
-			_, err := threatSvc.TriggerEliteEncounter(ctx, sessionID, unitID)
-			return err
-		})
+		regionRunner.SetAnchorDensityProvider(threatSvc.AnchorDensity)
+		if envBool("QUNXIANG_REGION_RUNNER_THREATS_APPLY") {
+			regionRunner.SetThreatHandler(func(ctx context.Context, sessionID, unitID string) error {
+				_, err := threatSvc.TriggerEliteEncounter(ctx, sessionID, unitID)
+				return err
+			})
+		}
 	}
 	// real-3 HOT-LLM（默认关）：QUNXIANG_REGION_RUNNER_LLM=true 才给 HOT 单位上 LLM 离线决策；
 	// 进程级成本上限 QUNXIANG_REGION_LLM_BUDGET_USD（默认 1.0 USD），沿用 session 同一单价表估算。

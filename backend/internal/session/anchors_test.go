@@ -68,3 +68,28 @@ func TestSeedVillagePopulatesAnchors(t *testing.T) {
 		t.Fatalf("强关系应沉淀债仇爱锚，得到 0")
 	}
 }
+
+// TestAnchorDensity_MonotonicWithCare 验证 PvE-4 的 anchor_density：无锚→0、加锚→0<密度<1、锚越多→密度越高
+// （在乎得越多，威胁越易找上她）。供 region-runner 锚加权威胁刷新「天然扎堆她在乎的地方」。
+func TestAnchorDensity_MonotonicWithCare(t *testing.T) {
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	if d := service.AnchorDensity(ctx, "u1"); d != 0 {
+		t.Fatalf("无锚应密度 0，得 %.3f", d)
+	}
+	if err := service.UpsertAnchor(ctx, "u1", relevance.DebtGrudgeLove, "t1", 1.0, "牵挂", 0); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	d1 := service.AnchorDensity(ctx, "u1")
+	if d1 <= 0 || d1 >= 1 {
+		t.Fatalf("一个强锚应 0<density<1，得 %.3f", d1)
+	}
+	if err := service.UpsertAnchor(ctx, "u1", relevance.Redline, "t2", 1.0, "红线", 0); err != nil {
+		t.Fatalf("upsert2: %v", err)
+	}
+	d2 := service.AnchorDensity(ctx, "u1")
+	if d2 <= d1 {
+		t.Fatalf("锚越多密度应越高：d2=%.3f d1=%.3f", d2, d1)
+	}
+}
