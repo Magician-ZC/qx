@@ -35,6 +35,16 @@ const (
 	FieldWallet         Field = "wallet"
 )
 
+// ScopeContext 是事件的世界作用域双键（沙盘 §8.7 / GDD §7.3「Mutator 接 ScopeContext 同写新旧键」）。
+// 三字段全可空（omitempty 语义）：零值=未接入多世界，写出与历史逐字节等价——
+// WorldID/RegionID 空串映射 SQL NULL（与 events.nullableText 一致），Tick 零值写 0
+// （与 events.EmitProcessEvent 的 event.Tick 缺省口径一致）。
+type ScopeContext struct {
+	WorldID  string `json:"world_id,omitempty"`
+	RegionID string `json:"region_id,omitempty"`
+	Tick     int    `json:"tick,omitempty"`
+}
+
 // Mutation 结构体用于承载该模块的核心数据。
 type Mutation struct {
 	UnitID       string            `json:"unit_id"`
@@ -47,6 +57,9 @@ type Mutation struct {
 	Location     string            `json:"location"`
 	Importance   int               `json:"importance"`
 	EmotionalTag string            `json:"emotional_tag"`
+	// Scope 为可选的世界作用域双写（默认零值=旧路径，仅写 session_id；接入多世界后同写
+	// world_id/region_id/tick）。未设置时三列写 NULL/0，与历史行为逐字节等价。
+	Scope ScopeContext `json:"scope,omitempty"`
 }
 
 // EventPayload 结构体用于承载该模块的核心数据。
@@ -181,8 +194,11 @@ func (mutator *Mutator) apply(ctx context.Context, mutation Mutation, save func(
 			event_type,
 			reason_code,
 			payload_json,
-			occurred_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			occurred_at,
+			world_id,
+			region_id,
+			tick
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 		eventID,
 		record.SessionID,
@@ -192,6 +208,9 @@ func (mutator *Mutator) apply(ctx context.Context, mutation Mutation, save func(
 		string(definition.Code),
 		string(encodedPayload),
 		time.Now().UTC().Format(time.RFC3339Nano),
+		nullableScopeText(mutation.Scope.WorldID),
+		nullableScopeText(mutation.Scope.RegionID),
+		mutation.Scope.Tick,
 	); err != nil {
 		return Result{}, fmt.Errorf("insert event: %w", err)
 	}
@@ -245,6 +264,9 @@ func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([
 		category  events.Category
 		code      events.ReasonCode
 		payload   string
+		worldID   string
+		regionID  string
+		tick      int
 	}
 	pending := make([]pendingEvent, 0, len(mutations))
 
@@ -310,6 +332,9 @@ func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([
 				category:  definition.Category,
 				code:      definition.Code,
 				payload:   string(encodedPayload),
+				worldID:   mutation.Scope.WorldID,
+				regionID:  mutation.Scope.RegionID,
+				tick:      mutation.Scope.Tick,
 			})
 		}
 
@@ -338,8 +363,11 @@ func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([
 			event_type,
 			reason_code,
 			payload_json,
-			occurred_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			occurred_at,
+			world_id,
+			region_id,
+			tick
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, ev := range pending {
@@ -347,6 +375,7 @@ func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([
 			ctx, insertEvent,
 			ev.eventID, ev.sessionID, ev.actorID, ev.targetID,
 			string(ev.category), string(ev.code), ev.payload, now,
+			nullableScopeText(ev.worldID), nullableScopeText(ev.regionID), ev.tick,
 		); err != nil {
 			return nil, fmt.Errorf("insert batch event: %w", err)
 		}
@@ -356,6 +385,16 @@ func (mutator *Mutator) ApplyBatch(ctx context.Context, mutations []Mutation) ([
 	}
 
 	return results, nil
+}
+
+// nullableScopeText 把空的作用域字符串（world_id/region_id）映射为 SQL NULL，
+// 与 events.EmitProcessEvent 用的 nullableText 语义一致：未接入多世界时三列写 NULL/0，
+// 与历史 INSERT 逐字节等价，保证零行为变化。
+func nullableScopeText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // statusValue 读取状态字段的当前值（统一为 float64 便于计算）。

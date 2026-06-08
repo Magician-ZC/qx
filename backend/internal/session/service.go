@@ -902,6 +902,7 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		}
 		service.scanAndMatch(ctx, &state, units)                 // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
 		service.scanAndSocialize(ctx, &state, units)             // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
+		service.scanExclusiveContestsAtBoundary(ctx, &state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		appendSessionMetricsLog(&state)
 		units = nil

@@ -1057,7 +1057,8 @@ export function emitClientAnalytics(name: string, props?: Record<string, unknown
   return request<{ ok?: boolean }>(`/api/analytics/client`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, props }),
+    // 带匿名 vid：供后端 A/B 分桶（分桶算法在后端，前端零变体知识）。
+    body: JSON.stringify({ name, props, vid: anonymousVisitorID() }),
   })
     .then(() => undefined)
     .catch(() => undefined);

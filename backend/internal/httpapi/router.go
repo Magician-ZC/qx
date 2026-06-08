@@ -371,6 +371,22 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, report)
 	})
 
+	// A/B 实验漏斗：按 ab_bucket 分组拆分对比（SH2.3 红线 A/B、卖点 A/B/C、服从 vs 违背）。key 仅回显，桶名本身编码实验。
+	router.GET("/api/ops/experiment", opsTokenGuard(), func(c *gin.Context) {
+		days := 0
+		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				days = v
+			}
+		}
+		report, err := analytics.ExperimentFunnel(c.Request.Context(), deps.Store, strings.TrimSpace(c.Query("key")), days)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, report)
+	})
+
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
 	// 漏斗端点是 ops 敏感只读聚合，套 opsTokenGuard；POST /api/leads 是 landing 公开提交，保持公开（不守卫）。
 	// 漏斗路由在 leads.go 内注册，这里用路径作用域的前置中间件守卫，避免影响公开的 /api/leads。
@@ -1271,9 +1287,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		var request struct {
 			Name  string         `json:"name"`
 			Props map[string]any `json:"props"`
+			Vid   string         `json:"vid"` // 匿名访客 ID，供 A/B 后端分桶（分桶算法权威集中在后端，前端零变体知识）。
 		}
 		// 解析失败也返 ok：埋点端点对客户端永远成功，绝不暴露内部细节。
 		_ = c.ShouldBindJSON(&request)
+		// A/B 分桶（QUNXIANG_AB_EXPERIMENT 配了实验名才生效；默认空→不分桶、ab_bucket 留空，零行为变化）。
+		// 桶名形如 <experiment>:a/<experiment>:b，本身编码实验，供 /api/ops/experiment 按桶拆分漏斗对比。
+		abBucket := ""
+		if exp := strings.TrimSpace(os.Getenv("QUNXIANG_AB_EXPERIMENT")); exp != "" && strings.TrimSpace(request.Vid) != "" {
+			abBucket = exp + ":" + analytics.AssignBucket(exp, request.Vid, []string{"a", "b"})
+		}
 
 		// 白名单：事件名 → 漏斗阶段。仅这些客户端事件允许注入，其余忽略。
 		stage, allowed := map[string]analytics.Stage{
@@ -1290,9 +1313,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				props = map[string]any{}
 			}
 			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
-				Stage: stage,
-				Name:  request.Name,
-				Props: props,
+				Stage:    stage,
+				Name:     request.Name,
+				Props:    props,
+				ABBucket: abBucket,
 			})
 		}
 
