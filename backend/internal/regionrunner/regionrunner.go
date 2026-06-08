@@ -112,9 +112,11 @@ func ambientSaturated(record unit.Record, eff ambientEffect) bool {
 
 // Config 是 region-runner 的运行参数。零值字段由 New 兜底为安全默认。
 type Config struct {
-	Enabled      bool          // 是否启动（main 按 QUNXIANG_REGION_RUNNER_ENABLED 设）
-	Apply        bool          // false=shadow（只记日志，real-1）；true=真应用 L1 决策（real-2，QUNXIANG_REGION_RUNNER_APPLY）
-	Threats      bool          // 是否对 HOT 单位 roll PvE 威胁（QUNXIANG_REGION_RUNNER_THREATS，默认关；真遭遇还需注入 threatHandler）
+	Enabled bool // 是否启动（main 按 QUNXIANG_REGION_RUNNER_ENABLED 设）
+	Apply   bool // false=shadow（只记日志，real-1）；true=真应用 L1 决策（real-2，QUNXIANG_REGION_RUNNER_APPLY）
+	Threats bool // 是否对 HOT 单位 roll PvE 威胁（QUNXIANG_REGION_RUNNER_THREATS，默认关；真遭遇还需注入 threatHandler）。
+	// ⚠️ 威胁 roll 在 applyAmbientL1 内，故**依赖 Apply=true**——Apply=false 是纯 shadow 骨架(handleJob 只记日志、不触达 applyAmbientL1)，
+	// 此时 Threats 即使开也不会 roll（threats_rolled 恒 0）。要观测威胁需 Enabled+Apply+Threats 三者皆开。
 	TickInterval time.Duration // 真实时钟每隔多久跑一次调度 pass
 	TickSeconds  int64         // 1 个逻辑 tick = 多少真实秒（wake_at_tick 的时间单位）
 	Workers      int           // worker 池 goroutine 数
