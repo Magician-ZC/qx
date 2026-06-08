@@ -24,6 +24,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"os"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -272,6 +275,73 @@ func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bos
 		worldbus.KindWorldBossDown, 9,
 		map[string]any{"boss_id": bossID, "participants": result.Participants}); err != nil {
 		return fmt.Errorf("broadcast world boss defeat: %w", err)
+	}
+	return nil
+}
+
+// 自动刷新世界Boss：让共享世界里持续有可协作讨伐的 Boss，无需 ops 手动 spawn。
+//
+// 为何**默认关**（QUNXIANG_WORLD_BOSS_AUTO，仅 true/1/yes/on 视为开）：
+//   maybeRefreshWorldBoss 会真实写入 world_bosses（生成一头会改变世界状态的 PvE 目标，全服可见），
+//   不是「读出侧投卡」那种零状态变化的自治；与 QUNXIANG_AUTO_PVE/AUTO_MATCH 同向取保守默认——
+//   未设即整方法 no-op、零 DB 写、零行为变化，可灰度按 world 逐步开启。
+
+// 自动生成的世界Boss名表（确定性按 FNV(worldID) 选名，与手动 spawn 的 name 解耦）。
+var autoWorldBossNames = []string{
+	"赤鳞古龙", "万岁幽冥", "九首蚀月蟒", "焚天魔猿", "永夜冰魄", "裂地巨像", "噬星鲲鹏", "血河罗刹王",
+}
+
+// 自动生成世界Boss的血量梯度（确定性按 FNV(worldID) 取一档；均在 maxWorldBossHP 内、足够多人协作消耗）。
+var autoWorldBossHPTiers = []int{120_000, 200_000, 360_000, 600_000}
+
+// worldBossAutoEnabled 读 QUNXIANG_WORLD_BOSS_AUTO（true/1/yes/on 视为开，大小写不敏感、忽略首尾空白），
+// 默认关 → maybeRefreshWorldBoss 整方法 no-op、零行为变化、零 DB 写。
+func worldBossAutoEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_WORLD_BOSS_AUTO"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// worldBossNameHash 确定性哈希（项目约定的 FNV）：把 worldID + salt 映射到稳定的 uint64，用于选名/定血。
+func worldBossNameHash(worldID, salt string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("worldboss-auto:" + worldID + ":" + salt))
+	return h.Sum64()
+}
+
+// maybeRefreshWorldBoss 在部署边界 best-effort 保证共享世界里始终有一头可讨伐的世界Boss。
+//   - flag QUNXIANG_WORLD_BOSS_AUTO 默认关 → 直接 return（这是会改变世界状态的自治生成，保守默认、可灰度）。
+//   - worldID 为空（未接入共享世界）→ 直接 return：世界Boss是跨玩家共享机制，单局无意义。
+//   - 该 world 已有 status='active' 的世界Boss → return（不重复刷，单世界同时至多一头自治 Boss）。
+//   - 否则确定性生成一头：名按 FNV(worldID) 取名表、血按 FNV(worldID) 取梯度、regionID 空（全世界共享、不绑区域），调 SpawnWorldBoss。
+//
+// best-effort：任一步出错只返回该错（由调用方在边界吞错记日志），绝不中断回合推进。
+func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID string) error {
+	if service == nil || service.db == nil {
+		return nil
+	}
+	if worldID == "" || !worldBossAutoEnabled() {
+		return nil
+	}
+
+	// 是否已有 active Boss：COUNT status='active'（不读全行，避免方言 RETURNING/锁差异）。>0 即不再刷，保持单世界至多一头自治 Boss。
+	var active int
+	if err := service.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM world_bosses WHERE world_id = ? AND status = 'active'`, worldID).Scan(&active); err != nil {
+		return fmt.Errorf("count active world bosses: %w", err)
+	}
+	if active > 0 {
+		return nil
+	}
+
+	// 无 active Boss → 确定性生成一头。名/血都由 FNV(worldID) 派生：同一世界稳定可复现，不同世界各异，不用全局 rand。
+	name := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
+	hp := autoWorldBossHPTiers[worldBossNameHash(worldID, "hp")%uint64(len(autoWorldBossHPTiers))]
+	if _, err := service.SpawnWorldBoss(ctx, worldID, name, hp, ""); err != nil {
+		return fmt.Errorf("auto spawn world boss: %w", err)
 	}
 	return nil
 }

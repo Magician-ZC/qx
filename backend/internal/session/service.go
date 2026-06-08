@@ -892,9 +892,16 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		//   ② 自然衰老人格漂移 ApplyPersonalityDrift(aging)（personality_drift.go，单次每维 ≤0.03、单日每维 ≤0.10，确定性 FNV，不直改受保护字段）。
 		// 失败只吞错、不污染回合推进；与 hunger/memory-decay 同批，确定性可复现。
 		service.settleAutonomyAtDeploymentBoundary(ctx, &state, units)
+		service.settleConsentsAtBoundary(ctx, &state)            // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
 		service.refreshThreats(ctx, &state, units)               // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
 		service.surfaceCrossEventsAtBoundary(ctx, &state, units) // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
+		if state.WorldID != "" {                                 // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
+			if err := service.maybeRefreshWorldBoss(ctx, state.WorldID); err != nil {
+				appendLog(&state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")
+			}
+		}
 		service.scanAndMatch(ctx, &state, units)                 // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
+		service.scanAndSocialize(ctx, &state, units)             // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		appendSessionMetricsLog(&state)
 		units = nil
