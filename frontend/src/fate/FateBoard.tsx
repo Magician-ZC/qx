@@ -79,11 +79,11 @@ const whoCardCloseStyle: React.CSSProperties = {
   padding: 2,
 };
 
-// 舞台容器内联样式：相对定位以承载浮卡；高度撑满让 PixiBoard 的 resizeTo 拿到可视面积。
+// 舞台容器内联样式：相对定位以承载浮卡。**确定高度由 .fate-board-stage（fate.css）提供**——不能用 auto 高度
+// （minHeight），否则与 PixiBoard 的 resizeTo:container 形成「容器高=canvas 高」反馈循环致地图无限拉长。
 const boardWrapStyle: React.CSSProperties = {
   position: "relative",
   width: "100%",
-  minHeight: 360,
   borderRadius: 12,
   overflow: "hidden",
   border: "1px solid rgba(120, 90, 50, 0.28)",
@@ -184,7 +184,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
   const commanderFactionID = useMemo(() => snap?.player_faction_id || "player", [snap?.player_faction_id]);
 
   return (
-    <div style={boardWrapStyle} aria-label="她的命运地图">
+    <div className="fate-board-stage" style={boardWrapStyle} aria-label="她的命运地图">
       <Suspense fallback={<div style={boardLoadingStyle}>正在铺开她脚下的天地…</div>}>
         <LazyPixiBoard
           session={snap}

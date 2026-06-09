@@ -590,6 +590,24 @@
   background: rgba(122, 82, 38, 0.85);
 }
 
+/* ── 命运地图舞台高度（修「地图无限拉长」）──
+   PixiBoard 用 resizeTo:container 让 canvas 充满容器；若容器高度为 auto（随 canvas 内容增高），
+   会形成「容器高 = canvas 高 = 容器高…」的反馈循环 → 每次 resize 越拉越长。故给舞台一个**确定**高度，
+   让 resizeTo 有稳定目标。.pixi-board 是 Pixi 实际 resizeTo 的元素，必须自身高度确定（height:100% 撑满确定高度的父）。*/
+.fate-board-stage {
+  height: min(78vh, 760px);
+}
+.fate-board-stage .pixi-board {
+  height: 100%;
+  min-height: 0;
+}
+@media (max-width: 900px) {
+  /* 窄屏：两栏 wrap 成上下，地图退到上方，给一个较矮的确定高度即可（不抢满屏）。 */
+  .fate-board-stage {
+    height: min(56vh, 520px);
+  }
+}
+
 /* ── 窄屏响应式（≤480px）：避免固定控件与内容重叠、避免横向溢出 ──
    1) 固定的「换个账号登入」浮于右上，play 相位下会盖住四槽顶部品牌区——
       给 .fate-root 让出顶部安全区，使内容下移、不被压在固定按钮之下；

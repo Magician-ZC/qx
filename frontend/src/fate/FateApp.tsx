@@ -100,7 +100,7 @@ const fatePlayShellStyle: React.CSSProperties = {
 };
 const fatePlayLayoutStyle: React.CSSProperties = {
   width: "100%",
-  maxWidth: 1280,
+  maxWidth: 1600,
   margin: "0 auto",
   display: "flex",
   flexWrap: "wrap",
