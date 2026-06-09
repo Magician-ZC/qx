@@ -33,6 +33,7 @@ import { WorldConfigPanel } from "./WorldConfigPanel";
 import { FactionPanel } from "./FactionPanel";
 import { GmEventPanel } from "./GmEventPanel";
 import { SeasonPanel } from "./SeasonPanel";
+import { ContentPanel } from "./ContentPanel";
 import { MonitoringPanel } from "./MonitoringPanel";
 
 // AdminTab 是左导航的页签标识。
@@ -43,6 +44,7 @@ type AdminTab =
   | "factions"
   | "gm-events"
   | "seasons"
+  | "content"
   | "monitoring"
   | "operators";
 
@@ -53,6 +55,7 @@ const TABS: { id: AdminTab; label: string }[] = [
   { id: "factions", label: "阵营配置" },
   { id: "gm-events", label: "事件注入" },
   { id: "seasons", label: "赛季" },
+  { id: "content", label: "内容运营" },
   { id: "monitoring", label: "监控" },
   { id: "operators", label: "操作者" },
 ];
@@ -165,6 +168,7 @@ export function AdminApp(): JSX.Element {
           {tab === "factions" ? <FactionPanel /> : null}
           {tab === "gm-events" ? <GmEventPanel /> : null}
           {tab === "seasons" ? <SeasonPanel /> : null}
+          {tab === "content" ? <ContentPanel /> : null}
           {tab === "monitoring" ? <MonitoringPanel /> : null}
           {tab === "operators" ? <OperatorPanel /> : null}
         </main>

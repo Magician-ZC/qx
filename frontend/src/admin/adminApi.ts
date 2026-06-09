@@ -469,6 +469,122 @@ export async function listSeasons(): Promise<Season[]> {
   return data.seasons ?? [];
 }
 
+// ============ ④b 内容运营（母题库 / 翻译模板 / SKU 目录；后端 /api/admin/content-themes ·
+//                /api/admin/translation-templates · /api/admin/skus · /api/billing/skus 已接线） ============
+
+// ContentTheme 对齐后端 season_content_themes（json tag，全小写键名）：
+//   - id：母题 ID（POST 时留空则后端新建）。
+//   - season_id：归属赛季 ID。
+//   - decisive_event_ids / title_ids / landmark_names：本季的关键事件 / 头衔 / 地标名集合（字符串数组）。
+//   - created_at：创建时间（只读）。
+export type ContentTheme = {
+  id: string;
+  season_id: string;
+  decisive_event_ids: string[];
+  title_ids: string[];
+  landmark_names: string[];
+  created_at: string;
+};
+
+// TranslationTemplate 对齐后端 translation_templates（json tag，全小写键名）：
+//   - id：模板 ID（后端按 reason_code+anchor_kind upsert，写后即时生效）。
+//   - reason_code / anchor_kind：联合主键——事件 reason code + 关系锚类型。
+//   - narrative_template：叙事模板文案。
+//   - force_pending：是否强制走待决策（高光卡/收件箱）而非自治。
+//   - priority：优先级（越大越靠前）。
+//   - updated_at：更新时间（只读）。
+export type TranslationTemplate = {
+  id: string;
+  reason_code: string;
+  anchor_kind: string;
+  narrative_template: string;
+  force_pending: boolean;
+  priority: number;
+  updated_at: string;
+};
+
+// SKU 对齐后端 billing_skus（json tag，全小写键名）：
+//   - id：SKU ID（POST 时留空则后端新建）。
+//   - kind：类型（如订阅 / 一次性 / 内购档）。
+//   - name：展示名。
+//   - price_cents：定价（分）。
+//   - period：周期（如 month / once）。
+//   - active：是否上架。
+//   - created_at：创建时间（只读）。
+export type SKU = {
+  id: string;
+  kind: string;
+  name: string;
+  price_cents: number;
+  period: string;
+  active: boolean;
+  created_at: string;
+};
+
+// listContentThemes 列出所有内容母题（GET /api/admin/content-themes）。
+export async function listContentThemes(): Promise<ContentTheme[]> {
+  const data = await request<{ themes?: ContentTheme[] }>(`/api/admin/content-themes`);
+  return data.themes ?? [];
+}
+
+// upsertContentTheme 新增/更新一条母题（POST /api/admin/content-themes，id 空则后端新建）。返回（新）id。
+export async function upsertContentTheme(theme: ContentTheme): Promise<string> {
+  const data = await request<{ id?: string }>(`/api/admin/content-themes`, {
+    method: "POST",
+    body: JSON.stringify(theme),
+  });
+  return data.id ?? theme.id;
+}
+
+// deleteContentTheme 删除一条母题（DELETE /api/admin/content-themes?id=）。
+export async function deleteContentTheme(id: string): Promise<void> {
+  await request<unknown>(`/api/admin/content-themes?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+// listTranslationTemplates 列出所有翻译模板（GET /api/admin/translation-templates）。
+export async function listTranslationTemplates(): Promise<TranslationTemplate[]> {
+  const data = await request<{ templates?: TranslationTemplate[] }>(`/api/admin/translation-templates`);
+  return data.templates ?? [];
+}
+
+// upsertTranslationTemplate 新增/更新一条翻译模板（POST /api/admin/translation-templates，
+// 按 reason_code+anchor_kind upsert，写后即时生效）。
+export async function upsertTranslationTemplate(tpl: TranslationTemplate): Promise<void> {
+  await request<unknown>(`/api/admin/translation-templates`, {
+    method: "POST",
+    body: JSON.stringify(tpl),
+  });
+}
+
+// deleteTranslationTemplate 删除一条翻译模板（DELETE /api/admin/translation-templates?reason_code=&anchor_kind=）。
+export async function deleteTranslationTemplate(reasonCode: string, anchorKind: string): Promise<void> {
+  await request<unknown>(
+    `/api/admin/translation-templates?reason_code=${encodeURIComponent(reasonCode)}&anchor_kind=${encodeURIComponent(anchorKind)}`,
+    { method: "DELETE" },
+  );
+}
+
+// listSKUs 列出计费 SKU 目录（GET /api/billing/skus，公开端点）。兼容后端返回 {skus:[]} 或裸数组两种形态。
+// billing 关闭时该 GET 可能 404/503——调用方据抛错降级提示（ContentPanel 已做）。
+export async function listSKUs(): Promise<SKU[]> {
+  const data = await request<{ skus?: SKU[] } | SKU[]>(`/api/billing/skus`);
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return data.skus ?? [];
+}
+
+// upsertSKU 新增/更新一条 SKU（POST /api/admin/skus，id 空则后端新建）。billing 关闭时后端返 503。返回（新）id。
+export async function upsertSKU(sku: SKU): Promise<string> {
+  const data = await request<{ id?: string }>(`/api/admin/skus`, {
+    method: "POST",
+    body: JSON.stringify(sku),
+  });
+  return data.id ?? sku.id;
+}
+
 // ============ ⑤ 零和审计（已落地：GET /api/ops/worlds/:worldId/arbitration-audit） ============
 
 export type GroupStat = { wins: number; losses: number; total: number; win_rate: number };

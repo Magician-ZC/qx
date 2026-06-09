@@ -268,6 +268,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		WithArchiver(liveopsHallArchiver{newServiceFn: newSessionService}).
 		WithPaidResolver(defaultPaidResolver()).
 		WithBroadcaster(liveopsBroadcaster{hub: hub})
+	// 母题库幂等播种（修「season_content_themes 死表零播种」缺口）：通电默认母题骨架，GM 后台可续填/改。
+	// best-effort：失败只记日志、绝不阻断启动（母题缺省不影响赛季创建——content_theme_id 仅是可选指针）。
+	if err := liveopsSvc.SeedDefaultContentThemes(context.Background()); err != nil {
+		deps.Logger.Error("seed default content themes", "error", err)
+	}
 
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
 		sessionID = strings.TrimSpace(sessionID)
@@ -595,6 +600,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 
+	// 列赛季（SeasonPanel 列季数据源；修原 GET 列表路由缺失致前端只能展示本会话新建）。
+	router.GET("/api/ops/seasons", opsViewer, func(c *gin.Context) {
+		seasons, err := liveopsSvc.ListSeasons(c.Request.Context(), 0)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"seasons": seasons})
+	})
+
 	// 零和监控审计：扫某世界 [turn_start, turn_end] 区间的仲裁结局，按付费态分组算胜率、判 P2W 红线。
 	router.GET("/api/ops/worlds/:worldId/arbitration-audit", opsViewer, func(c *gin.Context) {
 		turnStart := 0
@@ -872,6 +887,101 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			out = append(out, gin.H{"operator": r.Operator, "role": r.Role, "action": r.Action, "target": r.Target, "created_at": r.CreatedAt})
 		}
 		c.JSON(http.StatusOK, gin.H{"audit": out})
+	})
+
+	// ===== 内容运营 CRUD（母题库 / 翻译模板 / SKU），让「配置页面内容」可实时增删改 =====
+	// 母题库 season_content_themes（原死表）：GET 列(viewer) / POST 增改(writer) / DELETE 删(writer)。
+	router.GET("/api/admin/content-themes", opsViewer, func(c *gin.Context) {
+		themes, err := liveopsSvc.ListContentThemes(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"themes": themes})
+	})
+	router.POST("/api/admin/content-themes", opsWriter, func(c *gin.Context) {
+		var theme liveops.ContentTheme
+		if err := c.ShouldBindJSON(&theme); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := liveopsSvc.UpsertContentTheme(c.Request.Context(), theme)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "content_theme_upsert", id)
+		c.JSON(http.StatusOK, gin.H{"id": id})
+	})
+	router.DELETE("/api/admin/content-themes", opsWriter, func(c *gin.Context) {
+		id := strings.TrimSpace(c.Query("id"))
+		if id == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
+			return
+		}
+		if err := liveopsSvc.DeleteContentTheme(c.Request.Context(), id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "content_theme_delete", id)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// 翻译模板 translation_templates：GET 列(viewer) / POST 增改(writer，写后即时生效) / DELETE 删(writer)。
+	router.GET("/api/admin/translation-templates", opsViewer, func(c *gin.Context) {
+		rows, err := session.ListTranslationTemplates(c.Request.Context(), deps.Store)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"templates": rows})
+	})
+	router.POST("/api/admin/translation-templates", opsWriter, func(c *gin.Context) {
+		var row session.TranslationTemplateRow
+		if err := c.ShouldBindJSON(&row); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := session.UpsertTranslationTemplate(c.Request.Context(), deps.Store, row); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "translation_upsert", row.ReasonCode+"|"+row.AnchorKind)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	router.DELETE("/api/admin/translation-templates", opsWriter, func(c *gin.Context) {
+		reasonCode := strings.TrimSpace(c.Query("reason_code"))
+		anchorKind := strings.TrimSpace(c.Query("anchor_kind"))
+		if reasonCode == "" || anchorKind == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reason_code and anchor_kind required"})
+			return
+		}
+		if err := session.DeleteTranslationTemplate(c.Request.Context(), deps.Store, reasonCode, anchorKind); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "translation_delete", reasonCode+"|"+anchorKind)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// SKU 目录 admin 写路由（billing 开启时才可用；公开读在 /api/billing/skus）。POST 增改(writer)。
+	router.POST("/api/admin/skus", opsWriter, func(c *gin.Context) {
+		if billingSvc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "billing disabled (QUNXIANG_BILLING_ENABLED off)"})
+			return
+		}
+		var sku billing.SKU
+		if err := c.ShouldBindJSON(&sku); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := billingSvc.UpsertSKU(c.Request.Context(), sku)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "sku_upsert", id)
+		c.JSON(http.StatusOK, gin.H{"id": id})
 	})
 
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。

@@ -1,7 +1,7 @@
 /* 文件说明：GM 后台「赛季」面板。
    - 建季：POST /api/ops/seasons（已落地，建世界 + 落 seasons）。
    - 收尾：POST /api/ops/seasons/:id/finalize（已落地，存活角色回流名人堂 + 世界封存）。
-   - 列季：GET /api/ops/seasons（待后端落地；未落地时退回展示本会话内刚创建的赛季）。
+   - 列季：GET /api/ops/seasons（后端已接线，解析 data.seasons；偶发失败时退回展示本会话内刚创建的赛季）。
    建季后自动把新赛季 id 填入收尾框、并并入列表，便于一站式运营。 */
 
 import { useCallback, useEffect, useState } from "react";
@@ -51,8 +51,8 @@ export function SeasonPanel(): JSX.Element {
         setSeasons(data);
       }
     } catch (e) {
-      // 列表端点未落地（404）不致命：保留本会话已建赛季，仅提示。
-      setListErr(`赛季列表端点不可用：${errText(e)}（后端 GET /api/ops/seasons 待接线，仅展示本次新建）`);
+      // 列表端点偶发失败（网络/鉴权）不致命：保留本会话已建赛季，仅提示。
+      setListErr(`赛季列表暂不可用：${errText(e)}（保留并展示本次新建赛季）`);
     } finally {
       setListLoading(false);
     }

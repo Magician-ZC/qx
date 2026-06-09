@@ -121,6 +121,34 @@ func (s *LiveopsService) GetSeason(ctx context.Context, seasonID string) (Season
 	return se, nil
 }
 
+// ListSeasons 列出赛季（按创建时间倒序）。limit<=0 时取 100。供 GM 后台 SeasonPanel 列季（修原 GET 列表路由缺失）。
+func (s *LiveopsService) ListSeasons(ctx context.Context, limit int) ([]Season, error) {
+	if !s.ready() {
+		return nil, fmt.Errorf("liveops list seasons: service not ready")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, world_id, name, status, started_at, ends_at, content_theme_id, created_at
+		FROM seasons ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("liveops list seasons: %w", err)
+	}
+	defer rows.Close()
+	out := []Season{}
+	for rows.Next() {
+		var se Season
+		var status string
+		if err := rows.Scan(&se.ID, &se.WorldID, &se.Name, &status, &se.StartedAt, &se.EndsAt, &se.ContentThemeID, &se.CreatedAt); err != nil {
+			return nil, fmt.Errorf("liveops list seasons (scan): %w", err)
+		}
+		se.Status = SeasonStatus(status)
+		out = append(out, se)
+	}
+	return out, rows.Err()
+}
+
 // FinalizeResult 是赛季收尾的结果回执。
 type FinalizeResult struct {
 	SeasonID      string   `json:"season_id"`
