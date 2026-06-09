@@ -337,6 +337,69 @@ CREATE TABLE IF NOT EXISTS feature_flag_overrides (
   updated_at VARCHAR(64) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// RuntimeConfigOverridesTable* 是类型化运行时配置覆盖表的双驱动 DDL（internal/runtimeconfig 持久化）。
+// 与 feature_flag_overrides 同构；供存量库经 DesignClosureTables 幂等补建。
+const RuntimeConfigOverridesTableSQLite = `
+CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const RuntimeConfigOverridesTableMySQL = `
+CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+  name VARCHAR(191) PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by VARCHAR(191) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// OpsOperatorsTable* ops/GM 运营后台「多操作者 + 角色」分级鉴权表（RBAC）。
+// token_hash 是 X-Ops-Token 的 sha256 hex（绝不存明文，主键）；name 唯一；role 为 viewer/operator/admin。
+// schema.sql 的 fresh 库已含本表；本常量供存量旧库经 DesignClosureTables 幂等补建。
+const OpsOperatorsTableSQLite = `
+CREATE TABLE IF NOT EXISTS ops_operators (
+  token_hash TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'viewer',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT NOT NULL DEFAULT ''
+)`
+
+const OpsOperatorsTableMySQL = `
+CREATE TABLE IF NOT EXISTS ops_operators (
+  token_hash VARCHAR(64) PRIMARY KEY,
+  name VARCHAR(191) NOT NULL UNIQUE,
+  role VARCHAR(32) NOT NULL DEFAULT 'viewer',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  created_by VARCHAR(191) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// OpsAuditLogTable* ops/GM 运营后台的操作审计日志（append-only）。MySQL 内联 idx_ops_audit_log_ts；
+// SQLite 的同名索引写在 schema.sql（CREATE INDEX IF NOT EXISTS），由 store.go Open 路径每次无条件 applySchema 幂等建——
+// fresh 库与存量库都会被 applySchema 覆盖到，故无需额外 EnsureIndex 接线。
+const OpsAuditLogTableSQLite = `
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+  id TEXT PRIMARY KEY,
+  operator TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const OpsAuditLogTableMySQL = `
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+  id VARCHAR(191) PRIMARY KEY,
+  operator VARCHAR(191) NOT NULL DEFAULT '',
+  role VARCHAR(32) NOT NULL DEFAULT '',
+  action VARCHAR(191) NOT NULL,
+  target VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_ops_audit_log_ts (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // DesignClosureTables 汇总本波新增表的双驱动 DDL，供 store.go 一次性幂等补建。
 var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{DungeonSegmentsTableSQLite, DungeonSegmentsTableMySQL},
@@ -344,6 +407,9 @@ var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{SeasonContentThemesTableSQLite, SeasonContentThemesTableMySQL},
 	{GmEventsAuditTableSQLite, GmEventsAuditTableMySQL},
 	{FeatureFlagOverridesTableSQLite, FeatureFlagOverridesTableMySQL},
+	{RuntimeConfigOverridesTableSQLite, RuntimeConfigOverridesTableMySQL},
+	{OpsOperatorsTableSQLite, OpsOperatorsTableMySQL},
+	{OpsAuditLogTableSQLite, OpsAuditLogTableMySQL},
 }
 
 // DungeonSegmentEnteredTurnColumn 给 dungeon_segments 补 entered_turn（评审 L1：副本踏入回合钉死，

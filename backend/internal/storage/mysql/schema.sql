@@ -568,3 +568,31 @@ CREATE TABLE IF NOT EXISTS feature_flag_overrides (
   updated_by VARCHAR(191) NOT NULL DEFAULT '',
   updated_at VARCHAR(64) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- GM 后台类型化运行时配置覆盖表（internal/runtimeconfig：不重启即实时调玩法数值/LLM设置）。
+CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+  name VARCHAR(191) PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by VARCHAR(191) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ops / GM 运营后台的「多操作者 + 角色」分级鉴权表（RBAC）。token_hash 是 X-Ops-Token 的 sha256 hex（主键，绝不存明文）。
+CREATE TABLE IF NOT EXISTS ops_operators (
+  token_hash VARCHAR(64) PRIMARY KEY,
+  name VARCHAR(191) NOT NULL UNIQUE,
+  role VARCHAR(32) NOT NULL DEFAULT 'viewer',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  created_by VARCHAR(191) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ops / GM 运营后台的操作审计日志（append-only）。
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+  id VARCHAR(191) PRIMARY KEY,
+  operator VARCHAR(191) NOT NULL DEFAULT '',
+  role VARCHAR(32) NOT NULL DEFAULT '',
+  action VARCHAR(191) NOT NULL,
+  target VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_ops_audit_log_ts (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

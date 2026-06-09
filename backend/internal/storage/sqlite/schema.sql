@@ -647,3 +647,36 @@ CREATE TABLE IF NOT EXISTS feature_flag_overrides (
   updated_by TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- GM 后台类型化运行时配置覆盖表（internal/runtimeconfig：不重启即实时调玩法数值/LLM设置）。
+-- name 是点分小写参数名（主键，如 fate.serendipity_daily_budget）；value 是覆盖原始字符串（按注册类型解析）。
+-- 与 feature_flag_overrides 同构：updated_by/updated_at 留痕谁/何时改。回灌时丢弃已下线/已非法的历史 override。
+CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ops / GM 运营后台的「多操作者 + 角色」分级鉴权表（RBAC）。
+-- token_hash 是 X-Ops-Token 的 sha256 hex（绝不存明文，主键）；name 唯一；role 为 viewer/operator/admin。
+-- 表非空时 opsRBACGuard 以本表为权威；表为空时降级回旧的单 token env，向后兼容。
+CREATE TABLE IF NOT EXISTS ops_operators (
+  token_hash TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'viewer',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT NOT NULL DEFAULT ''
+);
+
+-- ops / GM 运营后台的操作审计日志（append-only）：谁（operator/role）做了什么（action）针对谁（target）。
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+  id TEXT PRIMARY KEY,
+  operator TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ops_audit_log_ts ON ops_audit_log(created_at);

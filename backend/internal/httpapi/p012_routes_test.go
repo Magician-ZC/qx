@@ -83,22 +83,21 @@ func TestP012HighRiskForbiddenBodyShape(t *testing.T) {
 	}
 }
 
-// ① 未配置 OPS_TOKEN 时本守卫默认开放：高危端点不应因守卫返回 403（向后兼容）。
-// 注：此时 handler 自身可能因路径不存在/请求非法返回其它码（400/404），只断言「非 403」。
+// ① 未配置 OPS_TOKEN 且无登记 operator 时的 RBAC 降级语义：
+//   - 只读端点（audit，opsViewer）默认开放——不应因守卫 403/503（向后兼容原型语义）。
+//   - 高危破坏性写端点（purge，opsAdmin）fail-closed——未配鉴权应返 503（拒绝服务），绝不默认放行。
+// 注：handler 自身可能因路径不存在/请求非法返回其它码（400/404），故只读端点只断言「非 403/503」。
 func TestP012HighRiskOpenWhenTokenUnset(t *testing.T) {
 	t.Setenv("QUNXIANG_OPS_TOKEN", "")
 	r := p012Router(t)
 
-	for _, p := range []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/api/sessions/missing/audit"},
-		{http.MethodPost, "/api/privacy/purge"},
-	} {
-		if code, body := p012Status(r, p.method, p.path, ""); code == http.StatusForbidden {
-			t.Fatalf("未配置 token 时 %s 不应被守卫 403，得到 %d (%s)", p.path, code, body)
-		}
+	// 只读 audit（viewer 档）：降级开放，不应被守卫拒（403/503）。
+	if code, body := p012Status(r, http.MethodGet, "/api/sessions/missing/audit", ""); code == http.StatusForbidden || code == http.StatusServiceUnavailable {
+		t.Fatalf("未配置 token 时只读 audit 不应被守卫拒，得到 %d (%s)", code, body)
+	}
+	// 高危 purge（admin 档）：未配鉴权 fail-closed，必须 503（不可默认放行做跨会话删数据）。
+	if code, body := p012Status(r, http.MethodPost, "/api/privacy/purge", ""); code != http.StatusServiceUnavailable {
+		t.Fatalf("未配置 token 时高危 purge 应 fail-closed 503，得到 %d (%s)", code, body)
 	}
 }
 

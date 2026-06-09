@@ -22,6 +22,7 @@ import (
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
@@ -411,10 +412,10 @@ type BloodFeudEntry struct {
 	Affection    float64 `json:"affection"`
 }
 
-// bloodFeudRivalryGate 列入世仇清单的最低 rivalry 阈（够「成仇」才算，避免把普通竞争都列进来）。
-const bloodFeudRivalryGate = 4.0
+// 列入世仇清单的最低 rivalry 阈（够「成仇」才算，避免把普通竞争都列进来），默认 4.0。
+// 现已迁入 runtimeconfig（"social.blood_feud_rivalry_gate"）。
 
-// ListBloodFeuds 列出某角色当前怀有的世仇关系（rivalry ≥ bloodFeudRivalryGate 的对外关系），按敌意降序。
+// ListBloodFeuds 列出某角色当前怀有的世仇关系（rivalry ≥ social.blood_feud_rivalry_gate 的对外关系），按敌意降序。
 // 纯读、不 flag-gate（读历史无副作用）；供前端/调试查看血仇网络。limit<=0 取默认 32。
 func (service *Service) ListBloodFeuds(ctx context.Context, unitID string, limit int) ([]BloodFeudEntry, error) {
 	if service == nil || service.db == nil {
@@ -427,6 +428,8 @@ func (service *Service) ListBloodFeuds(ctx context.Context, unitID string, limit
 	if limit <= 0 {
 		limit = bloodFeudMournerLimit
 	}
+	// 成仇阈值走 runtimeconfig（默认 4.0）：单次查询，读一次作 SQL 参数下传。
+	rivalryGate := runtimeconfig.GetFloat("social.blood_feud_rivalry_gate")
 	rows, err := service.db.QueryContext(
 		ctx,
 		`SELECT r.target_unit_id, COALESCE(u.display_name, ''), r.rivalry, r.fear, r.trust, r.affection
@@ -435,7 +438,7 @@ func (service *Service) ListBloodFeuds(ctx context.Context, unitID string, limit
 		 WHERE r.source_unit_id = ? AND r.rivalry >= ?
 		 ORDER BY r.rivalry DESC, r.fear DESC
 		 LIMIT ?`,
-		unitID, bloodFeudRivalryGate, limit,
+		unitID, rivalryGate, limit,
 	)
 	if err != nil {
 		return nil, err

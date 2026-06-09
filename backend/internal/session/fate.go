@@ -24,6 +24,7 @@ import (
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -410,13 +411,14 @@ func (service *Service) pendingBudgetExhausted(ctx context.Context, ownerID stri
 	).Scan(&count); err != nil {
 		return false // best-effort：查询失败不阻断路由，保守放行
 	}
-	return count >= fatePendingDailyBudget
+	return count >= runtimeconfig.GetInt("fate.pending_daily_budget")
 }
 
 // ===== §1.5 破圈预算（serendipity）：每日强制 ≤1 件零锚来源事件升档进高光卡作新锚种子 =====
 
-// serendipityDailyBudget 是每个自然日（每 owner）破圈升档的硬上限：≤1 件——只放一道窄缝，避免「破圈」反噬成噪声。
-const serendipityDailyBudget = 1
+// 每个自然日（每 owner）破圈升档的硬上限（默认 ≤1 件——只放一道窄缝，避免「破圈」反噬成噪声）现由
+// runtimeconfig "fate.serendipity_daily_budget" 提供（默认值在 catalog 注册），读取站点见 serendipityBudgetExhausted；
+// 此处原 const 已迁出、无残留引用。
 
 // serendipityEnabled 读 QUNXIANG_SERENDIPITY（true/1/yes/on 视为开），默认关 → 破圈逻辑零行为（与既有 flag 风格一致）。
 func serendipityEnabled() bool {
@@ -467,7 +469,7 @@ func (service *Service) serendipityBudgetExhausted(ctx context.Context, ownerID 
 	).Scan(&count); err != nil {
 		return true // best-effort：查询失败时不冒进升档（与 pending 配额「放行」相反，破圈宁缺毋滥）
 	}
-	return count >= serendipityDailyBudget
+	return count >= runtimeconfig.GetInt("fate.serendipity_daily_budget")
 }
 
 // OpenFateInbox 返回某角色未被处理的待决策（命运收件箱），每条带过期倒计时（M2 防轰炸②）。
@@ -656,8 +658,9 @@ func fateConsequenceLayer(resolveType string, attachment float64) []fateConseque
 	if a > 1 {
 		a = 1
 	}
-	// 越界干预（urge）的 loyalty 代价随牵挂线性放大：a=0 取 1.0×，a=1 取 fateUrgeCostMaxScale×（单调不减）。
-	urgeScale := 1.0 + a*(fateUrgeCostMaxScale-1.0)
+	// 越界干预（urge）的 loyalty 代价随牵挂线性放大：a=0 取 1.0×，a=1 取 fate.urge_cost_max_scale×（单调不减）。
+	// 读一次存局部，下方仅在 a=0..1 区间内做标量缩放，不进内层 for。
+	urgeScale := 1.0 + a*(runtimeconfig.GetFloat("fate.urge_cost_max_scale")-1.0)
 	out := make([]fateConsequence, len(base))
 	copy(out, base)
 	if isUrgeResolve(resolveType) {
@@ -701,7 +704,7 @@ func fateReasonIsIrreversibleClass(code events.ReasonCode) bool {
 // 不可逆类命运 且 牵挂达到不可逆解锁线（≥fateIrreversibleAttachmentGate）时为真：此时绝不替玩家放手，
 // 而是把它继续留在收件箱，等玩家显式处理（对齐宪法 §4.3「不可逆需牵挂建立后开放」+ D0-D3 硬锁不可逆）。
 func fateRefusesAutoLetHer(code events.ReasonCode, attachment float64) bool {
-	return fateReasonIsIrreversibleClass(code) && attachment >= fateIrreversibleAttachmentGate
+	return fateReasonIsIrreversibleClass(code) && attachment >= runtimeconfig.GetFloat("fate.irreversible_attachment_gate")
 }
 
 const fateIrreversibleAttachmentGate = 70.0 // 不可逆后果的牵挂解锁线（§4.3 层3 牵挂≥70），到线即拒绝自动兜底。
@@ -1365,7 +1368,7 @@ func fateIrreversibility(ev FateEvent) float64 {
 	if ev.Importance > 0 {
 		base += (float64(ev.Importance)/10.0 - 0.85) * 0.15
 	}
-	return clampFateFactor(base, fateIrreversibilityFloor)
+	return clampFateFactor(base, runtimeconfig.GetFloat("fate.irreversibility_floor"))
 }
 
 // fateReasonIrreversibility 给每类 reason-code 一个不可逆基线（缺省按 emotion/command/中性归类，未知取中位）。
@@ -1389,7 +1392,7 @@ func fateReasonIrreversibility(code events.ReasonCode) float64 {
 // fateEmotionIntensity 把事件情绪强度归一为 [fateEmotionFloor,1] 的阻尼系数（设计宪法 §4.2 因子三）。
 // 由 |EmotionWeight| 派生；缺省（EmotionWeight=0）不清零命运（取下限），强情绪事件趋近 1。确定性、可测。
 func fateEmotionIntensity(ev FateEvent) float64 {
-	return clampFateFactor(absFloat(ev.EmotionWeight), fateEmotionFloor)
+	return clampFateFactor(absFloat(ev.EmotionWeight), runtimeconfig.GetFloat("fate.emotion_floor"))
 }
 
 // clampFateFactor 把一个原始因子映射到 [floor,1]：v≤0 取 floor，v≥1 取 1，中间线性插值到 [floor,1]。

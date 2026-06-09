@@ -33,6 +33,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/faction"
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -286,7 +287,7 @@ func (service *Service) buildFactionConflictOpponent(state *State, actor *unit.R
 	opponent.ID = "fconflict_" + uuid.NewString()
 	// 敌对阵营道德底色（非保护字段，直接写——不走 Mutator，仿 faction_spawn）。
 	opponent.Faction = hostileFactionID
-	opponent.MoralAlignment = faction.PerturbBaseline(hostileFactionID, seed, "fconflict", factionMoralJitter)
+	opponent.MoralAlignment = faction.PerturbBaseline(hostileFactionID, seed, "fconflict", runtimeconfig.GetFloat("faction.moral_jitter"))
 	opponent.Identity.Lineage = factionNPCLineagePrefix + "游骑·" + hostileDef.NameZH
 	opponent.Identity.Biography = fmt.Sprintf("%s阵营的游骑，在路上与她狭路相逢。%s", hostileDef.NameZH, hostileDef.MoralCreed)
 	opponent.Ambition = unit.DeriveAmbition(seed, opponent.Identity.Lineage, opponent.Identity.Biography)

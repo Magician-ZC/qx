@@ -158,6 +158,102 @@ export async function clearAdminFlagOverride(name: string): Promise<AdminFlag | 
   return data.flag ?? null;
 }
 
+// ============ ①b 可运营数值配置（runtimeconfig；后端 runtimeconfig.SnapshotEffective + /api/admin/config 路由已接线） ============
+
+// AdminConfigItem 对齐后端 runtimeconfig.EffectiveParam（嵌入 ParamSpec 与 EffectiveParam 自有字段**均无 json tag**
+// → 全部序列化为 Go 大写键名，与 AdminFlag 同口径）。
+//   - Name/Namespace/Type/Default/Min/Max/Values/Description/HotReload：参数静态规格（来自嵌入的 ParamSpec，大写键名）。
+//     · Type ∈ {bool,int,float,enum,string}；Min/Max 仅数值型有值（*float64，nil → null）；Values 仅 enum 非空。
+//   - OverrideSet/OverrideValue/Effective：运行时态（EffectiveParam 自有字段，无 tag → **大写** OverrideSet/OverrideValue/Effective）。
+// 后端直接序列化 SnapshotEffective() 数组，故消费方按上述全大写键名取。
+export type AdminConfigItem = {
+  Name: string;
+  Namespace: string;
+  Type: string;
+  Default: string;
+  Min: number | null;
+  Max: number | null;
+  Values: string[] | null;
+  Description: string;
+  HotReload: boolean;
+  OverrideSet: boolean;
+  OverrideValue: string;
+  Effective: string;
+};
+
+// listAdminConfig 拉所有可运营数值/枚举参数的当前生效态（GET /api/admin/config，直接序列化 SnapshotEffective()）。
+export async function listAdminConfig(): Promise<AdminConfigItem[]> {
+  const data = await request<{ params?: AdminConfigItem[] }>(`/api/admin/config`);
+  return data.params ?? [];
+}
+
+// setAdminConfig 运行时覆盖某参数（POST /api/admin/config，body {name, value}）。value 是原始字符串
+// （bool 传 "on"/"off"，int/float 传数值串，enum 传档名，string 传原文）。返回覆盖后的最新态。
+export async function setAdminConfig(name: string, value: string): Promise<AdminConfigItem | null> {
+  const data = await request<{ param?: AdminConfigItem }>(`/api/admin/config`, {
+    method: "POST",
+    body: JSON.stringify({ name, value }),
+  });
+  return data.param ?? null;
+}
+
+// clearAdminConfig 清除运行时覆盖、回落注册默认（DELETE /api/admin/config?name=）。返回回落后的最新态。
+export async function clearAdminConfig(name: string): Promise<AdminConfigItem | null> {
+  const data = await request<{ param?: AdminConfigItem }>(
+    `/api/admin/config?name=${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+  return data.param ?? null;
+}
+
+// ============ ①c 操作者与审计（runtimeconfig/ops 操作者表；HTTP 路由 /api/admin/operators · /audit · /whoami 待接线） ============
+
+// OpsOperator 对齐后端操作者记录（json tag）：名/角色/创建时间。token 仅创建时一次性返回，列表不含。
+export type OpsOperator = { name: string; role: string; created_at: string };
+
+// OpsAuditRow 对齐后端 ops 审计行（json tag）：谁/什么角色/做了什么动作/作用对象/何时。
+export type OpsAuditRow = {
+  operator: string;
+  role: string;
+  action: string;
+  target: string;
+  created_at: string;
+};
+
+// listOperators 列出全部操作者（GET /api/admin/operators）。
+export async function listOperators(): Promise<OpsOperator[]> {
+  const data = await request<{ operators?: OpsOperator[] }>(`/api/admin/operators`);
+  return data.operators ?? [];
+}
+
+// upsertOperator 新增/更新一名操作者（POST /api/admin/operators，body {name, role, token}）。token 仅此次提交，
+// 后端落库（哈希）后不再回显——前端提交后须提示运营自行保存。
+export async function upsertOperator(name: string, role: string, token: string): Promise<void> {
+  await request<unknown>(`/api/admin/operators`, {
+    method: "POST",
+    body: JSON.stringify({ name, role, token }),
+  });
+}
+
+// deleteOperator 删除一名操作者（DELETE /api/admin/operators?name=）。
+export async function deleteOperator(name: string): Promise<void> {
+  await request<unknown>(`/api/admin/operators?name=${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+// listOpsAudit 拉最近的操作审计（GET /api/admin/audit?limit=）。
+export async function listOpsAudit(limit = 50): Promise<OpsAuditRow[]> {
+  const data = await request<{ audit?: OpsAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
+  return data.audit ?? [];
+}
+
+// whoami 读当前 ops-token 对应的操作者身份（GET /api/admin/whoami）。
+export async function whoami(): Promise<{ name: string; role: string }> {
+  const data = await request<{ name?: string; role?: string }>(`/api/admin/whoami`);
+  return { name: data.name ?? "", role: data.role ?? "" };
+}
+
 // ============ ② 世界配置（列表已落地；region 详情/威胁度待后端落地） ============
 
 // AdminWorld 对齐后端 world.World（基本列表 GET /api/worlds，Go 默认大写 json 键名，无 tag）。

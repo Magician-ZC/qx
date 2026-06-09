@@ -11,12 +11,15 @@ import (
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/storage/dbdialect"
 )
 
-const anchorDefaultHalfLifeDays = 14.0
+// anchorDefaultHalfLifeDays 的默认半衰（14 天）现已迁入 runtimeconfig（"anchor.default_half_life_days"）；
+// 仅在 halfLifeDays<0「未指定」时作回落默认（见 UpsertAnchor），故直接在读取站点取 runtimeconfig 即可。
 
 // geoAnchorHalfLifeDays 是「所在地」geo 锚的半衰期（设计 §1.1：地理牵挂随离开而淡，3 天半衰）。
+// 现已迁入 runtimeconfig（"anchor.geo_half_life_days"，默认即此值）；此处保留为冻结默认基线（worldize_inbound_test 仍引用）。
 const geoAnchorHalfLifeDays = 3.0
 
 // geoAnchorDefaultWeight 是「她所在的地方」geo 锚的默认权重（接入世界时落锚用）。geo 是相关性里最轻的一类
@@ -27,12 +30,9 @@ const geoAnchorDefaultWeight = 0.6
 // legacyAnchorHalfLife<=0 表示「血脉/传家物」legacy 锚永不衰减（与 relevance.Anchor 约定一致：传承是恒久的弦）。
 const legacyAnchorHalfLife = 0.0
 
-// anchorRefDensitySaturation 控制反向锚密度饱和速度：以 ref 为锚的角色权重和 Σ(weight·RelativeImportance) 达此值时密度≈0.63。
-// 与 anchorDensitySaturation 同口径（正/反向密度量纲一致），让「她在乎多少」与「多少人在乎她」可比。
-const anchorRefDensitySaturation = 1.5
-
-// anchorDensitySaturation 控制锚密度饱和速度：Σ(weight·RelativeImportance) 达此值时密度≈0.63、约 2 倍时≈0.86。
-const anchorDensitySaturation = 1.5
+// 锚密度饱和速度（默认 1.5）现已迁入 runtimeconfig（"anchor.density_saturation"）：正向 AnchorDensity 与
+// 反向 AnchorDensityByRef 同口径共用同一饱和参数（量纲一致，让「她在乎多少」与「多少人在乎她」可比）——
+// Σ(weight·RelativeImportance) 达此值时密度≈0.63、约 2 倍时≈0.86。
 
 // AnchorDensity 返回某角色「在乎程度」的归一密度 [0,1]——锚（目标/红线/债仇爱/血脉 + 实时关系）越多越强、密度越高。
 // 供 region-runner 锚加权威胁刷新（威胁天然扎堆她在乎的地方，PvE-4）：注入式 provider，故放 session（relevance 域知识）。
@@ -49,7 +49,7 @@ func (service *Service) AnchorDensity(ctx context.Context, unitID string) float6
 	if sum <= 0 {
 		return 0
 	}
-	return 1 - math.Exp(-sum/anchorDensitySaturation)
+	return 1 - math.Exp(-sum/runtimeconfig.GetFloat("anchor.density_saturation"))
 }
 
 // UpsertAnchor 写入/更新一条相关性锚（按 (character, kind, ref) 主键累不重复）。weight 夹到 [0,1]。
@@ -69,7 +69,7 @@ func (service *Service) UpsertAnchor(ctx context.Context, characterID string, ki
 	// halfLifeDays 语义：**0 = 永不衰减**（红线/血脉/目标这类恒久的弦，与 relevance.Anchor「HalfLifeDays<=0 不衰减」一致）；
 	// 仅**负值**视为「未指定」回落默认半衰。此前把 0 也当未指定折成默认 14，会让本该恒久的锚悄悄衰减——已修正为保留 0。
 	if halfLifeDays < 0 {
-		halfLifeDays = anchorDefaultHalfLifeDays
+		halfLifeDays = runtimeconfig.GetFloat("anchor.default_half_life_days")
 	}
 	query := `
 		INSERT INTO relevance_anchors (character_unit_id, anchor_kind, anchor_ref, weight, label, half_life_days, updated_at)
@@ -123,7 +123,7 @@ func (service *Service) UpsertDebtAnchor(ctx context.Context, sessionID, charact
 // UpsertGeoAnchor 在「进入新 region」时落一根 geo 锚（设计 §1.1：所在地，半衰 3 天——离开后地理牵挂渐淡）。
 // ref 用 regionID；重复进同一区幂等刷新权重与 updated_at（让 TimeDecay 从最近一次驻留起算）。
 func (service *Service) UpsertGeoAnchor(ctx context.Context, sessionID, characterID, regionID string, weight float64, label string) error {
-	if err := service.UpsertAnchor(ctx, characterID, relevance.Geo, regionID, weight, label, geoAnchorHalfLifeDays); err != nil {
+	if err := service.UpsertAnchor(ctx, characterID, relevance.Geo, regionID, weight, label, runtimeconfig.GetFloat("anchor.geo_half_life_days")); err != nil {
 		return err
 	}
 	service.emitAnchorLit(ctx, sessionID, characterID, relevance.Geo, regionID, label)
@@ -202,7 +202,7 @@ func (service *Service) AnchorDensityByRef(ctx context.Context, ref string, kind
 	if sum <= 0 {
 		return 0
 	}
-	return 1 - math.Exp(-sum/anchorRefDensitySaturation)
+	return 1 - math.Exp(-sum/runtimeconfig.GetFloat("anchor.density_saturation"))
 }
 
 // loadPersistentAnchors 读某角色已落库的相关性锚（含非关系锚）。

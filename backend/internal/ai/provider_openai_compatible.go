@@ -257,6 +257,11 @@ func (p *OpenAICompatibleProvider) generateWithEndpoint(
 	endpoint providerEndpoint,
 	request ProviderRequest,
 ) (ProviderResponse, []CompletionAttempt, error) {
+	// LLM 全局 reasoning effort 热切（GM 运营，反 P2W：全局单值非付费分档）：请求级非空时覆盖端点构造期配置。
+	// endpoint 是值拷贝，覆盖只作用于本次请求，绝不污染 provider 的端点配置；下游 buildRequestSpec/dashScope 检查均生效。
+	if e := strings.TrimSpace(request.ReasoningEffort); e != "" {
+		endpoint.reasoningEffort = e
+	}
 	spec, err := p.buildRequestSpec(endpoint, request)
 	if err != nil {
 		attempt := CompletionAttempt{
@@ -739,7 +744,9 @@ func dashScopeThinkingEnabled(endpoint providerEndpoint) bool {
 	switch strings.ToLower(strings.TrimSpace(endpoint.reasoningEffort)) {
 	case "0", "false", "off", "none", "disabled", "disable":
 		return false
-	case "1", "true", "on", "enabled", "enable", "low", "medium", "high":
+	case "1", "true", "on", "enabled", "enable", "minimal", "low", "medium", "high":
+		// minimal=「最弱思考但仍思考」，与 low/medium/high 同向、与 responses 路径对任意非空 effort 透传的语义一致
+		// （catalog llm.reasoning_effort 合法枚举含 minimal，GM 热切设 minimal 时不应在 dashScope 上静默关掉思考）。
 		return true
 	default:
 		return false

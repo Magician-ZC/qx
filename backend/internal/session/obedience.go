@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -177,9 +178,9 @@ func resolveDirectiveComplianceWithRoll(
 		if shadowRisk >= 0.9 {
 			shadowReject := directiveRejectProbability(state, byID, actor, decision, shadowRisk)
 			resolution.RejectProbability = shadowReject
-			// forcedDefianceThreshold：影子抗命概率达到此阈即认定「本会违心抗命」。取与主路径
-			// reluctant/refused 同量级的保守阈值，避免把「略有顾虑也照做」误判成被强压。
-			resolution.WouldDefyUnderForce = shadowReject >= forcedDefianceThreshold
+			// 影子抗命概率达到此阈即认定「本会违心抗命」。取与主路径 reluctant/refused 同量级的保守阈值，
+			// 避免把「略有顾虑也照做」误判成被强压。阈值走 runtimeconfig（"obedience.forced_defiance_threshold"，默认 0.3）。
+			resolution.WouldDefyUnderForce = shadowReject >= runtimeconfig.GetFloat("obedience.forced_defiance_threshold")
 		}
 		return resolution
 	}
@@ -240,10 +241,9 @@ func resolveDirectiveComplianceWithRoll(
 	return resolution
 }
 
-// forcedDefianceThreshold 是「被即时令强压时，影子抗命概率达到此阈即认定单位本会违心抗命」
-// 的判定阈。取 0.3：与主路径 band<0.40 进入 reluctant（违心执行）同量级，保守地只把「明显本会抗命」
-// 的强令算作「越按越不听」的扣忠诚触发，避免把「略有顾虑仍照做」误伤为被强压。
-const forcedDefianceThreshold = 0.3
+// 「被即时令强压时，影子抗命概率达到此阈即认定单位本会违心抗命」的判定阈，默认 0.3：与主路径
+// band<0.40 进入 reluctant（违心执行）同量级，保守地只把「明显本会抗命」的强令算作「越按越不听」的
+// 扣忠诚触发，避免把「略有顾虑仍照做」误伤为被强压。现已迁入 runtimeconfig（"obedience.forced_defiance_threshold"）。
 
 // directiveRejectProbability 按与主路径完全一致的口径计算单位对当前指令的抗命概率。
 // 抽取自 resolveDirectiveComplianceWithRoll 主分支，供主分支与「即时令强压影子判定」共用，
@@ -577,10 +577,11 @@ func offlineCaution(offlineHours float64) float64 {
 	}
 	caution := 1.0 + 0.4*math.Log2(1.0+offlineHours)
 	// offlineCautionCeiling：单项乘数上限，仅防御「极长离线（远超任何真实托管时长）把谨慎度推到失控」。
-	// 取 4.5：约在 offlineHours≈430h（≈18 天）才触顶，故真实离线区间（小时～两周量级）内「越久越谨慎」
+	// 默认 4.5：约在 offlineHours≈430h（≈18 天）才触顶，故真实离线区间（小时～两周量级）内「越久越谨慎」
 	// 保持严格单调；触顶后仍封住无界增长——长期托管学会「绝不拿命赌大的」而非把抗命乘数推到无穷。
 	// 该上限只夹「胆量曲线这一项」；最终抗命概率仍由 directiveRejectProbability 统一夹 0.85。
-	const offlineCautionCeiling = 4.5
+	// 现已迁入 runtimeconfig（"obedience.offline_caution_ceiling"，默认即此值）。
+	offlineCautionCeiling := runtimeconfig.GetFloat("obedience.offline_caution_ceiling")
 	if caution > offlineCautionCeiling {
 		caution = offlineCautionCeiling
 	}

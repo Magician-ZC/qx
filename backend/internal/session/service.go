@@ -753,6 +753,12 @@ func (service *Service) TalkToUnit(ctx context.Context, sessionID string, unitID
 		return Snapshot{}, DialogueMessage{}, fmt.Errorf("dead units cannot respond")
 	}
 
+	// 发行安全门：玩家对白是 LLM 输入入口，先过 input 审核（敏感内容 + 越狱/prompt-injection）；
+	// 不放行即拒收，不进对话历史、不喂 LLM。开关均默认放行/默认开，对默认链路语义安全。
+	if v := service.ModerateText(ctx, message, "input"); !v.Allowed {
+		return Snapshot{}, DialogueMessage{}, fmt.Errorf("dialogue rejected by content safety")
+	}
+
 	playerLine := DialogueMessage{
 		ID:         uuid.NewString(),
 		UnitID:     unitID,
@@ -1027,6 +1033,12 @@ func (service *Service) SetUnitCharterForSession(ctx context.Context, sessionID,
 	if err != nil {
 		return OfflineCharter{}, err
 	}
+	// 发行安全门：离线宪章是玩家自由文本，会进决策 prompt（charterContextForUnit），先过 input 审核。
+	// 仅审长期目标/社交授权两段；Redlines 本就是玩家立的「禁区描述」（天然含暴力/越界字眼），过 input
+	// 审核易误杀，故**跳过**红线段——红线靠归因校验/freeze_list 的「越线即冻」机制兜底，而非内容词表。
+	if err := service.moderateCharterText(ctx, charter); err != nil {
+		return OfflineCharter{}, err
+	}
 	_, existed := GetUnitCharter(&state, unitID)
 	SetUnitCharter(&state, unitID, charter)
 	stored, _ := GetUnitCharter(&state, unitID)
@@ -1053,6 +1065,33 @@ func (service *Service) SetUnitCharterForSession(ctx context.Context, sessionID,
 		})
 	}
 	return stored, nil
+}
+
+// moderateCharterText 对离线宪章里玩家自由文本逐条过 input 审核（敏感内容 + 越狱/injection）。
+// 仅审 LongTermGoals/SocialMandates（这两段会进决策 prompt）；**有意跳过 Redlines**——红线是玩家立的
+// 禁区描述，天然含暴力/越界字眼，过内容词表易误杀，其约束力靠归因校验/freeze_list 的「越线即冻」兜底。
+// 任一条不放行即返回错误（拒绝整次宪章写入）；空条目跳过。
+func (service *Service) moderateCharterText(ctx context.Context, charter OfflineCharter) error {
+	if service == nil {
+		return nil
+	}
+	for _, goal := range charter.LongTermGoals {
+		if strings.TrimSpace(goal) == "" {
+			continue
+		}
+		if v := service.ModerateText(ctx, goal, "input"); !v.Allowed {
+			return fmt.Errorf("charter long-term goal rejected by content safety")
+		}
+	}
+	for _, mandate := range charter.SocialMandates {
+		if strings.TrimSpace(mandate) == "" {
+			continue
+		}
+		if v := service.ModerateText(ctx, mandate, "input"); !v.Allowed {
+			return fmt.Errorf("charter social mandate rejected by content safety")
+		}
+	}
+	return nil
 }
 
 // ClearUnitCharterForSession 撤销某单位的离线宪章（HTTP DELETE 用），落库并写 CHARTER_UPDATED 留痕（撤销视为更新）。

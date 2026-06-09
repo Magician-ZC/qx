@@ -30,6 +30,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
@@ -88,8 +89,9 @@ func (service *Service) scanAndMatch(ctx context.Context, state *State, units []
 	if worldID == "" {
 		return // 未接入多世界：社会客体撮合无世界域可绑，跳过
 	}
-	// 低频触发：每 autoMatchEveryNTurns 个部署回合扫一次（确定性，turn 取模）。
-	if autoMatchEveryNTurns <= 0 || state.TurnState.Turn%autoMatchEveryNTurns != 0 {
+	// 低频触发：每 N 个部署回合扫一次（确定性，turn 取模）。读一次存局部，同函数内 epoch 计算复用同值。
+	everyNTurns := runtimeconfig.GetInt("social.auto_match_every_n_turns")
+	if everyNTurns <= 0 || state.TurnState.Turn%everyNTurns != 0 {
 		return
 	}
 
@@ -108,7 +110,9 @@ func (service *Service) scanAndMatch(ctx context.Context, state *State, units []
 	dominantRegion := service.dominantRegionOf(ctx, candidates)
 
 	// label 带 turn，使不同周期产出不同确定性社会客体 id（同周期重撮合幂等更新同一客体）。
-	epoch := state.TurnState.Turn / autoMatchEveryNTurns
+	// epoch 同时作 NPC backfill 的确定性 seed：撮合节奏（social.auto_match_every_n_turns）经 GM 改后即时生效、
+	// 不回溯历史 epoch——旧客体仍按其生成时的 epoch 留痕，新周期按新节奏划窗，无需迁移既有社会客体。
+	epoch := state.TurnState.Turn / everyNTurns
 	label := autoMatchLabel + "·" + strconv.Itoa(epoch)
 	objID, chosen, err := service.MatchIntoSocialObject(ctx, worldID, autoMatchKind, label, candidates, autoMatchSlots)
 	if err != nil || objID == "" {
@@ -264,7 +268,7 @@ func (service *Service) dailyBindExhausted(ctx context.Context, unitID string) b
 	).Scan(&count); err != nil {
 		return true
 	}
-	return count >= autoMatchDailyBindCap
+	return count >= runtimeconfig.GetInt("social.auto_match_daily_bind_cap")
 }
 
 // ===== ① region 就近 + severity 定档 + expires_at 回填（原生 SQL，socialobject.Create 不写这三列）=====
@@ -404,6 +408,8 @@ func (service *Service) bindBackfillMember(ctx context.Context, objectID, worldI
 	if service == nil || service.db == nil || objectID == "" || npcID == "" {
 		return false
 	}
+	// 函数内读一次存局部：下方 INSERT/UPDATE 与留痕 payload 共用同一撮合分，避免多次 RLock。
+	npcScore := runtimeconfig.GetFloat("social.auto_match_npc_score")
 	now := time.Now().UTC().Format(autoMatchTimeLayout)
 	// 幂等绑定：按驱动选 ON DUPLICATE（MySQL）/ON CONFLICT（SQLite），与 socialobject.AddMember 同口径，避免方言语法错。
 	if dbdialect.IsMySQL(service.db) {
@@ -411,7 +417,7 @@ func (service *Service) bindBackfillMember(ctx context.Context, objectID, worldI
 			ctx,
 			`INSERT INTO social_object_members (object_id, unit_id, score, joined_at) VALUES (?,?,?,?)
 			 ON DUPLICATE KEY UPDATE score=VALUES(score)`,
-			objectID, npcID, autoMatchNPCScore, now,
+			objectID, npcID, npcScore, now,
 		); err != nil {
 			return false
 		}
@@ -419,7 +425,7 @@ func (service *Service) bindBackfillMember(ctx context.Context, objectID, worldI
 		ctx,
 		`INSERT INTO social_object_members (object_id, unit_id, score, joined_at) VALUES (?,?,?,?)
 		 ON CONFLICT(object_id, unit_id) DO UPDATE SET score=excluded.score`,
-		objectID, npcID, autoMatchNPCScore, now,
+		objectID, npcID, npcScore, now,
 	); err != nil {
 		return false
 	}
@@ -427,14 +433,14 @@ func (service *Service) bindBackfillMember(ctx context.Context, objectID, worldI
 	_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
 		SessionID: worldID, OwnerUnitID: npcID,
 		Code: events.ReasonSocialObjectBind, Category: events.CategoryFate,
-		Payload: map[string]any{"object_id": objectID, "kind": autoMatchKind, "backfill": true, "score": autoMatchNPCScore},
+		Payload: map[string]any{"object_id": objectID, "kind": autoMatchKind, "backfill": true, "score": npcScore},
 		WorldID: worldID,
 	})
 	return true
 }
 
-// autoMatchNPCScore 是 NPC 占位成员的撮合分（保守低分，叙事上「凑数的过路人」，不抢真人名次）。
-const autoMatchNPCScore = 0.30
+// NPC 占位成员的撮合分（保守低分，不抢真人名次）现由 runtimeconfig "social.auto_match_npc_score" 提供
+// （默认 0.30 在 catalog 注册），读取站点见上方 bindBackfillMember；此处原 const 已迁出、无残留引用。
 
 // npcBackfillID 由 (objectID, epoch, 序号) 派生确定性 NPC 占位 id（可复现、玩家分不出）。前缀 npc_so_ 便于审计识别。
 func npcBackfillID(objectID string, epoch, idx int) string {

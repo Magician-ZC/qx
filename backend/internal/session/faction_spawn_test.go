@@ -204,23 +204,42 @@ func TestAmbientWander_FlagOnDeterministicMovement(t *testing.T) {
 	snapshot := state.Map
 	before := coordsByID(t, service, sessionID, npcIDs)
 
-	// 单拍游走：固定 turn，跑两次（第二次先回滚坐标），落点应完全一致。
-	const probeTurn = 5
-	state.TurnState.Turn = probeTurn
-	service.wanderAmbientUnits(ctx, &state, units)
-	afterFirst := coordsByID(t, service, sessionID, npcIDs)
-
-	// 至少一个 NPC 挪动了（30% 概率 × 8~12 个 NPC，几乎必然有人动；若极端全不动也算合法，故只软性检查）。
+	_ = state
+	_ = units
+	// 扫一段确定性回合，找到首个「有 NPC 微动」的回合作 probeTurn——单回合 30% 概率 × 随机 NPC 种子下偶有全不动
+	// （本测试自承「极端全不动也算合法」），单拍硬断言 moved>0 会概率性 flake（~0.7^N）。扫多拍可稳定观测到游走
+	// 确实发生而不引入概率 flake：wander 仍是「按回合确定性」（同 (session,turn,NPC 集) 恒同落点），只是换一个能观测到位移的回合。
+	probeTurn := 0
+	var afterFirst map[string]string
 	moved := 0
-	occupied := map[string]int{}
-	for _, id := range npcIDs {
-		if before[id] != afterFirst[id] {
-			moved++
+	for turn := 1; turn <= 40; turn++ {
+		resetCoords(t, service, sessionID, before)
+		st, us, err := service.loadSession(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("load session (probe turn %d): %v", turn, err)
 		}
-		occupied[afterFirst[id]]++
+		st.TurnState.Turn = turn
+		service.wanderAmbientUnits(ctx, &st, us)
+		cur := coordsByID(t, service, sessionID, npcIDs)
+		m := 0
+		for _, id := range npcIDs {
+			if before[id] != cur[id] {
+				m++
+			}
+		}
+		if m > 0 {
+			probeTurn = turn
+			afterFirst = cur
+			moved = m
+			break
+		}
 	}
 	if moved == 0 {
-		t.Fatalf("flag 开时应有 NPC 发生微动（确定性 30%% × %d 个 NPC），但无人移动", len(npcIDs))
+		t.Fatalf("flag 开时扫 40 个回合仍无任何 NPC 微动（确定性 30%% × %d 个 NPC，几乎不可能）", len(npcIDs))
+	}
+	occupied := map[string]int{}
+	for _, id := range npcIDs {
+		occupied[afterFirst[id]]++
 	}
 	// 落点合法性：互不叠放。
 	for coord, n := range occupied {

@@ -235,16 +235,17 @@ type ActiveLLMCall struct {
 
 // ProviderRequest 结构体用于承载该模块的核心数据。
 type ProviderRequest struct {
-	Task           TaskKind
-	Model          string
-	SystemPrompt   string
-	UserPrompt     string
-	SchemaName     string
-	ResponseSchema []byte
-	Temperature    float64
-	MaxTokens      int
-	Timeout        time.Duration
-	Metadata       map[string]string
+	Task            TaskKind
+	Model           string
+	SystemPrompt    string
+	UserPrompt      string
+	SchemaName      string
+	ResponseSchema  []byte
+	Temperature     float64
+	MaxTokens       int
+	Timeout         time.Duration
+	ReasoningEffort string // 请求级 reasoning effort（GM 全局热切覆盖端点构造期配置；空=不覆盖、沿用端点配置）
+	Metadata        map[string]string
 }
 
 // ProviderResponse 结构体用于承载该模块的核心数据。

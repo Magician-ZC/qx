@@ -30,6 +30,7 @@ import (
 	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/liveops"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/session"
 	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
@@ -137,6 +138,22 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		hub = ws.NewHub(deps.Logger)
 	}
 	duelAuth := newDuelSessionAuthStoreWithDB(deps.Store)
+
+	// ops RBAC：多操作者 + 三档角色（viewer/operator/admin）+ 操作审计，建立在 ops_operators/ops_audit_log 两表上。
+	// 三档守卫闭包替换旧的单 token opsTokenGuard()/opsTokenGuardStrict()：只读挂 opsViewer、写挂 opsWriter、
+	// 高危破坏性（不可逆擦除/批量清理/操作者管理）挂 opsAdmin。ops_operators 表为空时优雅降级回旧单 token env 语义
+	// （向后兼容：表空 + 配了 QUNXIANG_OPS_TOKEN → 该 token 视为 admin；表空 + 未配 → viewer 放行、operator+ fail-closed 503）。
+	opsStore := NewOpsOperatorStore(deps.Store)
+	opsViewer := opsRBACGuard(opsStore, RoleViewer)
+	opsWriter := opsRBACGuard(opsStore, RoleOperator)
+	opsAdmin := opsRBACGuard(opsStore, RoleAdmin)
+	// 引导期种子：表空且配了 QUNXIANG_OPS_TOKEN 时，把该 env token 幂等写为 admin 操作者（name=env-admin）。
+	// 否则运营用 env-admin 建首个 operator 后 Count>0、表权威切换会把 env-admin 永久踢出造成自锁。best-effort 吞错不阻断启动。
+	if n, err := opsStore.Count(context.Background()); err == nil && n == 0 {
+		if envTok := opsEnvToken(); envTok != "" {
+			_ = opsStore.Upsert(context.Background(), "env-admin", string(RoleAdmin), envTok, "bootstrap")
+		}
+	}
 
 	// envFlag 解析进程级开关：默认关 → 零行为变化；true/1/yes/on（不分大小写）视为开。
 	// 商业化 / 合规端点经此 flag-gate（未开启即整组不注册）。
@@ -337,6 +354,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 		// 合规/红线遥测：内容安全双向审核计数 + 突然戏剧性动作的硬前因门控计数 + 一致性收紧惊喜上限计数。
 		safetyChecked, safetyBlocked := session.ContentSafetyStats()
+		injChecked, injBlocked := session.InjectionSafetyStats()
 		gateTotal, gateBlocked := session.SurpriseGateStats()
 		surpriseCapTotal, surpriseCapDeferred := session.SurpriseCapStats()
 		// §8 OOC 双口径交叉观测（玩家主观三键 OOC + 归因机器 OOC + 两旋钮态）。纯读、幂等（不驱动 latch）。
@@ -392,6 +410,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 				"checked": safetyChecked,
 				"blocked": safetyBlocked,
 			},
+			// 输入侧越狱/prompt-injection 检测遥测（发行安全门，QUNXIANG_INPUT_INJECTION 默认开、独立于 content_safety）。
+			"injection_guard": gin.H{
+				"checked": injChecked,
+				"blocked": injBlocked,
+			},
 			// 突然戏剧性动作（恋爱/卖传家宝/叛变）的硬前因门控遥测：无源前因被回退安全决策的次数。
 			"surprise_gate": gin.H{
 				"total":   gateTotal,
@@ -431,7 +454,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 运营成本/单位经济仪表盘（只读聚合，产品验证）：跨会话真实 LLM 成本 + MAU 代理 + 单位经济。?days=N 限窗口（默认 30，0=全量）。
-	router.GET("/api/ops/cost-dashboard", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/cost-dashboard", opsViewer, func(c *gin.Context) {
 		days := 30
 		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -447,7 +470,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 产品漏斗只读聚合（P0 通电：让 product_events 富埋点从 write-only 变可消费）。days<=0/缺省=全量。
-	router.GET("/api/ops/product-funnel", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/product-funnel", opsViewer, func(c *gin.Context) {
 		days := 0
 		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -463,7 +486,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 北极星指标只读聚合（D2 收件箱处理率 / 分享 / 付费 / 回访）。days<=0/缺省=全量。
-	router.GET("/api/ops/north-star", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/north-star", opsViewer, func(c *gin.Context) {
 		days := 0
 		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -479,7 +502,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// A/B 实验漏斗：按 ab_bucket 分组拆分对比（SH2.3 红线 A/B、卖点 A/B/C、服从 vs 违背）。key 仅回显，桶名本身编码实验。
-	router.GET("/api/ops/experiment", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/experiment", opsViewer, func(c *gin.Context) {
 		days := 0
 		if raw := strings.TrimSpace(c.Query("days")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -498,7 +521,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	// 设计 docs/产品方案PRD.md §8。写均走 append-only 表、永不改写历史；审计只观测付费态、绝不进 Score。
 
 	// GM 世界事件注入：往某活世界投一条权威跨事件（天灾/外敌/丰年…），全量留可仲裁审计。
-	router.POST("/api/ops/worlds/:worldId/events", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/ops/worlds/:worldId/events", opsWriter, func(c *gin.Context) {
 		var body struct {
 			Kind       string         `json:"kind"`
 			Importance int            `json:"importance"`
@@ -536,7 +559,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 创建赛季：建一个新世界 + 落 seasons 行（可选挂内容母题）。
-	router.POST("/api/ops/seasons", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/ops/seasons", opsWriter, func(c *gin.Context) {
 		var body struct {
 			Name           string `json:"name"`
 			WorldName      string `json:"world_name"`
@@ -563,7 +586,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 收尾赛季：存活角色回流名人堂 + 世界封存 + status=finalized + 广播。
-	router.POST("/api/ops/seasons/:id/finalize", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/ops/seasons/:id/finalize", opsWriter, func(c *gin.Context) {
 		result, err := liveopsSvc.FinalizeSeason(c.Request.Context(), c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -573,7 +596,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 零和监控审计：扫某世界 [turn_start, turn_end] 区间的仲裁结局，按付费态分组算胜率、判 P2W 红线。
-	router.GET("/api/ops/worlds/:worldId/arbitration-audit", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/worlds/:worldId/arbitration-audit", opsViewer, func(c *gin.Context) {
 		turnStart := 0
 		turnEnd := 0
 		if raw := strings.TrimSpace(c.Query("turn_start")); raw != "" {
@@ -595,7 +618,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// GM 注入审计清单：列出某世界的 GM 注入审计（最新在前），?limit= 限条数（缺省 100）。
-	router.GET("/api/ops/worlds/:worldId/gm-audit", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/ops/worlds/:worldId/gm-audit", opsViewer, func(c *gin.Context) {
 		limit := 0
 		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
 			if v, err := strconv.Atoi(raw); err == nil {
@@ -618,13 +641,13 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	// 世界配置经 session 的 admin_world 服务（每请求新建轻量 Service）。供独立 AdminApp 前端 5 面板驱动。
 
 	// 列出全部已知游戏 flag 的生效态（override / 环境变量 / 默认值三层合一）。
-	router.GET("/api/admin/flags", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/admin/flags", opsViewer, func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"flags": featureflags.SnapshotEffective()})
 	})
 
 	// 设一个 flag 的运行时 override（不重启即灰度）。先校验是已知游戏 flag，再 best-effort 落库持久化。
 	// 写端点：反射关键 flag 开关，fail-closed（opsTokenGuardStrict）——未配 OPS_TOKEN 时返 503 拒绝。
-	router.POST("/api/admin/flags", opsTokenGuardStrict(), func(c *gin.Context) {
+	router.POST("/api/admin/flags", opsWriter, func(c *gin.Context) {
 		var body struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
@@ -641,6 +664,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		auditOps(opsStore, c, "flag_set", body.Name+"="+body.Value)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
@@ -656,11 +680,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		auditOps(opsStore, c, "flag_clear", name)
 		c.JSON(http.StatusOK, gin.H{"existed": existed})
 	}
-	// 清 override 同属写端点，fail-closed（opsTokenGuardStrict）。
-	router.DELETE("/api/admin/flags", opsTokenGuardStrict(), adminClearFlag)       // AdminApp：?name=
-	router.DELETE("/api/admin/flags/:name", opsTokenGuardStrict(), adminClearFlag) // 兼容 path 形
+	// 清 override 同属写端点，operator+ fail-closed（opsWriter）。
+	router.DELETE("/api/admin/flags", opsWriter, adminClearFlag)       // AdminApp：?name=
+	router.DELETE("/api/admin/flags/:name", opsWriter, adminClearFlag) // 兼容 path 形
 
 	// 世界总览：列出全部世界及其 region/人口概览（GM 总览页数据源）。limit=0 取缺省。
 	// 路径用 /worlds-detail 对齐 AdminApp WorldConfigPanel 的 listWorldsDetail（与已落地的基础列表 /api/worlds 区分）。
@@ -672,12 +697,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"worlds": worlds})
 	}
-	router.GET("/api/admin/worlds-detail", opsTokenGuard(), adminWorldsDetail)
-	router.GET("/api/admin/worlds", opsTokenGuard(), adminWorldsDetail) // 兼容别名
+	router.GET("/api/admin/worlds-detail", opsViewer, adminWorldsDetail)
+	router.GET("/api/admin/worlds", opsViewer, adminWorldsDetail) // 兼容别名
 
 	// 三阵营 GM 只读概览（标识/中文名/道德信条/道德基准/出生据点/当前人口）。阵营开放世界 F3。
 	// 与 worlds-detail 同口径只读守卫（opsTokenGuard：未配 token 放行，配了需正确 X-Ops-Token）。
-	router.GET("/api/admin/factions", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/admin/factions", opsViewer, func(c *gin.Context) {
 		details, err := newSessionService().ListFactionsDetail(c.Request.Context())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -688,7 +713,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 绝对置位某 region 的威胁等级（GM 人工拉高/清零某地威胁度做活动/演练）。返回置位后的实际威胁值。
 	// 写端点：状态变更，fail-closed（opsTokenGuardStrict）。
-	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsTokenGuardStrict(), func(c *gin.Context) {
+	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsWriter, func(c *gin.Context) {
 		var body struct {
 			Level int64 `json:"level"`
 		}
@@ -706,7 +731,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 手动为某局/世界确定性织一张 20 人出生关系网（GM 手动播种世界人口）。faction_id 缺省服务内取 session_id。
 	// 写端点：凭空造人是状态变更，fail-closed（opsTokenGuardStrict）。
-	router.POST("/api/admin/worlds/:worldId/seed-village", opsTokenGuardStrict(), func(c *gin.Context) {
+	router.POST("/api/admin/worlds/:worldId/seed-village", opsWriter, func(c *gin.Context) {
 		var body struct {
 			SessionID string `json:"session_id"`
 			FactionID string `json:"faction_id"`
@@ -724,10 +749,135 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"seeded": n})
 	})
 
+	// ===== 类型化运行时配置中心（internal/runtimeconfig：不重启即实时调玩法数值 / LLM 热切） =====
+	// 只读快照挂 opsViewer；设/清 override 挂 opsWriter（fail-closed）。值经 runtimeconfig 类型 + 范围/枚举校验，非法 400。
+	// 反 P2W：llm.* 是全局单值热切，不接 tier-routing 付费分档（付费买不到更强模型）。
+	router.GET("/api/admin/config", opsViewer, func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"params": runtimeconfig.SnapshotEffective()})
+	})
+	router.POST("/api/admin/config", opsWriter, func(c *gin.Context) {
+		var body struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := runtimeconfig.SetOverride(body.Name, body.Value); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "config_set", body.Name+"="+body.Value)
+		if p, ok := runtimeconfig.EffectiveByName(body.Name); ok {
+			c.JSON(http.StatusOK, gin.H{"param": p})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	// 清 override 回落 catalog 默认值（AdminApp 走 ?name= query；同注册 /:name path 便于 curl）。
+	adminClearConfig := func(c *gin.Context) {
+		name := strings.TrimSpace(c.Param("name"))
+		if name == "" {
+			name = strings.TrimSpace(c.Query("name"))
+		}
+		existed, err := runtimeconfig.ClearOverride(name)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "config_clear", name)
+		if p, ok := runtimeconfig.EffectiveByName(name); ok {
+			c.JSON(http.StatusOK, gin.H{"param": p, "existed": existed})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"existed": existed})
+	}
+	router.DELETE("/api/admin/config", opsWriter, adminClearConfig)
+	router.DELETE("/api/admin/config/:name", opsWriter, adminClearConfig)
+
+	// ===== ops 操作者管理 + 操作审计（RBAC） =====
+	// 当前登录态身份（viewer+）：返回 X-Ops-Token 对应 operator 的 name+role（表空降级返回 env-admin / anonymous）。
+	router.GET("/api/admin/whoami", opsViewer, func(c *gin.Context) {
+		if op, ok := currentOperator(c); ok {
+			c.JSON(http.StatusOK, gin.H{"name": op.Name, "role": string(op.Role)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"name": "anonymous", "role": string(RoleViewer)})
+	})
+	// 列操作者（脱敏，不含 token_hash）。viewer+。键名归一小写对齐前端。
+	router.GET("/api/admin/operators", opsViewer, func(c *gin.Context) {
+		rows, err := opsStore.List(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out := make([]gin.H, 0, len(rows))
+		for _, o := range rows {
+			out = append(out, gin.H{"name": o.Name, "role": o.Role, "created_at": o.CreatedAt})
+		}
+		c.JSON(http.StatusOK, gin.H{"operators": out})
+	})
+	// 新增/改操作者（admin+，fail-closed）。明文 token 仅此一次随请求传入、落库只存 sha256。
+	router.POST("/api/admin/operators", opsAdmin, func(c *gin.Context) {
+		var body struct {
+			Name  string `json:"name"`
+			Role  string `json:"role"`
+			Token string `json:"token"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		createdBy := "admin"
+		if op, ok := currentOperator(c); ok && op.Name != "" {
+			createdBy = op.Name
+		}
+		if err := opsStore.Upsert(c.Request.Context(), body.Name, body.Role, body.Token, createdBy); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "operator_upsert", body.Name+":"+body.Role)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	// 删操作者（admin+，fail-closed）。
+	router.DELETE("/api/admin/operators", opsAdmin, func(c *gin.Context) {
+		name := strings.TrimSpace(c.Query("name"))
+		if name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+			return
+		}
+		if err := opsStore.Delete(c.Request.Context(), name); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "operator_delete", name)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	// 操作审计日志（viewer+：谁在何时做了什么运营动作）。键名归一小写对齐前端。
+	router.GET("/api/admin/audit", opsViewer, func(c *gin.Context) {
+		limit := 100
+		if v := strings.TrimSpace(c.Query("limit")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
+			}
+		}
+		rows, err := opsStore.ListAudit(c.Request.Context(), limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		out := make([]gin.H, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, gin.H{"operator": r.Operator, "role": r.Role, "action": r.Action, "target": r.Target, "created_at": r.CreatedAt})
+		}
+		c.JSON(http.StatusOK, gin.H{"audit": out})
+	})
+
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
 	// 漏斗端点是 ops 敏感只读聚合，套 opsTokenGuard；POST /api/leads 是 landing 公开提交，保持公开（不守卫）。
 	// 漏斗路由在 leads.go 内注册，这里用路径作用域的前置中间件守卫，避免影响公开的 /api/leads。
-	leadsFunnelGuard := opsTokenGuard()
+	leadsFunnelGuard := opsViewer
 	router.Use(func(c *gin.Context) {
 		if c.Request.Method == http.MethodGet && c.Request.URL.Path == "/api/ops/leads-funnel" {
 			leadsFunnelGuard(c)
@@ -738,7 +888,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	registerLeadEndpoints(router, deps.Store)
 
 	// 社会客体撮合（跨玩家，§2.2）：POST 用 MatchScore 四因子 + arbitration 确定性择人绑进社会客体；GET 列出某世界的社会客体。
-	router.POST("/api/worlds/:worldId/social-objects", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/worlds/:worldId/social-objects", opsWriter, func(c *gin.Context) {
 		worldID := strings.TrimSpace(c.Param("worldId"))
 		var body struct {
 			Kind       string                   `json:"kind"`
@@ -767,7 +917,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 七种交互（跨玩家，§2.3）：POST 记录并按 consent 档路由（单方立即应用/高后果建待决同意请求）。
-	router.POST("/api/worlds/:worldId/seven-interactions", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/worlds/:worldId/seven-interactions", opsWriter, func(c *gin.Context) {
 		var body struct {
 			ActorID     string `json:"actor_id"`
 			TargetID    string `json:"target_id"`
@@ -787,7 +937,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, res)
 	})
 	// consent_gate：列出某角色的待决同意请求 / 处理一条（接受=应用关系效果，拒绝=不应用）。
-	router.GET("/api/consent/pending/:unitId", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/consent/pending/:unitId", opsViewer, func(c *gin.Context) {
 		reqs, err := newSessionService().ListPendingConsents(c.Request.Context(), strings.TrimSpace(c.Param("unitId")))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -795,7 +945,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"pending": reqs})
 	})
-	router.POST("/api/consent/:reqId/resolve", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/consent/:reqId/resolve", opsWriter, func(c *gin.Context) {
 		var body struct {
 			Accept bool `json:"accept"`
 		}
@@ -1486,7 +1636,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 举报裁定闭环（运营动作，治理敏感写接口）：标记 Resolved + 按 action 对被举报单位经 StatusMutator 施加后果。
 	// action ∈ resolve|warn|ban（缺省 resolve）；note 可空。套 opsTokenGuard（与其它运营/审计端点同级鉴权）。
-	router.POST("/api/sessions/:id/reports/:reportId/resolve", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/sessions/:id/reports/:reportId/resolve", opsWriter, func(c *gin.Context) {
 		var request struct {
 			Action string `json:"action"`
 			Note   string `json:"note"`
@@ -1518,7 +1668,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 审计包内含完整 LLM prompt（含玩家指令/角色记忆等敏感内容），是高危只读端点，套 opsTokenGuard（P2 安全修复）。
-	router.GET("/api/sessions/:id/audit", opsTokenGuard(), func(c *gin.Context) {
+	router.GET("/api/sessions/:id/audit", opsViewer, func(c *gin.Context) {
 		limit := 80
 		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
 			parsed, err := strconv.Atoi(raw)
@@ -1538,7 +1688,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 不可逆数据擦除是高危写接口（可销毁任意会话的对话/记忆/审计），套 opsTokenGuard（P2 安全修复）。
-	router.POST("/api/sessions/:id/privacy/erase", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/sessions/:id/privacy/erase", opsAdmin, func(c *gin.Context) {
 		var request struct {
 			EraseDialogue   bool `json:"erase_dialogue"`
 			EraseLLMDetails bool `json:"erase_llm_details"`
@@ -1567,11 +1717,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		broadcastSessionSnapshot("privacy_erased", snapshot, map[string]any{
 			"privacy_erase_result": result,
 		})
+		auditOps(opsStore, c, "privacy_erase", c.Param("id"))
 		c.JSON(http.StatusOK, gin.H{"session": publicForRequest(c, snapshot), "result": result})
 	})
 
 	// 批量过期清理是高危写接口（可跨会话删除数据），套 opsTokenGuard（P2 安全修复）。
-	router.POST("/api/privacy/purge", opsTokenGuard(), func(c *gin.Context) {
+	router.POST("/api/privacy/purge", opsAdmin, func(c *gin.Context) {
 		var request struct {
 			RetentionDays int `json:"retention_days"`
 			Limit         int `json:"limit"`
@@ -1587,6 +1738,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		auditOps(opsStore, c, "privacy_purge", strconv.Itoa(request.RetentionDays)+"d")
 		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 

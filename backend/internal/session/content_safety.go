@@ -26,6 +26,8 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+
+	"qunxiang/backend/internal/engine/events"
 )
 
 // SafetyCategory 是内容安全的违规类别（中文场景）。
@@ -137,7 +139,33 @@ var safetyCategoryOrder = []SafetyCategory{
 func (service *Service) ModerateText(ctx context.Context, text string, direction string) SafetyVerdict {
 	contentSafetyChecked.Add(1)
 
-	// flag 关：向后兼容，恒放行。
+	// 发行安全门（独立于 content-safety，默认开）：玩家输入侧越狱/prompt-injection 检测。
+	// 刻意放在 content-safety 开关**之前**——即便 QUNXIANG_CONTENT_SAFETY 关，输入侧注入检测仍独立生效
+	// （受独立开关 QUNXIANG_INPUT_INJECTION 门控，默认开）。命中即直接拒，无需再跑合规词表。
+	if direction == "input" && injectionSafetyEnabled() {
+		injectionChecked.Add(1)
+		injectionVerdict := ruleInjectionDetection(text)
+		injectionVerdict = extendedInjectionDetection(ctx, text, injectionVerdict)
+		if !injectionVerdict.Allowed {
+			injectionBlocked.Add(1)
+			// 留痕（流程事件旁路，不改保护状态字段）：best-effort 吞错，绝不阻断输入审核主链路。
+			// ModerateText 是通用文本审核入口，无会话/单位上下文，故 SessionID/OwnerUnitID 留空——
+			// 审计行仍记录拦截原因码与命中类别，供安全复盘。
+			if service != nil && service.db != nil {
+				_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+					Code:     events.ReasonInputInjectionBlocked,
+					Category: events.CategoryGovernance,
+					Payload: map[string]any{
+						"categories": injectionVerdict.Categories,
+						"reason":     injectionVerdict.Reason,
+					},
+				})
+			}
+			return injectionVerdict
+		}
+	}
+
+	// content-safety 合规词表开关关：向后兼容，恒放行（注入检测已在上面独立跑过）。
 	if !contentSafetyEnabled() {
 		return SafetyVerdict{Allowed: true}
 	}

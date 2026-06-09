@@ -23,6 +23,7 @@ import (
 	"qunxiang/backend/internal/httpapi"
 	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/regionrunner"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/session"
 	mysqlstore "qunxiang/backend/internal/storage/mysql"
 	postgresstore "qunxiang/backend/internal/storage/postgres"
@@ -65,6 +66,16 @@ func main() {
 		logger.Error("load feature flag overrides", "error", err)
 	} else if n > 0 {
 		logger.Info("loaded feature flag overrides", "count", n)
+	}
+
+	// GM 后台类型化运行时配置（数值/阈值/LLM 热切）持久化：注入双驱动 Store 后从 runtime_config_overrides
+	// 表回灌已存 override，使 GM 设过的参数重启存活。best-effort：失败只记日志、绝不阻断启动（override 缺省回退
+	// catalog 注册的默认值）。回灌时已下线/已非法（范围改过）的历史 override 被 runtimeconfig 侧丢弃。
+	runtimeconfig.SetStore(session.NewRuntimeConfigStore(db))
+	if n, err := runtimeconfig.LoadFromStore(context.Background()); err != nil {
+		logger.Error("load runtime config overrides", "error", err)
+	} else if n > 0 {
+		logger.Info("loaded runtime config overrides", "count", n)
 	}
 
 	hub := ws.NewHub(logger)

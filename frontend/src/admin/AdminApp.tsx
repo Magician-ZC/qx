@@ -27,6 +27,8 @@ import { useCallback, useState } from "react";
 import "./admin.css";
 import { getAdminOpsToken, hasAdminOpsToken, setAdminOpsToken } from "./adminApi";
 import { FlagsPanel } from "./FlagsPanel";
+import { ConfigPanel } from "./ConfigPanel";
+import { OperatorPanel } from "./OperatorPanel";
 import { WorldConfigPanel } from "./WorldConfigPanel";
 import { FactionPanel } from "./FactionPanel";
 import { GmEventPanel } from "./GmEventPanel";
@@ -34,15 +36,25 @@ import { SeasonPanel } from "./SeasonPanel";
 import { MonitoringPanel } from "./MonitoringPanel";
 
 // AdminTab 是左导航的页签标识。
-type AdminTab = "flags" | "worlds" | "factions" | "gm-events" | "seasons" | "monitoring";
+type AdminTab =
+  | "flags"
+  | "config"
+  | "worlds"
+  | "factions"
+  | "gm-events"
+  | "seasons"
+  | "monitoring"
+  | "operators";
 
 const TABS: { id: AdminTab; label: string }[] = [
   { id: "flags", label: "运行时开关" },
+  { id: "config", label: "可运营配置" },
   { id: "worlds", label: "世界配置" },
   { id: "factions", label: "阵营配置" },
   { id: "gm-events", label: "事件注入" },
   { id: "seasons", label: "赛季" },
   { id: "monitoring", label: "监控" },
+  { id: "operators", label: "操作者" },
 ];
 
 // AdminLogin 是 ops-token 登录门：填 token → 存 localStorage（adminApi 持有）→ 进后台。
@@ -148,11 +160,13 @@ export function AdminApp(): JSX.Element {
 
         <main className="adm-content">
           {tab === "flags" ? <FlagsPanel /> : null}
+          {tab === "config" ? <ConfigPanel /> : null}
           {tab === "worlds" ? <WorldConfigPanel /> : null}
           {tab === "factions" ? <FactionPanel /> : null}
           {tab === "gm-events" ? <GmEventPanel /> : null}
           {tab === "seasons" ? <SeasonPanel /> : null}
           {tab === "monitoring" ? <MonitoringPanel /> : null}
+          {tab === "operators" ? <OperatorPanel /> : null}
         </main>
       </div>
     </div>

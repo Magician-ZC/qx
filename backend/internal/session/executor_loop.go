@@ -9,11 +9,14 @@ import (
 	"strings"
 
 	"qunxiang/backend/internal/item"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
 
 // 常量定义区：集中声明该文件使用的共享配置。
+// atbMomentumPenaltyFactor 现已迁入 runtimeconfig（"combat.atb_momentum_penalty"，默认即此值），
+// 此处保留为「冻结默认值」基线（决定性测试 atb_det_test.go 仍引用它做 0.85 基线断言）。
 const (
 	atbGaugeThreshold        = 100.0
 	atbGaugeTickScale        = 0.1
@@ -89,6 +92,10 @@ func buildExecutionOrderByATB(
 		return nil, breakdowns
 	}
 
+	// momentumFactor：同阵营连续行动的「势头惩罚」系数。提到 ATB 双层 for 之外读一次（热循环：每 tick 每 actor），
+	// 避免在最内层每次都过一遍 runtimeconfig 的 RLock。
+	momentumFactor := runtimeconfig.GetFloat("combat.atb_momentum_penalty")
+
 	order := make([]string, 0, len(actors))
 	for tick := 0; len(order) < len(actors) && tick < atbMaxTicks; tick++ {
 		for _, actor := range actors {
@@ -97,7 +104,7 @@ func buildExecutionOrderByATB(
 			}
 			increment := actor.Speed * atbGaugeTickScale
 			if hasMomentumPenalty(order, actor.FactionID, factionByID) {
-				increment *= atbMomentumPenaltyFactor
+				increment *= momentumFactor
 			}
 			actor.Gauge += increment
 		}
@@ -120,10 +127,10 @@ func buildExecutionOrderByATB(
 			leftEffectiveSpeed := left.Speed
 			rightEffectiveSpeed := right.Speed
 			if hasMomentumPenalty(order, left.FactionID, factionByID) {
-				leftEffectiveSpeed *= atbMomentumPenaltyFactor
+				leftEffectiveSpeed *= momentumFactor
 			}
 			if hasMomentumPenalty(order, right.FactionID, factionByID) {
-				rightEffectiveSpeed *= atbMomentumPenaltyFactor
+				rightEffectiveSpeed *= momentumFactor
 			}
 			if leftEffectiveSpeed != rightEffectiveSpeed {
 				return leftEffectiveSpeed > rightEffectiveSpeed

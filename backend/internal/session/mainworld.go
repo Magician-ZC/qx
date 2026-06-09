@@ -131,6 +131,13 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, fmt.Errorf("create main-world character: empty account")
 	}
 
+	// 发行安全门：捏人是玩家自由文本入口，名字/出身/夙愿/创伤都会进决策 prompt（applyMainWorldPersona
+	// 写传记 + applyMainWorldCharter 落长期目标），先过 input 审核（敏感内容 + 越狱/injection）。命中即拒
+	// 降生。Redline 段谨慎处理（红线是玩家立的禁区描述，易误杀）——故不在此审，与 SetUnitCharterForSession 一致。
+	if err := service.moderateCharacterInput(ctx, in); err != nil {
+		return MainWorldCharacter{}, err
+	}
+
 	// world_default 必须先于幂等查询解析（resume 与降生共用同一世界锚）。
 	worldID, err := service.EnsureDefaultWorld(ctx)
 	if err != nil {
@@ -332,6 +339,34 @@ func resolveBirthFaction(in MainWorldCharacterInput) string {
 		}
 	}
 	return faction.IDFreedom
+}
+
+// moderateCharacterInput 对捏人降生的玩家自由文本逐字段过 input 审核（敏感内容 + 越狱/injection）。
+// 审 Name/Origin/Desire/Wound（这四项会进身份/传记/长期目标，最终喂决策 prompt）；空字段跳过。
+// **有意不审 Redline**——红线是玩家立的禁区描述，天然含暴力/越界字眼，过内容词表易误杀，与
+// moderateCharterText 的处理一致（红线约束靠归因校验/freeze_list 兜底）。任一字段不放行即拒绝降生。
+func (service *Service) moderateCharacterInput(ctx context.Context, in MainWorldCharacterInput) error {
+	if service == nil {
+		return nil
+	}
+	fields := []struct {
+		label string
+		text  string
+	}{
+		{"name", in.Name},
+		{"origin", in.Origin},
+		{"desire", in.Desire},
+		{"wound", in.Wound},
+	}
+	for _, f := range fields {
+		if strings.TrimSpace(f.text) == "" {
+			continue
+		}
+		if v := service.ModerateText(ctx, f.text, "input"); !v.Allowed {
+			return fmt.Errorf("character %s rejected by content safety", f.label)
+		}
+	}
+	return nil
 }
 
 // applyMainWorldPersona 把捏人的出身/夙愿/创伤覆写进角色身份与传记（决策 prompt 会读 Biography）。

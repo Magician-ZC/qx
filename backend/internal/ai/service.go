@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"qunxiang/backend/internal/config"
+	"qunxiang/backend/internal/runtimeconfig"
 )
 
 // Service 结构体用于承载该模块的核心数据。
@@ -221,6 +222,22 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 		timeout = tierTimeout
 	}
 
+	// LLM 全局热切（internal/runtimeconfig，GM 运营可不重启切换模型/effort/超时）。反 P2W：这是**全局单值**，
+	// 绝不接 tier-routing 的付费分档——付费买不到更强模型。优先级：request.Timeout（显式）/ tier（任务重要度档）
+	// 优先于 rc 全局基线（rc 只在两者都未设时覆盖 profile 默认），保持既有分档语义不被全局热切打乱。
+	rcModel := strings.TrimSpace(runtimeconfig.GetString("llm.model"))
+	rcEffort := strings.TrimSpace(runtimeconfig.GetEnum("llm.reasoning_effort"))
+	if rcTimeoutS := runtimeconfig.GetInt("llm.timeout_seconds"); rcTimeoutS > 0 && request.Timeout == 0 && tierTimeout <= 0 {
+		clamped := time.Duration(rcTimeoutS) * time.Second
+		if clamped < 60*time.Second {
+			clamped = 60 * time.Second
+		}
+		if clamped > 180*time.Second {
+			clamped = 180 * time.Second
+		}
+		timeout = clamped
+	}
+
 	order := providerOrder(profile.Primary, profile.Secondary, profile.Tertiary)
 	activeProvider, activeModel := s.activeCallTarget(order)
 	activeCallID := registerActiveLLMCall(request, activeProvider, activeModel)
@@ -242,22 +259,27 @@ func (s *Service) GenerateJSON(ctx context.Context, request CompletionRequest) (
 			continue
 		}
 
-		// 模型选择：默认用 provider 默认模型；tier routing 命中时用档内模型（tierModel 非空才覆盖）。
+		// 模型选择：默认用 provider 默认模型；tier routing 命中时用档内模型；否则 GM 全局热切 rcModel 覆盖（非空时）。
+		// 注意 provider 取模型为 firstNonEmpty(endpoint.model, request.Model)，端点硬编码模型优先，
+		// 故 rcModel 仅对未配端点模型的 provider 生效——与 tier 同限制，已在 catalog 说明里标注。
 		requestModel := provider.Status().DefaultModel
 		if tierModel != "" {
 			requestModel = tierModel
+		} else if rcModel != "" {
+			requestModel = rcModel
 		}
 		response, err := provider.GenerateJSON(ctx, ProviderRequest{
-			Task:           request.Task,
-			SystemPrompt:   request.SystemPrompt,
-			UserPrompt:     request.UserPrompt,
-			Model:          requestModel,
-			SchemaName:     request.SchemaName,
-			ResponseSchema: request.ResponseSchema,
-			Temperature:    request.Temperature,
-			MaxTokens:      request.MaxTokens,
-			Timeout:        timeout,
-			Metadata:       request.Metadata,
+			Task:            request.Task,
+			SystemPrompt:    request.SystemPrompt,
+			UserPrompt:      request.UserPrompt,
+			Model:           requestModel,
+			SchemaName:      request.SchemaName,
+			ResponseSchema:  request.ResponseSchema,
+			Temperature:     request.Temperature,
+			MaxTokens:       request.MaxTokens,
+			Timeout:         timeout,
+			ReasoningEffort: rcEffort,
+			Metadata:        request.Metadata,
 		})
 		attempts = append(attempts, response.Attempts...)
 

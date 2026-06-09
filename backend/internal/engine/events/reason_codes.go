@@ -114,6 +114,11 @@ const (
 	// 补齐 OOC 原仅有进程级内存计数（AttributionStats）、无持久审计行、重启即丢的缺口。
 	ReasonOOCRejected ReasonCode = "OOC_REJECTED"
 
+	// INPUT_INJECTION_BLOCKED：玩家输入侧越狱/prompt-injection 被发行安全门拦下（content_safety.go
+	// 的 ModerateText 在 direction=="input" 命中 ruleInjectionDetection 时留痕）。治理类目，经
+	// EmitProcessEvent 留痕（不改保护状态字段、不走 status.Mutator）。
+	ReasonInputInjectionBlocked ReasonCode = "INPUT_INJECTION_BLOCKED"
+
 	// PvE 威胁系统专属原因码（设计 docs/PvE威胁系统.md §9）。补齐此前 PvE 留痕复用通用码
 	// （分赃=继承敌方资产 ECONOMY_LOOT、威胁失败=目睹惨烈 EMOTION_TRAUMA）导致审计可读性弱的缺口。
 	// 分三类：①改保护字段经 status.Mutator（HP/lives→CategoryCombat；wallet→CategoryEconomy；
@@ -325,6 +330,9 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossConsentTimeout, Category: CategoryLifecycle, DisplayName: "未及回应", DefaultReasonText: "她的命没来得及回应，那桩事自有了结", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
 		{Code: ReasonLifeBeat, Category: CategoryLifecycle, DisplayName: "她的日常", DefaultReasonText: "她又走过了寻常的一段日子", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 4},
+
+		// —— 发行安全门：输入侧越狱/prompt-injection 拦截（治理类目，流程留痕）——
+		{Code: ReasonInputInjectionBlocked, Category: CategoryGovernance, DisplayName: "输入拦截", DefaultReasonText: "一段输入试图越权改写设定，被挡了下来", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 	}
 }
 

@@ -15,12 +15,15 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/ai"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
 
 // 常量定义区：集中声明该文件使用的共享配置。
+// memoryDecayTauTurns / memoryDecayAlpha 现已迁入 runtimeconfig（"memory.decay_tau_turns"、
+// "memory.decay_alpha"，默认即此值）；此处保留为「冻结默认值」基线（决定性测试 memory_decay_det_test.go 仍引用）。
 const (
 	memoryDecayTauTurns   = 120.0
 	memoryDecayAlpha      = 2.5
@@ -1493,9 +1496,13 @@ func computeMemorySalience(currentTurn int, meta memoryMetadata, emotionWeight f
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	denominator := memoryDecayTauTurns * math.Pow(float64(importance), memoryDecayAlpha)
+	// tau/alpha 走 runtimeconfig（默认即冻结常量值）。本函数被逐条记忆调用，每条各读一次 RLock——
+	// 量级可接受；如需进一步压热点可由上层批处理提前取一次下传，目前保持单点读以免改动签名波及测试。
+	tau := runtimeconfig.GetFloat("memory.decay_tau_turns")
+	alpha := runtimeconfig.GetFloat("memory.decay_alpha")
+	denominator := tau * math.Pow(float64(importance), alpha)
 	if denominator <= 0 {
-		denominator = memoryDecayTauTurns
+		denominator = tau
 	}
 
 	score := base * emotionWeight * math.Exp(-elapsed/denominator)

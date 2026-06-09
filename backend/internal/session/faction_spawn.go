@@ -20,6 +20,7 @@ import (
 
 	"qunxiang/backend/internal/faction"
 	"qunxiang/backend/internal/featureflags"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -89,8 +90,9 @@ const (
 // factionSpawnBirthTurn 是公共 NPC 落库的回合标签（与村庄出生同口径，挂第 1 回合）。
 const factionSpawnBirthTurn = 1
 
-// factionMoralJitter 是公共 NPC 道德轴相对阵营基准的最大扰动幅度（±factionMoralJitter，让同阵营 NPC 道德轴≈baseline 而非全同）。
-const factionMoralJitter = 6.0
+// 公共 NPC 道德轴相对阵营基准的最大扰动幅度（默认 ±6.0，让同阵营 NPC 道德轴≈baseline 而非全同）现由
+// runtimeconfig "faction.moral_jitter" 提供（默认值在 catalog 注册）；faction_spawn.go 建 NPC 与
+// faction_conflict.go 生成冲突对手两处读取站点共用此名。
 
 // factionSurnames 是跨阵营共用的姓氏池（中文，确定性挑选）。
 var factionSurnames = []string{"江", "墨", "苏", "燕", "卓", "凌", "云", "纪", "商", "厉", "宁", "霍", "薛", "尉", "钟", "唐"}
@@ -208,7 +210,7 @@ func (service *Service) SeedFactionSpawn(ctx context.Context, sessionID string, 
 		rec.Identity.Biography = fmt.Sprintf("%s（%s阵营）。%s", archetype, def.NameZH, theme)
 		// 阵营 + 道德轴（非保护字段，直接写——不走 Mutator）：道德轴≈baseline + 确定性小扰动。
 		rec.Faction = fid
-		rec.MoralAlignment = faction.PerturbBaseline(fid, npcSeed, tag, factionMoralJitter)
+		rec.MoralAlignment = faction.PerturbBaseline(fid, npcSeed, tag, runtimeconfig.GetFloat("faction.moral_jitter"))
 		// 阵营底色精化六维野心（出身/传记关键词命中即偏置）。
 		rec.Ambition = unit.DeriveAmbition(npcSeed, rec.Identity.Lineage, rec.Identity.Biography)
 		// 坐标上图：围绕锚点确定性散布到合法空格（PositionQ/R 非受保护字段，直接写——不走 Mutator）。
@@ -313,8 +315,8 @@ func (service *Service) SeedFactionSpawnBestEffort(ctx context.Context, sessionI
 	return result.UnitIDs
 }
 
-// ambientWanderMoveChance 是单个公共 NPC 每个回合边界挪一格的概率（0.30，低概率让舞台「活」而不喧宾夺主）。
-const ambientWanderMoveChance = 0.30
+// 单个公共 NPC 每个回合边界挪一格的概率（默认 0.30，低概率让舞台「活」而不喧宾夺主）现由
+// runtimeconfig "faction.ambient_wander_move_chance" 提供（默认值在 catalog 注册），读取站点在 advanceAmbientWander 热循环外。
 
 // ambientWanderEnabled 判定出生点公共 NPC 的轻量游走是否开启（QUNXIANG_AMBIENT_WANDER，默认关）。
 // 关时 wanderAmbientUnits 直接 no-op，NPC 静态站在出生散布点；开后才在回合边界做确定性微游走。
@@ -341,7 +343,7 @@ func ambientWanderRoll(sessionID string, turn int, npcID string, salt string) fl
 
 // wanderAmbientUnits 在 Execution→Deployment 回合边界给出生点公共 NPC 做**轻量确定性微游走**（纯代码、零 LLM）。
 //   - flag 门控：QUNXIANG_AMBIENT_WANDER 默认关，关时直接 no-op（NPC 静态站着）。
-//   - 每个 NPC 据 FNV(sessionID+turn+npcID) 低概率（ambientWanderMoveChance）决定本拍是否挪 1 格；
+//   - 每个 NPC 据 FNV(sessionID+turn+npcID) 低概率（faction.ambient_wander_move_chance）决定本拍是否挪 1 格；
 //     要挪则从六邻格里确定性挑一个**地图内、未被任何单位占用**的空格，写 Status.PositionQ/R（非受保护字段，直接写）并 Save。
 //   - **best-effort**：单个 NPC 读不到/无空位/Save 失败都只跳过该 NPC，绝不阻断回合推进或其余 NPC。
 //
@@ -374,12 +376,14 @@ func (service *Service) wanderAmbientUnits(ctx context.Context, state *State, un
 	}
 
 	turn := state.TurnState.Turn
+	// 热循环外读一次存局部：游走概率每 tick 对全部 NPC 同值，避免内层每 NPC 一次 RLock。
+	wanderMoveChance := runtimeconfig.GetFloat("faction.ambient_wander_move_chance")
 	for _, npcID := range state.AmbientUnitIDs {
 		rec := ambientByID[npcID]
 		if rec == nil {
 			continue
 		}
-		if ambientWanderRoll(state.ID, turn, npcID, "move") >= ambientWanderMoveChance {
+		if ambientWanderRoll(state.ID, turn, npcID, "move") >= wanderMoveChance {
 			continue // 本拍不挪（低概率游走）。
 		}
 		from := world.Coord{Q: rec.Status.PositionQ, R: rec.Status.PositionR}

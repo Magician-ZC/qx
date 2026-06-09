@@ -18,10 +18,10 @@ package regionrunner
 // 纯需求强度序，对既有行为零影响）。整条链只在 region-runner flag（QUNXIANG_REGION_RUNNER_*）开时才被 chooseAmbientAction 触达。
 
 import (
-	"os"
 	"sort"
 	"strings"
 
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -306,8 +306,9 @@ func dedupeActions(actions []ambientAction) []ambientAction {
 }
 
 // ambitionScoringEnabled 读 QUNXIANG_AMBITION_SCORING（默认关），与 session 侧解析逐位一致。
+// 走 featureflags.EnvOrOverride：GM 后台对该 flag 的运行时 override 在离线 region-runner 侧也生效。
 func ambitionScoringEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(ambitionScoringFlagEnv))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(ambitionScoringFlagEnv))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:
