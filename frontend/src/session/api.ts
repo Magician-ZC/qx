@@ -815,6 +815,71 @@ export async function loginAccount(payload: {
   return result;
 }
 
+// ---- 账号 + 主世界角色（AuthGate / Root 路由用，全部存/带 localStorage Bearer token）----
+
+// MyCharacter 对齐后端 session.MainWorldCharacter（json tag），是「账号在主世界的持久角色」对外视图。
+// has_character=false 表示该账号尚未降生（前端据此进捏人 onboarding）；其余字段 omitempty。
+export type MyCharacter = {
+  has_character: boolean;
+  session_id?: string;
+  unit_id?: string;
+  name?: string;
+  world_id?: string;
+  origin?: string;
+  created?: boolean;
+};
+
+// MyCharacterInput 是捏人降生入参（对齐后端 MainWorldCharacterInput），全字段可空（后端用占位名兜底）。
+export type MyCharacterInput = {
+  name?: string;
+  origin?: string;
+  desire?: string;
+  wound?: string;
+  redline?: string;
+};
+
+// getMe 读当前登录账号；未登录（无 token）或 token 失效（401）一律返回 null（不抛），供 AuthGate 判定登录态。
+// 复用既有 getCurrentAccount（显式 Bearer 头），但把未登录/失效收敛为 null，调用方零 try/catch。
+export async function getMe(): Promise<AccountUser | null> {
+  const token = getAccountToken();
+  if (token.trim() === "") {
+    return null;
+  }
+  try {
+    return await getCurrentAccount(token);
+  } catch (error) {
+    // 401（token 失效/被登出）→ 清掉本地令牌并回到未登录态；其它错误（网络等）同样收敛为 null。
+    if (error instanceof APIError && error.status === 401) {
+      setAccountToken("");
+    }
+    return null;
+  }
+}
+
+// getMyCharacter 读当前账号在主世界 world_default 的持久角色（需 Bearer）。无角色 → {has_character:false}。
+export async function getMyCharacter(): Promise<MyCharacter> {
+  const data = await request<{ character?: MyCharacter }>(
+    `/api/me/character`,
+    { method: "GET" },
+    { bearer: "require" },
+  );
+  return data.character ?? { has_character: false };
+}
+
+// createMyCharacter 为当前账号在主世界降生一个角色（需 Bearer）。幂等：账号已有角色则返回既有的、绝不重复造人。
+export async function createMyCharacter(input: MyCharacterInput): Promise<MyCharacter> {
+  const data = await request<{ character?: MyCharacter }>(
+    `/api/me/character`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    { bearer: "require" },
+  );
+  return data.character ?? { has_character: false };
+}
+
 export async function getCurrentAccount(token: string): Promise<AccountUser> {
   const response = await request<{ user: AccountUser }>(`/api/accounts/me`, {
     method: "GET",

@@ -97,6 +97,35 @@ function resolveClassHint(resolveClass: string): string {
   }
 }
 
+// FateBattle 是命运卡可选携带的「关键战接管上下文」（后端 FateInboxItem.Battle/FateFeedItem.Battle，omitempty）。
+// 仅当卡关联一场可由玩家亲自接管的战斗时出现：session_id 指向战棋会话、opponent 是对手描述、takeover 标记可接管。
+// 旧后端 / 不关联战斗的卡不带此字段，前端防御性解析后按「无 battle」处理，保持向后兼容、不渲染接管按钮。
+type FateBattle = {
+  session_id: string;
+  opponent: string;
+  takeover: boolean;
+};
+
+// parseBattle 从一张卡（类型上未声明 battle，运行时可能带）防御性解出关键战接管上下文。
+// 仅当 session_id 非空且 takeover 为真时返回可接管的 battle，否则返回 undefined（不渲染接管按钮）。
+function parseBattle(card: FateCard): FateBattle | undefined {
+  const raw = (card as unknown as Record<string, unknown>).battle;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const sessionId = String(o.session_id ?? "").trim();
+  const takeover = o.takeover === true;
+  if (!sessionId || !takeover) return undefined;
+  return { session_id: sessionId, opponent: String(o.opponent ?? "").trim(), takeover };
+}
+
+// gotoBattleTakeover 切到 App 战棋「关键战接管视图」：把 hash 置为 battle/<sessionId>，
+// 由 Root 路由到 App 并把该 session 载入战棋指挥。注意 hash 不带前导 #（赋值时浏览器自动补）。
+function gotoBattleTakeover(sessionId: string): void {
+  const id = sessionId.trim();
+  if (!id) return;
+  window.location.hash = `battle/${encodeURIComponent(id)}`;
+}
+
 // parsePayloadChoices 从 WS fate_inbox 原始 payload 里防御性解出 choices 数组（与 feed 的 FateChoiceOut 同形）。
 // payload 是不裁字段的透传体，choices 多半缺席；缺席/非法时返回 undefined，待决策卡回落通用三键。
 function parsePayloadChoices(raw: unknown): { id: string; label: string; resolve_class: string }[] | undefined {
@@ -206,6 +235,11 @@ export function FateView({ sessionId, unitId }: Props) {
             typeof payload.countdown_hours === "number" ? payload.countdown_hours : undefined,
           choices: parsePayloadChoices(payload.choices),
         };
+        // battle 不在 FateCard 类型里（后端 omitempty 透传），WS 带了就挂到运行时对象上，
+        // 供 parseBattle 取「关键战接管」上下文；不带则无此键，按无 battle 处理。
+        if (payload.battle && typeof payload.battle === "object" && !Array.isArray(payload.battle)) {
+          (card as unknown as Record<string, unknown>).battle = payload.battle;
+        }
         setCards((prev) => [card, ...prev]);
       },
       onFateEcho: (payload) => {
@@ -312,6 +346,9 @@ export function FateView({ sessionId, unitId }: Props) {
           <div className="fate-slot-title">有件关乎她的事，在等你拿个主意</div>
           <p className="fate-pending-text">{pending[0].narrative}</p>
           <FateCountdownBar card={pending[0]} />
+          {/* 关键战手动接管：当这件待决策关联一场可接管的战斗时，给玩家一个「亲自接管此战」的入口，
+              点击切到 App 战棋指挥视图（hash=battle/<session_id>）。不带 battle 的待决策卡不渲染此按钮。 */}
+          <BattleTakeoverButton card={pending[0]} />
           {/* 情境化 Copilot 选项：后端 buildFateChoices 按事件类型/红线锚/关系生成贴合此刻的 label
               （追讨/求和/认账、刻成传家物/暂且不必、还手/隐忍…），resolve 传该 choice.id，
               后端 resolveFateChoiceClass 再把情境 id 折回基础后果类。每个选项补一行倾向/后果提示。
@@ -393,6 +430,8 @@ export function FateView({ sessionId, unitId }: Props) {
                 card={highlightCard({ title: status?.name ?? "她", narrative: c.narrative })}
                 onShared={() => void trackFunnel("share_initiated", { source: "fate_highlight_image" })}
               />
+              {/* 高光卡若关联一场可接管的关键战，也露出接管入口（如「她正陷入一场恶战」）。 */}
+              <BattleTakeoverButton card={c} />
             </div>
           );
         })}
@@ -446,6 +485,50 @@ function FateCountdownBar({ card }: { card: FateCard }) {
   if (!cd.available) return null;
   const cls = cd.expired ? "fate-countdown fate-countdown-expired" : cd.urgent ? "fate-countdown fate-countdown-urgent" : "fate-countdown";
   return <div className={cls}>{formatFateCountdown(cd)}</div>;
+}
+
+// fateTakeoverBtnStyle 是「接管此战」按钮的内联样式（本文件不可改 fate.css，故内联）：
+// 比常规命运按钮更醒目（暖朱底色 + 浅描边），点一下即切到战棋接管视图。
+const fateTakeoverBtnStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  marginTop: 8,
+  padding: "8px 14px",
+  border: "1px solid rgba(168, 58, 40, 0.55)",
+  borderRadius: 10,
+  background: "rgba(180, 84, 58, 0.14)",
+  color: "#a83a28",
+  fontFamily: "inherit",
+  fontSize: 14,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+const fateTakeoverHintStyle: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 11,
+  opacity: 0.7,
+};
+
+// BattleTakeoverButton 在卡关联一场可接管的关键战时渲染「亲自接管此战」入口；否则什么都不渲染。
+// 点击切到 App 战棋指挥视图（hash=battle/<session_id>），由玩家亲自指挥这一战。
+function BattleTakeoverButton({ card }: { card: FateCard }) {
+  const battle = parseBattle(card);
+  if (!battle) return null;
+  return (
+    <div>
+      <button
+        style={fateTakeoverBtnStyle}
+        title={battle.opponent ? `对手：${battle.opponent}` : "亲自接管这一战"}
+        onClick={() => gotoBattleTakeover(battle.session_id)}
+      >
+        ⚔ 亲自接管此战
+      </button>
+      <div style={fateTakeoverHintStyle}>
+        {battle.opponent ? `她正与「${battle.opponent}」对阵。` : "她正陷入一场恶战。"}你可以接过指挥，替她打完这一仗。
+      </div>
+    </div>
+  );
 }
 
 function Bar({ label, value, max, tone }: { label: string; value: number; max: number; tone: string }) {

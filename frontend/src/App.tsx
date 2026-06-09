@@ -452,8 +452,44 @@ function GameSelect({ value, options, onChange, disabled = false, ariaLabel, cla
   );
 }
 
+// AppProps 是 App 作为「战棋接管子视图」时由 Root 注入的入参。
+// - battleSessionId：从 hash #battle/<sessionId> 解析出的待接管战棋会话 ID（Root 解析后传入；
+//   未传时 App 自读 hash 兜底，保证独立打开也能工作）。
+// - onExitToFate：返回主世界命运的回调（约定：置 window.location.hash=''，由 Root 路由回 FateApp）；
+//   未传时 App 自行置空 hash 兜底。
+type AppProps = {
+  battleSessionId?: string;
+  onExitToFate?: () => void;
+};
+
+// readBattleSessionFromHash 从当前 hash 自读 #battle/<sessionId>（Root 未传 prop 时的兜底）。
+// 形如 `#battle/abc123` → 返回 `abc123`；非 battle 路由返回空串。
+function readBattleSessionFromHash(): string {
+  if (typeof window === "undefined") return "";
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw.startsWith("battle/")) return "";
+  const id = raw.slice("battle/".length).split("?")[0];
+  try {
+    return decodeURIComponent(id).trim();
+  } catch {
+    return id.trim();
+  }
+}
+
 // App 是前端主容器：负责会话订阅、指令面板与战场联动渲染。
-export function App() {
+// 现也作为「关键战接管子视图」：从主世界命运（FateApp）经 hash #battle/<sessionId> 进入，接管该战的指挥。
+export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
+  // takeoverSessionID：本次接管的战棋会话 ID（优先用 Root 传入的 prop，否则自读 hash 兜底）。
+  // 非空即表示 App 处于「接管子视图」，渲染「← 返回命运」入口、隐藏单机选秀建局。
+  const takeoverSessionID = (battleSessionId ?? "").trim() || readBattleSessionFromHash();
+  // exitToFate：返回主世界命运。优先调 Root 注入的回调，否则置空 hash 由 Root 路由回 FateApp。
+  const exitToFate = () => {
+    if (onExitToFate) {
+      onExitToFate();
+      return;
+    }
+    window.location.hash = "";
+  };
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   // sessionRef 用于在 SSE 回调里读取最新快照，避免闭包拿到旧状态。
   const sessionRef = useRef<SessionSnapshot | null>(null);
@@ -723,6 +759,33 @@ export function App() {
       setMessage("正在检查是否需要恢复房间。");
 
       try {
+        // 关键战接管：从主世界命运经 hash #battle/<sessionId> 进入时，直接加载该战棋会话指挥，
+        // 跳过双人房恢复链路（接管走单人/已建局会话的指挥端，沿用既有 getSession + 选阵营默认）。
+        if (takeoverSessionID !== "") {
+          setMessage("正在接管这一战…");
+          const loaded = await getSession(takeoverSessionID);
+          if (cancelled) {
+            return;
+          }
+          const nextSession = loaded.session;
+          const nextCommanderFactionID = loaded.commander_faction_id?.trim() || nextSession.player_faction_id;
+          const controlled = controlledUnitsByFaction(nextSession, nextCommanderFactionID);
+          const firstUnitID = controlled[0]?.id ?? "";
+          setSession(nextSession);
+          setCommanderFactionID(nextCommanderFactionID);
+          if (controlled[0]) {
+            setSelectedTileCoord({ q: controlled[0].status.position_q, r: controlled[0].status.position_r });
+          } else {
+            setSelectedTileCoord(null);
+          }
+          setTaskTargetUnitID(firstUnitID);
+          setOrderTargetUnitID(firstUnitID);
+          setDirectiveDraft(factionDoctrineDraft(nextSession, nextCommanderFactionID));
+          setLoadState("ready");
+          setMessage("你接过了指挥。替她打完这一仗。");
+          return;
+        }
+
         const search = new URLSearchParams(window.location.search);
         const linkedSessionID = search.get("session_id")?.trim() ?? "";
         const linkedRoleToken = search.get("role_token")?.trim() ?? "";
@@ -848,6 +911,9 @@ export function App() {
     return () => {
       cancelled = true;
     };
+    // 仅在挂载时跑一次：takeoverSessionID 在本次 App 挂载内稳定（Root 按 hash 变更重挂 App），
+    // 故有意空依赖、不把 takeoverSessionID 列入，避免 hash 内查询参数重读引发的重复 bootstrap。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1903,6 +1969,10 @@ export function App() {
     setMessage("已返回主菜单。多人房可用本地记录或恢复链接重新进入。");
   }
 
+  // handleStartSinglePlayer：单机选秀建局逻辑。转向大世界后，单机入口已从 landing 隐藏/停用
+  // （战棋仅作主世界关键战接管子视图），此函数暂无调用方但刻意保留——便于日后回滚/调试时一行接回按钮，
+  // 不删既有建局能力（与 handleRestart 同走 createSinglePlayerSession）。故显式豁免 no-unused-vars。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async function handleStartSinglePlayer() {
     if (busy) {
       return;
@@ -2563,6 +2633,34 @@ export function App() {
     }
   }
 
+  // fateReturnButton 是「← 返回命运」入口（position:fixed，仅接管子视图渲染，任意 return 内复用）。
+  // 玩家从主世界命运经 #battle/<sessionId> 进来接管这一战，打完/想撤时点此切回主世界命运（FateApp）。
+  const fateReturnButton = takeoverSessionID ? (
+    <button
+      type="button"
+      onClick={exitToFate}
+      title="返回主世界命运"
+      style={{
+        position: "fixed",
+        top: 12,
+        left: 12,
+        zIndex: 1200,
+        padding: "8px 14px",
+        border: "1px solid rgba(140, 95, 45, 0.5)",
+        borderRadius: 10,
+        background: "rgba(255, 252, 245, 0.94)",
+        color: "#5a3f1c",
+        fontFamily: "inherit",
+        fontSize: 14,
+        fontWeight: 600,
+        cursor: "pointer",
+        boxShadow: "0 2px 8px rgba(60, 40, 15, 0.18)",
+      }}
+    >
+      ← 返回命运
+    </button>
+  ) : null;
+
   // complianceBanner 是被合规门 403 拦截时的引导横幅（position:fixed，可在任意 return 内复用）。
   // 仅『需实名』类拦截露出『去实名认证』按钮；宵禁/防沉迷只显示『知道了』。
   const complianceBanner =
@@ -2684,14 +2782,39 @@ export function App() {
               />
               <span className="field-hint">默认关闭，避免执行阶段收尾时额外等待随机事件叙事。</span>
             </label>
+            {/* 转向大世界后，单机选秀建局已停用：战棋仅作为「主世界关键战接管子视图」存在，
+                玩家从主世界命运（捏人降生 → 牵挂她的人生）进入，遇到关键战时再接管这一仗。
+                此处保留单机入口外壳但禁用，引导玩家回主世界，避免误把战棋当默认主入口。 */}
+            <div
+              className="panel-note"
+              style={{
+                marginBottom: 12,
+                padding: "10px 12px",
+                border: "1px solid rgba(168, 58, 40, 0.35)",
+                borderRadius: 8,
+                background: "rgba(180, 84, 58, 0.08)",
+                color: "#8a3a28",
+              }}
+            >
+              单机选秀建局已停用。请从「主世界命运」捏一个角色、把她丢进世界——遇到关乎她生死的关键战，再由你亲自接管这一仗。
+            </div>
             <div className="command-actions">
               <button
                 type="button"
-                className={`action-button ${startMode === "single" ? "" : "action-button-secondary"}`}
+                className="action-button"
                 disabled={busy || loadState === "loading"}
-                onClick={() => void handleStartSinglePlayer()}
+                onClick={exitToFate}
               >
-                单人模式：立即开始
+                前往主世界（命运开盒）
+              </button>
+              <button
+                type="button"
+                className="action-button action-button-secondary"
+                disabled
+                title="单机选秀建局已停用，请从主世界命运进入"
+                style={{ opacity: 0.5, cursor: "not-allowed" }}
+              >
+                单人模式：已停用
               </button>
               <button
                 type="button"
@@ -2836,6 +2959,7 @@ export function App() {
             </section>
           ) : null}
         </main>
+        {fateReturnButton}
         {complianceBanner}
         {compliancePanelOverlay}
         {billingPanelOverlay}
@@ -3809,6 +3933,8 @@ export function App() {
           {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}
           {billingPanelOverlay}
           {compliancePanelOverlay}
+          {/* 关键战接管子视图的「← 返回命运」入口（仅 #battle/<sessionId> 进来时渲染）。*/}
+          {fateReturnButton}
           {/* 合规 403 拦截横幅（建局/推进被门拦时引导实名/告知宵禁/防沉迷）。*/}
           {complianceBanner}
           {/* 举报弹窗（玩家可见，不受 developer 门，可针对当前选中角色）。*/}
