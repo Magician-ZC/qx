@@ -32,23 +32,17 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/region"
+	"qunxiang/backend/internal/runtimeconfig"
 	"qunxiang/backend/internal/unit"
 )
 
 const (
-	// threat_spawn_score 三项权重（设计 §1：0.5·threat_level/100 + 0.3·anchor_density + 0.2·freshness）。
-	threatScoreWeightLevel     = 0.5   // region 威胁度项权重
-	threatScoreWeightAnchor    = 0.3   // 锚密度项权重（越在乎，威胁越易找上她）
-	threatScoreWeightFreshness = 0.2   // freshness 反扎堆项权重
-	threatLevelScoreMax        = 100.0 // threat_level 归一上限（喂 score 的 threat_level/100 项，超量不再加成）
+	// threat_spawn_score 三项权重（设计 §1：0.5·threat_level/100 + 0.3·anchor_density + 0.2·freshness）已迁可配层
+	// （threat.weight_level / threat.weight_anchor / threat.weight_freshness，catalog 默认 0.5/0.3/0.2），
+	// 在 threatSpawnScore 边界读一次传入；出没概率上下限亦迁可配层（threat.spawn_floor / threat.spawn_cap，默认 0.05/0.55）、
+	// freshness 窗口迁可配层（threat.freshness_window_turns，默认 6），运行时可热调。
 
-	// 把 [0,1] 的 threat_spawn_score 线性映射成「本边界出没概率」[floor, cap]。
-	// floor 是破圈下限（哪怕 score=0 也有的最低概率，世界处处有危险）；cap 防一边界刷爆。
-	threatSpawnFloor = 0.05 // 破圈下限：零锚/零威胁单位每部署边界仍有 5% 撞威胁（freshness 再低也不破此线）
-	threatSpawnCap   = 0.55 // 概率上限：score=1（高威胁+高锚+全新鲜）封顶 55%，不必然出没
-
-	// freshness 反扎堆窗口（回合）：同一目标上次出过威胁后，多少回合内仍压低再出概率（窗口外完全恢复=1）。
-	threatFreshnessWindowTurns = 6
+	threatLevelScoreMax = 100.0 // threat_level 归一上限（喂 score 的 threat_level/100 项，超量不再加成）
 
 	// session 内 threat_level 近似的饱和缩放：region 未登记时，把「本局已沉淀的威胁/战斗类事件数」按此除数缩成
 	// [0,threatLevelScoreMax] 的近似威胁度。事件越多→近似威胁度越高（威胁扎堆），对回合单调不减。
@@ -67,9 +61,8 @@ var threatProvenanceCodes = []string{
 	string(events.ReasonThreatAllyDown),
 }
 
-// autoPvEFireRate 在 QUNXIANG_AUTO_PVE 开时，撞见威胁的单位里有多大比例直接开打（其余仍只投高光卡）。
-// 取较低值：自动开打是真实改 HP/士气/钱包的动作，应克制——大多数遭遇仍尊重角色能动性走「先投卡、后决策」。
-const autoPvEFireRate = 0.5
+// 注：原 autoPvEFireRate（凭空概率门「撞见威胁多大比例直接开打」）已随 join_intent 去 stub 删除——是否真打改由
+// EvaluateJoinIntent 的意愿门（反射护栏怕死不上 → 意愿评分 → 无源不参战）决定，不再用概率门，参与决断回归角色能动性。
 
 var wildThreatNames = []string{"山魈", "独眼熊", "赤鳞蜥", "断尾狼", "夜枭", "石背犀"}
 
@@ -95,6 +88,13 @@ func (service *Service) refreshThreats(ctx context.Context, state *State, units 
 	autoPvE := autoPvEEnabled()
 	regionLevel := service.regionThreatLevel(ctx, state)
 
+	// 边界读一次可配权重/概率上下限（避免热循环里每单位 RLock），传入纯函数 threatSpawnScore/spawnProbFromScore。
+	wLevel := runtimeconfig.GetFloat("threat.weight_level")
+	wAnchor := runtimeconfig.GetFloat("threat.weight_anchor")
+	wFreshness := runtimeconfig.GetFloat("threat.weight_freshness")
+	spawnFloor := runtimeconfig.GetFloat("threat.spawn_floor")
+	spawnCap := runtimeconfig.GetFloat("threat.spawn_cap")
+
 	// 一遍扫描合格单位：算各自 score 与「本回合是否过阈」，过阈者进 arbitration 候选（Score=score，付费不进）。
 	type candidate struct {
 		rec     unit.Record
@@ -113,8 +113,8 @@ func (service *Service) refreshThreats(ctx context.Context, state *State, units 
 		}
 		density := service.AnchorDensityByRef(ctx, u.ID, "")
 		fresh := service.threatFreshness(ctx, state, u.ID)
-		score := threatSpawnScore(regionLevel, density, fresh)
-		spawnProb := spawnProbFromScore(score)
+		score := threatSpawnScore(regionLevel, density, fresh, wLevel, wAnchor, wFreshness)
+		spawnProb := spawnProbFromScore(score, spawnFloor, spawnCap)
 		// 本回合该单位的确定性出没掷骰 [0,1)：过阈（draw<spawnProb）才进 arbitration 候选。
 		if threatRoll(state.ID, state.TurnState.Turn, u.ID) >= spawnProb {
 			continue
@@ -140,15 +140,28 @@ func (service *Service) refreshThreats(ctx context.Context, state *State, units 
 	}
 	u := winner.rec
 
-	// 自动开打升级：flag 开 + 非异步执行中（让位聚焦战斗）+ 确定性掷骰命中 → 真实跑通 elite 遭遇，否则仍只投卡。
-	if autoPvE && !IsExecutionRunning(state.ID) &&
-		threatRoll(state.ID, state.TurnState.Turn, u.ID+"|pve") < autoPvEFireRate {
-		actor := u
-		if _, err := service.ResolveEliteEncounter(ctx, state, &actor, scaledElite(actor)); err == nil {
+	// 参与意愿评估（去 stub）：把「是否真打」从凭空概率门换成她自己拿主意的意愿门——构造与其战力相称的精英怪，
+	// 跑 EvaluateJoinIntent（反射护栏怕死不上 → 意愿评分含归因 → 无源不参战 OOC）。caresInPlace 复用护短近似
+	// （winner.density>0.5：被够多人在乎=她在乎的人多半也在场）；goalThreatened 暂无可得信号（false）。
+	actor := u
+	elite := scaledElite(actor)
+	caresInPlace := winner.density > 0.5
+	goalThreatened := false
+	intent := service.EvaluateJoinIntent(ctx, state, &actor, elite, caresInPlace, goalThreatened, JoinAdvice{})
+
+	// 自动开打升级：flag 开 + 非异步执行中（让位聚焦战斗）+ 她的意愿门判定参战（Auto/Advised）→ 真实跑通 elite 遭遇，
+	// 否则仍只投卡。无论开打与否，都按意愿评估结果记一条 JOIN 留痕（3 个 JOIN 码真写入）。
+	if autoPvE && !IsExecutionRunning(state.ID) && intent.Join {
+		service.recordThreatJoin(ctx, state, u.ID, intent.Mode, elite, intent.Score)
+		if _, err := service.ResolveEliteEncounter(ctx, state, &actor, elite); err == nil {
 			service.recordThreatHit(ctx, state, u.ID) // 记本目标最近命中（freshness 反扎堆）
 			return                                    // 自动开打已落地（含其自身的命运收件箱卡），不再额外投出没卡
 		}
 		// 遭遇失败（如并发写冲突）：吞错，退回 surface-only 投卡，绝不中断推进。
+	} else {
+		// surface-only 默认路径（autoPvE 关 / 异步执行中 / 她权衡后退避）：仍按意愿评估结果记 JOIN 留痕，
+		// 让退避（Decline）/「想上但没真打」（Auto/Advised）三态都在审计里留痕，再走出没卡。
+		service.recordThreatJoin(ctx, state, u.ID, intent.Mode, elite, intent.Score)
 	}
 
 	name := wildThreatNames[threatHash(state.ID, state.TurnState.Turn, u.ID, "name")%uint64(len(wildThreatNames))]
@@ -165,21 +178,23 @@ func (service *Service) refreshThreats(ctx context.Context, state *State, units 
 	service.recordThreatHit(ctx, state, u.ID)
 }
 
-// threatSpawnScore 实现设计 §1 的 threat_spawn_score = 0.5·threat_level/100 + 0.3·anchor_density + 0.2·freshness ∈ [0,1]。
-// 三项入参各夹 [0,1]（regionLevel 按 threatLevelScoreMax 归一，anchorDensity/freshness 已是 [0,1]）。纯函数、确定性、付费无关。
-func threatSpawnScore(regionLevel int64, anchorDensity float64, freshness float64) float64 {
+// threatSpawnScore 实现设计 §1 的 threat_spawn_score = w_level·threat_level/100 + w_anchor·anchor_density + w_freshness·freshness ∈ [0,1]。
+// 三项权重（默认 0.5/0.3/0.2）由调用方从 runtimeconfig 读出后传入（边界读一次，避免热循环每单位 RLock）；三项入参各夹 [0,1]
+// （regionLevel 按 threatLevelScoreMax 归一，anchorDensity/freshness 已是 [0,1]）。纯函数、确定性、付费无关。
+func threatSpawnScore(regionLevel int64, anchorDensity float64, freshness float64, wLevel, wAnchor, wFreshness float64) float64 {
 	lvl := float64(regionLevel) / threatLevelScoreMax
 	lvl = clamp01(lvl)
 	anchorDensity = clamp01(anchorDensity)
 	freshness = clamp01(freshness)
-	return threatScoreWeightLevel*lvl + threatScoreWeightAnchor*anchorDensity + threatScoreWeightFreshness*freshness
+	return wLevel*lvl + wAnchor*anchorDensity + wFreshness*freshness
 }
 
-// spawnProbFromScore 把 [0,1] 的 threat_spawn_score 线性映射成本边界出没概率 [threatSpawnFloor, threatSpawnCap]。
-// **破圈下限恒保留**：score=0（零威胁+零锚+刚出过）也返回 threatSpawnFloor（世界处处有危险，不全扎堆活跃区）。
-func spawnProbFromScore(score float64) float64 {
+// spawnProbFromScore 把 [0,1] 的 threat_spawn_score 线性映射成本边界出没概率 [floor, cap]（默认 0.05/0.55，由调用方
+// 从 runtimeconfig 读出后传入，边界读一次）。**破圈下限恒保留**：score=0（零威胁+零锚+刚出过）也返回 floor（世界处处
+// 有危险，不全扎堆活跃区）。
+func spawnProbFromScore(score float64, floor, cap float64) float64 {
 	score = clamp01(score)
-	return threatSpawnFloor + (threatSpawnCap-threatSpawnFloor)*score
+	return floor + (cap-floor)*score
 }
 
 // isHighThreatAnchorDensity 判定锚密度是否「高」（被够多角色在乎，事件值得留 ReasonAnchorWeightedEvent 痕）。
@@ -249,7 +264,7 @@ func (service *Service) approxThreatLevel(ctx context.Context, sessionID string)
 // 「上次出威胁回合」从 events 表读该单位最近一条威胁出没留痕（ReasonThreatEmerged，由 recordThreatHit 带显式 tick 写入）的 tick；
 // 读不到视为从未出过（=1）。**刻意不读 ReasonInboxHighlight**——SurfaceFateEvent 写卡时不带 tick（恒 0），无法用作回合参照；
 // 故由 recordThreatHit 专门写一条带 tick 的 ReasonThreatEmerged 作为 freshness 锚点（surface/开打两路径都写）。
-// 破圈语义由 spawnProbFromScore 的 floor 兜底（哪怕 freshness=0，仍保留 threatSpawnFloor 概率，每日≥1 个来源能出）。
+// 破圈语义由 spawnProbFromScore 的 floor 兜底（哪怕 freshness=0，仍保留 threat.spawn_floor 概率，每日≥1 个来源能出）。
 // 确定性（只看回合差，读持久化 tick）；付费无关。
 func (service *Service) threatFreshness(ctx context.Context, state *State, unitID string) float64 {
 	if service == nil || service.db == nil || state == nil || unitID == "" {
@@ -262,23 +277,28 @@ func (service *Service) threatFreshness(ctx context.Context, state *State, unitI
 	if err != nil || lastTick < 0 {
 		return 1 // 读失败/从未出过 → 完全新鲜，不压低
 	}
-	return freshnessFromTurns(lastTick, int64(state.TurnState.Turn))
+	window := int64(runtimeconfig.GetInt("threat.freshness_window_turns"))
+	return freshnessFromTurns(lastTick, int64(state.TurnState.Turn), window)
 }
 
 // freshnessFromTurns 由「上次出威胁回合 lastTurn」与「当前回合 curTurn」算 freshness ∈ [0,1]：
 //
 //	Δturn=0（同回合刚出）→ 0（最强压制）；Δturn≥窗口 → 1（完全恢复）；窗口内线性回升。
 //
+// window 是反扎堆窗口（默认 6，由调用方从 runtimeconfig 读出后传入）；window≤0 视为无窗口（恒完全恢复=1）。
 // 时钟回拨/乱序保护：Δ<0 视为刚出（0）。纯函数、确定性。
-func freshnessFromTurns(lastTurn, curTurn int64) float64 {
+func freshnessFromTurns(lastTurn, curTurn, window int64) float64 {
+	if window <= 0 {
+		return 1
+	}
 	elapsed := curTurn - lastTurn
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	if elapsed >= threatFreshnessWindowTurns {
+	if elapsed >= window {
 		return 1
 	}
-	return float64(elapsed) / float64(threatFreshnessWindowTurns)
+	return float64(elapsed) / float64(window)
 }
 
 // recordThreatHit 写一条带显式 tick 的 ReasonThreatEmerged 作为某目标的 **freshness 锚点**（threatFreshness 直接读它的 tick）。
@@ -296,6 +316,40 @@ func (service *Service) recordThreatHit(ctx context.Context, state *State, unitI
 		RegionID:    state.ID,
 		Tick:        state.TurnState.Turn,
 		Payload:     map[string]any{"unit_id": unitID, "context": "wild_threat_spawn"},
+	})
+}
+
+// recordThreatJoin 按参与意愿评估的结局写一条 JOIN 流程事件留痕（让 reason_codes.go:124-126 的三个 JOIN 码真写入）：
+// JoinModeAutonomous→ReasonThreatJoinAuto（她自己拿主意迎战）、JoinModeAdvised→ReasonThreatJoinAdvise（采纳祖魂叮嘱）、
+// 其余（JoinModeReflexDecl/未知）→ReasonThreatJoinDecline（反射护栏/意愿不足/无源退避）。这是「事件本身」而非状态变更，
+// 经 events.EmitProcessEvent 旁路写入（Category=CategoryLifecycle，OwnerUnitID=该角色，Tick=当前回合）。
+// payload 只记意愿评分/威胁名（反 P2W，绝不含 wallet/billing）。best-effort：写失败只吞错、绝不阻断刷新结算。
+func (service *Service) recordThreatJoin(ctx context.Context, state *State, unitID string, mode JoinMode, threat Threat, score float64) {
+	if service == nil || service.db == nil || state == nil || unitID == "" {
+		return
+	}
+	code := events.ReasonThreatJoinDecline
+	switch mode {
+	case JoinModeAutonomous:
+		code = events.ReasonThreatJoinAuto
+	case JoinModeAdvised:
+		code = events.ReasonThreatJoinAdvise
+	}
+	_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		SessionID:   state.ID,
+		OwnerUnitID: unitID,
+		Code:        code,
+		Category:    events.CategoryLifecycle,
+		WorldID:     state.WorldID,
+		RegionID:    state.ID,
+		Tick:        state.TurnState.Turn,
+		Payload: map[string]any{
+			"unit_id":           unitID,
+			"join_mode":         string(mode),
+			"join_intent_score": score,
+			"threat":            threat.Name,
+			"tier":              string(threat.Tier),
+		},
 	})
 }
 

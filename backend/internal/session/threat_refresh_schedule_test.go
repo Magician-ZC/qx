@@ -20,30 +20,41 @@ import (
 	"qunxiang/backend/internal/unit"
 )
 
+// 测试用默认权重/概率上下限/freshness 窗口（与 runtimeconfig catalog 注册的 threat.* 默认值同源：0.5/0.3/0.2、0.05/0.55、6）。
+// 迁可配层后纯函数改为「权重由调用方传入」，测试直接喂默认值以验证公式标定不变。
+const (
+	tWLevel     = 0.5
+	tWAnchor    = 0.3
+	tWFreshness = 0.2
+	tSpawnFloor = 0.05
+	tSpawnCap   = 0.55
+	tFreshWin   = 6
+)
+
 // TestThreatSpawnScore_Formula 验证 threat_spawn_score 三项各自单调 + 全零=0 + 全满=1（公式标定正确）。
 func TestThreatSpawnScore_Formula(t *testing.T) {
-	if s := threatSpawnScore(0, 0, 0); s != 0 {
+	if s := threatSpawnScore(0, 0, 0, tWLevel, tWAnchor, tWFreshness); s != 0 {
 		t.Fatalf("三项全零 score 应为 0，得到 %v", s)
 	}
-	if s := threatSpawnScore(100, 1, 1); s < 0.999 || s > 1.001 {
+	if s := threatSpawnScore(100, 1, 1, tWLevel, tWAnchor, tWFreshness); s < 0.999 || s > 1.001 {
 		t.Fatalf("三项全满 score 应为 1，得到 %v", s)
 	}
 	// threat_level 项单调（其余固定）。
-	if threatSpawnScore(0, 0.3, 0.3) >= threatSpawnScore(100, 0.3, 0.3) {
+	if threatSpawnScore(0, 0.3, 0.3, tWLevel, tWAnchor, tWFreshness) >= threatSpawnScore(100, 0.3, 0.3, tWLevel, tWAnchor, tWFreshness) {
 		t.Fatalf("threat_level 升高应使 score 升高")
 	}
 	// anchor 项单调。
-	if threatSpawnScore(50, 0, 0.3) >= threatSpawnScore(50, 1, 0.3) {
+	if threatSpawnScore(50, 0, 0.3, tWLevel, tWAnchor, tWFreshness) >= threatSpawnScore(50, 1, 0.3, tWLevel, tWAnchor, tWFreshness) {
 		t.Fatalf("anchor_density 升高应使 score 升高")
 	}
 	// freshness 项单调。
-	if threatSpawnScore(50, 0.3, 0) >= threatSpawnScore(50, 0.3, 1) {
+	if threatSpawnScore(50, 0.3, 0, tWLevel, tWAnchor, tWFreshness) >= threatSpawnScore(50, 0.3, 1, tWLevel, tWAnchor, tWFreshness) {
 		t.Fatalf("freshness 升高应使 score 升高")
 	}
 	// 权重比例：level 权重 0.5 > anchor 0.3 > fresh 0.2（同样 +1 单位贡献递减）。
-	dLevel := threatSpawnScore(100, 0, 0) - threatSpawnScore(0, 0, 0)
-	dAnchor := threatSpawnScore(0, 1, 0) - threatSpawnScore(0, 0, 0)
-	dFresh := threatSpawnScore(0, 0, 1) - threatSpawnScore(0, 0, 0)
+	dLevel := threatSpawnScore(100, 0, 0, tWLevel, tWAnchor, tWFreshness) - threatSpawnScore(0, 0, 0, tWLevel, tWAnchor, tWFreshness)
+	dAnchor := threatSpawnScore(0, 1, 0, tWLevel, tWAnchor, tWFreshness) - threatSpawnScore(0, 0, 0, tWLevel, tWAnchor, tWFreshness)
+	dFresh := threatSpawnScore(0, 0, 1, tWLevel, tWAnchor, tWFreshness) - threatSpawnScore(0, 0, 0, tWLevel, tWAnchor, tWFreshness)
 	if !(dLevel > dAnchor && dAnchor > dFresh) {
 		t.Fatalf("权重应满足 level>anchor>fresh，得到 %v %v %v", dLevel, dAnchor, dFresh)
 	}
@@ -51,44 +62,44 @@ func TestThreatSpawnScore_Formula(t *testing.T) {
 
 // TestSpawnProbFromScore_FloorAndCap 验证 score→概率映射：破圈下限恒保留、上限封顶、单调。
 func TestSpawnProbFromScore_FloorAndCap(t *testing.T) {
-	if p := spawnProbFromScore(0); p != threatSpawnFloor {
-		t.Fatalf("score=0 应正好是破圈下限 %v，得到 %v", threatSpawnFloor, p)
+	if p := spawnProbFromScore(0, tSpawnFloor, tSpawnCap); p != tSpawnFloor {
+		t.Fatalf("score=0 应正好是破圈下限 %v，得到 %v", tSpawnFloor, p)
 	}
-	if p := spawnProbFromScore(1); p != threatSpawnCap {
-		t.Fatalf("score=1 应正好是上限 %v，得到 %v", threatSpawnCap, p)
+	if p := spawnProbFromScore(1, tSpawnFloor, tSpawnCap); p != tSpawnCap {
+		t.Fatalf("score=1 应正好是上限 %v，得到 %v", tSpawnCap, p)
 	}
 	// 越界 score 仍夹在 [floor,cap]。
-	if p := spawnProbFromScore(-5); p != threatSpawnFloor {
+	if p := spawnProbFromScore(-5, tSpawnFloor, tSpawnCap); p != tSpawnFloor {
 		t.Fatalf("score<0 应夹到下限，得到 %v", p)
 	}
-	if p := spawnProbFromScore(5); p != threatSpawnCap {
+	if p := spawnProbFromScore(5, tSpawnFloor, tSpawnCap); p != tSpawnCap {
 		t.Fatalf("score>1 应夹到上限，得到 %v", p)
 	}
 	// 单调。
-	if spawnProbFromScore(0.2) >= spawnProbFromScore(0.8) {
+	if spawnProbFromScore(0.2, tSpawnFloor, tSpawnCap) >= spawnProbFromScore(0.8, tSpawnFloor, tSpawnCap) {
 		t.Fatalf("概率应随 score 单调升高")
 	}
 }
 
 // TestFreshnessFromTurns_Refractory 验证 freshness 反扎堆：同回合刚出=0（最强压制）、窗口外=1（完全恢复）、窗口内线性回升、回拨保护。
 func TestFreshnessFromTurns_Refractory(t *testing.T) {
-	if f := freshnessFromTurns(10, 10); f != 0 {
+	if f := freshnessFromTurns(10, 10, tFreshWin); f != 0 {
 		t.Fatalf("Δturn=0（刚出）freshness 应为 0，得到 %v", f)
 	}
-	if f := freshnessFromTurns(10, 10+threatFreshnessWindowTurns); f != 1 {
+	if f := freshnessFromTurns(10, 10+tFreshWin, tFreshWin); f != 1 {
 		t.Fatalf("Δturn≥窗口 freshness 应为 1，得到 %v", f)
 	}
 	// 窗口内线性回升：半个窗口 ≈ 0.5。
-	mid := freshnessFromTurns(10, 10+threatFreshnessWindowTurns/2)
+	mid := freshnessFromTurns(10, 10+tFreshWin/2, tFreshWin)
 	if mid <= 0 || mid >= 1 {
 		t.Fatalf("窗口内 freshness 应在 (0,1)，得到 %v", mid)
 	}
 	// 单调回升。
-	if freshnessFromTurns(10, 11) >= freshnessFromTurns(10, 13) {
+	if freshnessFromTurns(10, 11, tFreshWin) >= freshnessFromTurns(10, 13, tFreshWin) {
 		t.Fatalf("freshness 应随 Δturn 单调回升")
 	}
 	// 时钟回拨保护：curTurn<lastTurn 视为刚出（0）。
-	if f := freshnessFromTurns(20, 5); f != 0 {
+	if f := freshnessFromTurns(20, 5, tFreshWin); f != 0 {
 		t.Fatalf("回拨应视为刚出 freshness=0，得到 %v", f)
 	}
 }
@@ -166,7 +177,7 @@ func TestRefreshThreats_HigherAnchorHigherSpawn(t *testing.T) {
 	// 隔离 threat_level 累积/arbitration 选址干扰，纯看锚密度对出没概率的影响（高密度→高 prob→更多过阈）。
 	// 出没掷骰、阈值映射都是生产函数本体（threatRoll / spawnProbFromScore / threatSpawnScore），故这正是真调度的锚加权效应。
 	passes := func(density float64) int {
-		prob := spawnProbFromScore(threatSpawnScore(0, density, 1))
+		prob := spawnProbFromScore(threatSpawnScore(0, density, 1, tWLevel, tWAnchor, tWFreshness), tSpawnFloor, tSpawnCap)
 		uid := "probe" // 统一探针 unitID 不影响相对比较（两次用同一 roll 序列，只 prob 不同）
 		n := 0
 		for turn := 1; turn <= 1000; turn++ {
@@ -182,7 +193,7 @@ func TestRefreshThreats_HigherAnchorHigherSpawn(t *testing.T) {
 		t.Fatalf("高锚单位过阈次数应 > 零锚单位（威胁更易落她在乎处）：high=%d zero=%d (dHigh=%.3f dZero=%.3f)",
 			highPasses, zeroPasses, dHigh, dZero)
 	}
-	// 破圈下限：零锚单位（density=0）每回合仍有 threatSpawnFloor 概率过阈，1000 回合内必被刷到（世界处处有危险）。
+	// 破圈下限：零锚单位（density=0）每回合仍有 tSpawnFloor 概率过阈，1000 回合内必被刷到（世界处处有危险）。
 	if zeroPasses == 0 {
 		t.Fatalf("零锚单位也应有破圈下限被刷到（1000 回合内 ≥1），得到 0")
 	}
@@ -229,8 +240,8 @@ func TestRefreshThreats_ArbitrationSiteDeterministic(t *testing.T) {
 		st.TurnState.Turn = turn
 		density := service.AnchorDensityByRef(ctx, u.ID, "")
 		fresh := service.threatFreshness(ctx, &st, u.ID)
-		score := threatSpawnScore(service.regionThreatLevel(ctx, &st), density, fresh)
-		prob := spawnProbFromScore(score)
+		score := threatSpawnScore(service.regionThreatLevel(ctx, &st), density, fresh, tWLevel, tWAnchor, tWFreshness)
+		prob := spawnProbFromScore(score, tSpawnFloor, tSpawnCap)
 		return score, threatRoll("s1", turn, u.ID) < prob
 	}
 
