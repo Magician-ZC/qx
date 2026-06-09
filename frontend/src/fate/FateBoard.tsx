@@ -8,7 +8,7 @@
    祖魂语气/宣纸墨色：本文件不可改 fate.css/styles.css，故浮卡等用内联样式贴合 .fate-* 墨色调；绝不出现指挥/下令 UI。*/
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getMapPOIs, getSession } from "../session/api";
+import { getMapPOIs, getSession, moveUnit } from "../session/api";
 import type { MapPOI } from "../session/api";
 import type { BattleUnit, SessionSnapshot } from "../session/types";
 
@@ -252,6 +252,26 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     [snap, unitId, pois, onGuidanceSuggested],
   );
 
+  // moveBusy：玩家「让她去这里」直接移动进行中（防重复点）。
+  const [moveBusy, setMoveBusy] = useState(false);
+  // onMoveHere：玩家在线直接把她移到点选的格子（混合模型：上线可操作）。成功后重拉快照让 board 追平。
+  const onMoveHere = useCallback(
+    async (q: number, r: number) => {
+      setMoveBusy(true);
+      try {
+        await moveUnit(sessionId, unitId, q, r);
+        await refresh();
+        setTile(null);
+      } catch (e) {
+        // 移动失败（越界/水山阻挡）：保留面板，提示走 alert 兜底（命运墨色调下不便弹 toast，从简）。
+        window.alert(e instanceof Error ? e.message : "她去不了那里");
+      } finally {
+        setMoveBusy(false);
+      }
+    },
+    [sessionId, unitId, refresh],
+  );
+
   // commanderFactionID：按她所属阵营给玩家暖色（snap 里有 player_faction_id 即用，缺则回落 "player"）。
   const commanderFactionID = useMemo(() => snap?.player_faction_id || "player", [snap?.player_faction_id]);
 
@@ -283,6 +303,25 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           <div style={whoCardLineStyle}>
             坐标（{tile.q}, {tile.r}）
           </div>
+          {/* 玩家在线操作：让她直接走到这里（混合模型——你可指挥她，世界也自治推进）。 */}
+          <button
+            type="button"
+            disabled={moveBusy}
+            onClick={() => void onMoveHere(tile.q, tile.r)}
+            style={{
+              marginTop: 8,
+              padding: "6px 12px",
+              borderRadius: 8,
+              border: "1px solid rgba(140, 100, 50, 0.5)",
+              background: moveBusy ? "rgba(220,210,195,0.7)" : "rgba(196, 132, 58, 0.16)",
+              color: "#7a5226",
+              fontFamily: "inherit",
+              fontSize: 13,
+              cursor: moveBusy ? "default" : "pointer",
+            }}
+          >
+            {moveBusy ? "她正动身…" : "🚶 让她去这里"}
+          </button>
           {tile.pois.length > 0 && (
             <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
               {tile.pois.map((p, i) => (

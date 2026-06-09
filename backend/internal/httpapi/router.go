@@ -2666,6 +2666,40 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"event_id": id})
 	})
 
+	// 玩家在线直接操作角色（命运混合模型：离线她自治，上线玩家可直接干预，与世界自治推进共存）。
+	// 直接移动：把她移到目标格（校验在界内/非水山阻挡/归属本会话），位置非受保护字段直改+持久化。
+	router.POST("/api/sessions/:id/units/:unitId/move", func(c *gin.Context) {
+		var body struct {
+			Q int `json:"q"`
+			R int `json:"r"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		q, r, err := newSessionService().PlayerMoveUnit(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Q, body.R)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"q": q, "r": r})
+	})
+	// 直接穿装备：从她背包把某件装备穿上（复用 EquipBackpackItem，含重算派生攻防）。
+	router.POST("/api/sessions/:id/units/:unitId/equip", func(c *gin.Context) {
+		var body struct {
+			ItemID string `json:"item_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := newSessionService().PlayerEquipItem(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.ItemID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// 触发一次组队野外Boss遭遇（多回合消耗战→按贡献分赃含 epic 仲裁/失败各自分级惩罚→各自命运收件箱）。真实动作。
 	router.POST("/api/sessions/:id/field-boss", func(c *gin.Context) {
 		var body struct {

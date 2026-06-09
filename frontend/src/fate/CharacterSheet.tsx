@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { zIndex } from "../zindex-tokens";
 import { ChroniclePanel } from "../components/ChroniclePanel";
 import {
+  equipItem,
   getChronicleFeed,
   getItemCatalog,
   getUnitRelations,
@@ -174,6 +175,24 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
     };
   }, [unitId]);
 
+  // equipBusy：正在穿的物品 id（防重复点）。onEquip：玩家在线给她穿装备（混合模型可操作），成功后重拉档案。
+  const [equipBusy, setEquipBusy] = useState("");
+  const onEquip = useCallback(
+    async (itemID: string) => {
+      setEquipBusy(itemID);
+      try {
+        await equipItem(sessionId, unitId, itemID);
+        const rec = await getUnitStatus(unitId);
+        if (rec) setUnit(rec);
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "穿不上这件");
+      } finally {
+        setEquipBusy("");
+      }
+    },
+    [sessionId, unitId],
+  );
+
   // 关系 tab 首次切入时懒加载。
   const loadRelations = useCallback(async () => {
     setRelLoading(true);
@@ -253,7 +272,9 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
             <StatusTab status={status} personality={personality} stats={stats} biography={biography} />
           )}
           {tab === "skills" && <SkillsTab skills={skills} />}
-          {tab === "inventory" && <InventoryTab inventory={inventory} status={status} catalog={catalog} />}
+          {tab === "inventory" && (
+            <InventoryTab inventory={inventory} status={status} catalog={catalog} onEquip={onEquip} equipBusy={equipBusy} />
+          )}
           {tab === "relations" && (
             <RelationsTab loading={relLoading} error={relError} relations={relations} />
           )}
@@ -423,8 +444,10 @@ function InventoryTab(props: {
   inventory: Record<string, unknown>;
   status: Record<string, unknown>;
   catalog: Map<string, string>;
+  onEquip?: (itemID: string) => void;
+  equipBusy?: string;
 }) {
-  const { inventory, status, catalog } = props;
+  const { inventory, status, catalog, onEquip, equipBusy } = props;
   const wallet = asNum(status.wallet);
   const equipment = asRecord(inventory.equipment);
   const backpack = Array.isArray(inventory.backpack) ? (inventory.backpack as unknown[]) : [];
@@ -495,6 +518,17 @@ function InventoryTab(props: {
                   {renderBadges(it)}
                 </span>
                 <span className="cs-backpack-qty">×{qty}</span>
+                {/* 玩家在线操作：从行囊把这件穿上（非装备类后端会拒，alert 兜底）。 */}
+                {onEquip ? (
+                  <button
+                    type="button"
+                    className="cs-equip-btn"
+                    disabled={equipBusy === asStr(it.item_id)}
+                    onClick={() => onEquip(asStr(it.item_id))}
+                  >
+                    {equipBusy === asStr(it.item_id) ? "…" : "穿上"}
+                  </button>
+                ) : null}
               </li>
             );
           })}

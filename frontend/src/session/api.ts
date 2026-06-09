@@ -519,6 +519,23 @@ export async function advanceFateWorld(sessionID: string): Promise<boolean> {
   return data.advancing ?? false;
 }
 
+// moveUnit 玩家在线直接把角色移到目标格（混合模型：上线可玩家操作）。返回移动后坐标；非法（越界/水山）抛错。
+export async function moveUnit(sessionID: string, unitID: string, q: number, r: number): Promise<{ q: number; r: number }> {
+  const data = await request<{ q?: number; r?: number }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/move`,
+    { method: "POST", body: JSON.stringify({ q, r }) },
+  );
+  return { q: data.q ?? q, r: data.r ?? r };
+}
+
+// equipItem 玩家在线给角色从背包穿上某装备。失败抛错（无此物/不可装备等）。
+export async function equipItem(sessionID: string, unitID: string, itemID: string): Promise<void> {
+  await request(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/equip`,
+    { method: "POST", body: JSON.stringify({ item_id: itemID }) },
+  );
+}
+
 // MapPOI 对齐后端 session.MapPOI（json tag）：地块特殊资源 / 野外 NPC 身上的事件，画在格子上的徽标。
 export type MapPOI = {
   q: number;
