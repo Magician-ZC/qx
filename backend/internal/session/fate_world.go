@@ -16,6 +16,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"qunxiang/backend/internal/engine/turns"
 	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/world"
 )
 
 // AdvanceFateWorld best-effort 推主世界 session 一拍：
@@ -119,6 +121,94 @@ func (service *Service) surfaceLifeBeatBestEffort(
 		"narrative": beat,
 		"turn":      state.TurnState.Turn,
 	})
+}
+
+// surfaceEncounterBeatBestEffort 在她移动后判断「当前格/相邻格有 POI 或野外 NPC」时，额外冒一条遭遇命运 beat
+// （如「她在古迹遗物前驻足」「她在路上撞见一个似有求助之事的人」）。复用 ReasonLifeBeat（feed 零改即可显示）。
+// 全确定性（encounterRoll 含坐标+turn 的 FNV，禁 time.Now/rand）；每拍 ≤1 条（调用点已在 actionIndex==1 守门）+ 概率闸防刷屏。
+func (service *Service) surfaceEncounterBeatBestEffort(
+	ctx context.Context,
+	state *State,
+	actor *unit.Record,
+	byID map[string]*unit.Record,
+) {
+	if service == nil || service.db == nil || state == nil || actor == nil {
+		return
+	}
+	if !isMainWorldPlayerUnit(*state, actor.ID) {
+		return
+	}
+	aq, ar := actor.Status.PositionQ, actor.Status.PositionR
+
+	// 候选遭遇源：① 相邻(含同格)的野外 NPC（带身上的事件类型）② 当前格的特殊资源 POI。
+	var beat string
+	// ① 野外 NPC：取最近的一个。
+	for _, id := range state.WildUnitIDs {
+		w := byID[id]
+		if w == nil {
+			continue
+		}
+		if unit.HexDistance(aq, ar, w.Status.PositionQ, w.Status.PositionR) > 1 {
+			continue
+		}
+		coord := world.Coord{Q: w.Status.PositionQ, R: w.Status.PositionR}
+		eventType := npcEventTypeFor(state.ID, coord, w.ID)
+		beat = fmt.Sprintf("%s：在路上撞见了%s，似有%s之事。", actor.DisplayName(), w.DisplayName(), eventType)
+		break
+	}
+	// ② 没撞见人，则看当前格有无特殊资源 POI（与 computeMapResourcePOIs 同口径的稀疏判定）。
+	if beat == "" {
+		coord := world.Coord{Q: aq, R: ar}
+		terrain := terrainAt(state.Map, coord)
+		if res := resourceForTerrain(terrain); res != "" {
+			threshold := 0.12
+			if terrain == world.TerrainRuins {
+				threshold = 0.85
+			}
+			if poiRoll(state.ID, coord, "resource") < threshold {
+				beat = fmt.Sprintf("%s：在一处%s前驻足，似有所得。", actor.DisplayName(), res)
+			}
+		}
+	}
+	if beat == "" {
+		return // 绝大多数拍：无遭遇源
+	}
+	// 概率闸（含 turn，使同一处不同拍掷骰不同）：<阈值才冒，避免每拍都刷。
+	if encounterRoll(*state, *actor) >= 0.45 {
+		return
+	}
+	payload := map[string]any{
+		"narrative": beat,
+		"unit_id":   actor.ID,
+		"turn":      state.TurnState.Turn,
+		"reason":    string(events.ReasonLifeBeat),
+		"kind":      "encounter",
+	}
+	if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		SessionID:   state.ID,
+		OwnerUnitID: actor.ID,
+		Code:        events.ReasonLifeBeat,
+		Category:    events.CategoryLifecycle,
+		Payload:     payload,
+		WorldID:     state.WorldID,
+	}); err != nil {
+		return
+	}
+	service.pushRealtime(state.ID, "fate_life_beat", map[string]any{
+		"unit_id":   actor.ID,
+		"narrative": beat,
+		"turn":      state.TurnState.Turn,
+	})
+}
+
+// encounterRoll 是遭遇触发的确定性掷骰（含 turn：同一处不同拍可掷出不同结果）。[0,1)。
+func encounterRoll(state State, actor unit.Record) float64 {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(state.ID))
+	_, _ = hasher.Write([]byte(actor.ID))
+	_, _ = hasher.Write([]byte("fate_encounter"))
+	_, _ = hasher.Write([]byte(fmt.Sprintf("%d,%d,%d", actor.Status.PositionQ, actor.Status.PositionR, state.TurnState.Turn)))
+	return float64(hasher.Sum32()%10000) / 10000
 }
 
 // composeLifeBeatText 从一拍决策的叙事字段组装一句生活 beat（冠以角色名）。

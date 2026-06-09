@@ -23,6 +23,10 @@ import { highlightCard } from "./shareCard";
 type Props = {
   sessionId: string;
   unitId: string;
+  // draftGuidance：父层（点地图）传来的「指向型指引草稿」，预填进指引输入框（叠加进已有文本 + 聚焦）。
+  draftGuidance?: string;
+  // onDraftConsumed：草稿已注入后通知父层清空，避免重复注入。
+  onDraftConsumed?: () => void;
 };
 
 // MoralAlignment 是她的三维数值道德轴（对齐后端 faction.MoralAlignment 的 json tag，各 [0,100]）。
@@ -307,11 +311,13 @@ function fateCardKey(card: FateCard): string {
   return (h >>> 0).toString(36);
 }
 
-export function FateView({ sessionId, unitId }: Props) {
+export function FateView({ sessionId, unitId, draftGuidance, onDraftConsumed }: Props) {
   const [status, setStatus] = useState<StatusCard | null>(null);
   const [cards, setCards] = useState<FateCard[]>([]);
   const [resolving, setResolving] = useState<string>("");
   const [interveneText, setInterveneText] = useState("");
+  // intervenInputRef：指引输入框 ref，供「点地图预填草稿」后聚焦。
+  const intervenInputRef = useRef<HTMLInputElement | null>(null);
   const [toast, setToast] = useState("");
   // living=true：指引/推世界后，这一拍正在世界里执行（她正去经历）。期间禁用指引框与推进按钮，
   // 由 runWorldTick 轮询 execution_in_progress 由 true→false（或超时兜底）后解除并刷新 feed/状态卡。
@@ -321,6 +327,18 @@ export function FateView({ sessionId, unitId }: Props) {
   const seenRef = useRef<Set<string>>(new Set());
   // statusViewedRef 守卫 status_card_viewed 埋点只触发一次（首次拉到角色状态时），避免每次重渲重复上报。
   const statusViewedRef = useRef(false);
+
+  // 指向型指引：父层（点地图格子/人）传来草稿时，叠加进指引框 + 聚焦，消费后通知父层清空。
+  // living 态（这拍正在执行、输入禁用）不注入，等执行完（living→false）再补注入。叠加用分号衔接，已含则不重复。
+  useEffect(() => {
+    const draft = (draftGuidance ?? "").trim();
+    if (!draft || living) {
+      return;
+    }
+    setInterveneText((prev) => (prev.includes(draft) ? prev : prev.trim() ? prev.trimEnd() + "；" + draft : draft));
+    intervenInputRef.current?.focus();
+    onDraftConsumed?.();
+  }, [draftGuidance, living, onDraftConsumed]);
   // shareInitiatedRef 守卫 share_initiated 同一卡只上报一次（按 narrative 去重），避免重复点击灌漏斗。
   const shareInitiatedRef = useRef<Set<string>>(new Set());
   // reactedRef 守卫高光卡三键反馈同一卡只记一次（按 fateCardKey 去重）；reactedTick 仅驱动按钮态重渲。
@@ -743,6 +761,7 @@ export function FateView({ sessionId, unitId }: Props) {
       {/* data-tour='intervene'：新手引导「你影响她，而非遥控她」步骤的聚光锚点。 */}
       <section className="fate-intervene" data-tour="intervene">
         <input
+          ref={intervenInputRef}
           value={interveneText}
           disabled={living}
           placeholder={living ? "她正去经历你方才的嘱咐…" : "给她托个梦，留一句嘱咐…（如：别恋战，护住身边人）"}

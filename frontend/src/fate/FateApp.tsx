@@ -118,6 +118,8 @@ export function FateApp() {
   const [charterOpen, setCharterOpen] = useState(false);
   // drawerOpen：命运 UI 浮层抽屉是否展开（默认开，让玩家同时看到全屏地图 + 命运卡；可收起独看地图）。
   const [drawerOpen, setDrawerOpen] = useState(true);
+  // guidanceDraft：点地图格子/人生成的「指向型指引草稿」——FateBoard 写、FateView 读并预填进指引框（消费后清空）。
+  const [guidanceDraft, setGuidanceDraft] = useState("");
 
   // 捏人四要素 + 出身。
   const [name, setName] = useState("");
@@ -269,7 +271,14 @@ export function FateApp() {
     return (
       <div className="fate-play-fullscreen">
         {/* 全屏世界地图（主舞台）：她生活的天地——拖拽平移、滚轮缩放、观战她与身边二十余人。 */}
-        <FateBoard sessionId={saved.sessionId} unitId={saved.unitId} />
+        <FateBoard
+          sessionId={saved.sessionId}
+          unitId={saved.unitId}
+          onGuidanceSuggested={(t) => {
+            setGuidanceDraft(t);
+            setDrawerOpen(true);
+          }}
+        />
 
         {/* 左上浮层：换个账号。 */}
         <button className="fate-restart" onClick={() => void signOut()}>
@@ -291,7 +300,12 @@ export function FateApp() {
           <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
             ✦ 立约 · 看看你与她定下的约
           </button>
-          <FateView sessionId={saved.sessionId} unitId={saved.unitId} />
+          <FateView
+            sessionId={saved.sessionId}
+            unitId={saved.unitId}
+            draftGuidance={guidanceDraft}
+            onDraftConsumed={() => setGuidanceDraft("")}
+          />
         </aside>
 
         {/* 离线宪章编辑浮层：read=getCharter / save=putCharter / delete=deleteCharter（api.ts 现有）。

@@ -2384,6 +2384,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"advancing": advancing})
 	})
+	// 地图兴趣点：某会话地图的确定性 POI（地块特殊资源 + 野外 NPC 身上的事件）。纯读，供命运地图画徽标 + 点击查看。
+	// 用 :sessionId（与同前缀的 advance 路由占位名一致，避免 gin 通配冲突 panic）。
+	router.GET("/api/fate/sessions/:sessionId/map-pois", func(c *gin.Context) {
+		pois, err := newSessionService().MapPOIs(c.Request.Context(), c.Param("sessionId"))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"pois": []session.MapPOI{}, "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"pois": pois})
+	})
 	// 世仇清单：列出某角色当前怀有的强敌意关系（blood_feud 传播的可观测面，前端/调试用）。纯读。
 	// 关系四轴敌意图是敏感读面：必须按 :id 会话作用域 + 指挥阵营鉴权（与其它 /api/sessions/:id 读一致），
 	// 且校验 :unitId 确属该会话，否则任意调用方可拿任意 unitId 跨会话拉取其完整敌意网络（含对象名）。

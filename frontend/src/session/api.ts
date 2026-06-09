@@ -519,6 +519,24 @@ export async function advanceFateWorld(sessionID: string): Promise<boolean> {
   return data.advancing ?? false;
 }
 
+// MapPOI 对齐后端 session.MapPOI（json tag）：地块特殊资源 / 野外 NPC 身上的事件，画在格子上的徽标。
+export type MapPOI = {
+  q: number;
+  r: number;
+  kind: "resource" | "npc_event" | string;
+  type_code: string;
+  label_zh: string;
+  unit_id?: string;
+};
+
+// getMapPOIs 拉某会话地图的兴趣点（确定性，命运地图画徽标 + 点击查看）。失败回空数组（不打断观战）。
+export async function getMapPOIs(sessionID: string): Promise<MapPOI[]> {
+  const data = await request<{ pois?: MapPOI[]; error?: string }>(
+    `/api/fate/sessions/${encodeURIComponent(sessionID)}/map-pois`,
+  );
+  return data.pois ?? [];
+}
+
 // getSessionExecutionInProgress 轻量轮询某会话「执行是否进行中」（命运循环判这拍跑完用）。
 // 复用 GET /api/sessions/:id 取快照的 execution_in_progress；读不到（404/字段缺）按 false 处理。
 export async function getSessionExecutionInProgress(sessionID: string): Promise<boolean> {

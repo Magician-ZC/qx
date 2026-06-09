@@ -8,7 +8,8 @@
    祖魂语气/宣纸墨色：本文件不可改 fate.css/styles.css，故浮卡等用内联样式贴合 .fate-* 墨色调；绝不出现指挥/下令 UI。*/
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getSession } from "../session/api";
+import { getMapPOIs, getSession } from "../session/api";
+import type { MapPOI } from "../session/api";
 import type { BattleUnit, SessionSnapshot } from "../session/types";
 
 // LazyPixiBoard 与 App.tsx 同款懒加载 PixiBoard：让 Pixi 战场代码留在独立 chunk（不并进命运首屏主包），
@@ -22,6 +23,8 @@ type Props = {
   // refreshSignal：父层每推世界往前一拍并执行完后 bump 此值，FateBoard 据此重拉快照让 board 随她移动重渲。
   // 不传则只靠自身轮询刷新。
   refreshSignal?: number;
+  // onGuidanceSuggested：点地图格子/人时，把一句祖魂语气的「指向型指引草稿」上抛父层（父层预填进 FateView 指引框）。
+  onGuidanceSuggested?: (text: string) => void;
 };
 
 // FACTION_NAME_ZH 把阵营 id 译成中文名（与 FateView 同口径，未知 id 回落原串）。
@@ -149,7 +152,7 @@ type TileOccupant = {
   isHer: boolean;
 };
 
-// TilePanel 是点格子弹出的「这是什么地方 + 这里有谁」只读面板内容。
+// TilePanel 是点格子弹出的「这是什么地方 + 这里有谁 + 有什么」只读面板内容。
 type TilePanel = {
   q: number;
   r: number;
@@ -157,10 +160,13 @@ type TilePanel = {
   landmark: string; // 地标（如有）
   isTown: boolean; // 城镇（城市/村庄）——展示「镇上的人」名单
   occupants: TileOccupant[];
+  pois: { kind: string; label: string }[]; // 这格的兴趣点（资源/事件）
 };
 
-export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
+export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggested }: Props) {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
+  // pois：地图兴趣点（地块资源 / 野外 NPC 事件），画在格子上的徽标 + 点击查看。
+  const [pois, setPois] = useState<MapPOI[]>([]);
   // selected：当前点选的格子（用于 PixiBoard 高亮 + 浮卡定位锚点）。
   const [selected, setSelected] = useState<{ q: number; r: number } | null>(null);
   // tile：点格子弹出的「这是什么地方 + 这里有谁」面板内容；null=不展示。
@@ -181,6 +187,12 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
       if (mountedRef.current) setSnap(res.session);
     } catch {
       // 观战快照拉取失败不致命（轮询/下次 refreshSignal 会再试），保持上一帧、不打断她的舞台。
+    }
+    try {
+      const ps = await getMapPOIs(sessionId);
+      if (mountedRef.current) setPois(ps);
+    } catch {
+      // POI 拉取失败：保持上一帧 POI，不影响地图主体。
     }
   }, [sessionId]);
 
@@ -209,17 +221,35 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
           faction: u.faction_id ?? "",
           isHer: u.id === unitId,
         }));
+      const tilePois = pois.filter((p) => p.q === q && p.r === r).map((p) => ({ kind: p.kind, label: p.label_zh }));
+      const landmark = mapTile?.landmark ?? "";
       setSelected({ q, r });
       setTile({
         q,
         r,
         terrain: terrainNameZH(terrainCode),
-        landmark: mapTile?.landmark ?? "",
+        landmark,
         isTown: TOWN_TERRAINS.has(terrainCode),
         occupants,
+        pois: tilePois,
       });
+      // 指向型指引草稿：点中具名的人→「留意」她；点中地标/POI/地形→「去那看看」。上抛父层预填进指引框。
+      if (onGuidanceSuggested) {
+        const namedOther = occupants.find((o) => !o.isHer);
+        let draft = "";
+        if (namedOther) {
+          draft = `留意「${namedOther.name}」`;
+        } else if (tilePois.length > 0) {
+          draft = `去探一探那处${tilePois[0].label}`;
+        } else if (landmark) {
+          draft = `去${landmark}那边看看`;
+        } else {
+          draft = `往${terrainNameZH(terrainCode)}那边走走`;
+        }
+        onGuidanceSuggested(draft);
+      }
     },
-    [snap, unitId],
+    [snap, unitId, pois, onGuidanceSuggested],
   );
 
   // commanderFactionID：按她所属阵营给玩家暖色（snap 里有 player_faction_id 即用，缺则回落 "player"）。
@@ -236,6 +266,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
           onTileClick={onTileClick}
           spectator
           zoom={1.3}
+          pois={pois.map((p) => ({ q: p.q, r: p.r, kind: p.kind, label: p.label_zh }))}
         />
       </Suspense>
       {tile && (
@@ -252,6 +283,26 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
           <div style={whoCardLineStyle}>
             坐标（{tile.q}, {tile.r}）
           </div>
+          {tile.pois.length > 0 && (
+            <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {tile.pois.map((p, i) => (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: 12,
+                    padding: "2px 8px",
+                    borderRadius: 999,
+                    background: p.kind === "resource" ? "rgba(217, 188, 115, 0.3)" : "rgba(198, 109, 72, 0.22)",
+                    border: "1px solid rgba(120, 90, 50, 0.3)",
+                    color: "#6b4a22",
+                  }}
+                >
+                  {p.kind === "resource" ? "💎 " : "❗ "}
+                  {p.label}
+                </span>
+              ))}
+            </div>
+          )}
           {tile.occupants.length === 0 ? (
             <div style={{ ...whoCardLineStyle, marginTop: 8 }}>
               {tile.isTown ? "镇上此刻无人露面。" : "此地此刻空无一人。"}

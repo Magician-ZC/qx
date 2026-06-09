@@ -153,6 +153,8 @@ type SceneModel = {
   zoom?: number;
   // spectator=true（命运主世界全屏观战）：跳过战棋专属 HUD（回合卡/地形图例），地图更纯净。
   spectator?: boolean;
+  // pois：地图兴趣点（地块特殊资源 / 野外 NPC 身上的事件），在对应格子画小徽标。
+  pois?: Array<{ q: number; r: number; kind: string; label: string }>;
   executionMarkers?: Array<{
     unitID: string;
     status: "started" | "completed";
@@ -322,6 +324,8 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
     const placement = cachedPlacement ?? computeBoardPlacement(latest.session, width, height, zoom);
     drawStructures(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
     drawBattlefieldRemnants(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
+    // POI 徽标层：放在 drawUnits 之前，让站到 POI 上的单位 token 盖在徽标之上（人在前）。unitLayer 每帧重画，POI 即时刷新。
+    drawPOIs(unitLayer, latest.pois ?? [], placement);
     drawUnits(unitLayer, { ...latest, onTileClick: handleTileClick }, placement, width, height);
     // 观战模式（命运主世界全屏地图）：不画战棋专属的「回合卡 / 地形图例」HUD——那是部署/执行战棋概念，
     // 命运观战里只会变成压在地图上的无关浮窗。spectator=false（战棋视图）时照旧显示。
@@ -610,6 +614,46 @@ function shouldShowTerrainTag(terrain: string, radius: number): boolean {
     return false;
   }
   return terrain === "city" || terrain === "village" || terrain === "ruins";
+}
+
+// poiColor / poiEmoji：按 POI 类别给徽标配色与图标（资源=金、事件=暖红）。
+function poiColor(kind: string): number {
+  return kind === "resource" ? palette.brass : palette.ember;
+}
+function poiEmoji(kind: string): string {
+  return kind === "resource" ? "💎" : "❗";
+}
+
+// drawPOIs 在对应格子画 POI 小徽标（左下角色点 + emoji 图标），让出右下给 structure 徽章。纯展示、不拦截点击。
+function drawPOIs(
+  layer: Container,
+  pois: Array<{ q: number; r: number; kind: string; label: string }>,
+  placement: BoardPlacement,
+): void {
+  for (const poi of pois) {
+    const center = tileCenter(poi.q, poi.r, placement);
+    const badgeR = Math.max(6, placement.radius * 0.26);
+    const cx = center.x - placement.radius * 0.5;
+    const cy = center.y + placement.radius * 0.55;
+    const dot = new Graphics();
+    dot.lineStyle({ color: palette.panelLine, alpha: 0.9, width: 1.2 });
+    dot.beginFill(poiColor(poi.kind), 0.92);
+    dot.drawCircle(cx, cy, badgeR);
+    dot.endFill();
+    dot.eventMode = "none";
+    layer.addChild(dot);
+    const icon = new Text(
+      poiEmoji(poi.kind),
+      new TextStyle({
+        fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
+        fontSize: badgeR * 1.3,
+      }),
+    );
+    icon.anchor.set(0.5);
+    icon.position.set(cx, cy);
+    icon.eventMode = "none";
+    layer.addChild(icon);
+  }
 }
 
 // computeBoardPlacement 根据地图尺寸与视口计算棋盘布局参数。

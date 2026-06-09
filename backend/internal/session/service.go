@@ -2007,6 +2007,8 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 			// 同步/异步两路都经此处（与 emitActionNarrationBestEffort 不同——生活 beat 在两种执行模式下都要写进 feed）。
 			if actorState.actionIndex == 1 {
 				service.surfaceLifeBeatBestEffort(ctx, state, actor, compliance.Final)
+				// 遭遇 beat：她移动后若当前格/相邻格有 POI 或野外 NPC，确定性概率冒一条遭遇命运 beat（best-effort）。
+				service.surfaceEncounterBeatBestEffort(ctx, state, actor, byID)
 			}
 			if err := service.rememberUnitWithSource(ctx, actor, state.TurnState.Turn, compliance.Final.Memory, memorySource, memoryImportanceBoost); err != nil {
 				return err
