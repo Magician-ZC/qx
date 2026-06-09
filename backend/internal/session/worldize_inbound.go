@@ -16,12 +16,12 @@ package session
 
 import (
 	"context"
-	"os"
 	"strings"
 	"time"
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -42,7 +42,7 @@ const (
 
 // worldizeInboundEnabled 读 QUNXIANG_WORLDIZE_INBOUND（true/1/yes/on 视为开），默认关 → 入向扇出 no-op、零行为变化。
 func worldizeInboundEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_WORLDIZE_INBOUND"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_WORLDIZE_INBOUND"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

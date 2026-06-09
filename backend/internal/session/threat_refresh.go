@@ -26,11 +26,11 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
-	"os"
 	"strings"
 
 	"qunxiang/backend/internal/engine/arbitration"
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/unit"
 )
@@ -75,7 +75,7 @@ var wildThreatNames = []string{"山魈", "独眼熊", "赤鳞蜥", "断尾狼", 
 
 // autoPvEEnabled 读 QUNXIANG_AUTO_PVE（true/1/yes/on 视为开），默认关 → refreshThreats 保持 surface-only 行为完全不变。
 func autoPvEEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_AUTO_PVE"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_PVE"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

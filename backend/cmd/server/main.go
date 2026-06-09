@@ -19,6 +19,7 @@ import (
 	"qunxiang/backend/internal/ai"
 	"qunxiang/backend/internal/config"
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/httpapi"
 	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/regionrunner"
@@ -55,6 +56,15 @@ func main() {
 	//（loadTranslationTemplate 查库失败会优雅回退内置矩阵 / DefaultReasonText，命运路由仍可用）。
 	if err := session.SeedTranslationTemplates(context.Background(), db); err != nil {
 		logger.Error("seed translation templates", "error", err)
+	}
+
+	// GM 后台运行时 flag 持久化：注入双驱动 Store 后从 feature_flag_overrides 表回灌已存 override，
+	// 让 GM 在后台设过的开关重启存活。best-effort：失败只记日志、绝不阻断启动（override 缺省回退环境变量/默认值）。
+	featureflags.SetStore(session.NewFeatureFlagStore(db))
+	if n, err := featureflags.LoadFromStore(context.Background()); err != nil {
+		logger.Error("load feature flag overrides", "error", err)
+	} else if n > 0 {
+		logger.Info("loaded feature flag overrides", "count", n)
 	}
 
 	hub := ws.NewHub(logger)

@@ -635,3 +635,13 @@ CREATE INDEX IF NOT EXISTS idx_relevance_anchors_ref ON relevance_anchors(anchor
 -- world_bosses「每世界至多一头 active」硬约束（评审 L4：NOT EXISTS 在 MySQL gap-lock 下理论可双插；
 -- SQLite partial unique index 给默认驱动一道硬兜底——第二并发 INSERT 必触唯一冲突，由 world_boss.go best-effort 收敛）。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id) WHERE status='active';
+
+-- GM 后台运行时 flag 覆盖表（GM管理后台：运行时开关层持久化）。
+-- 把 GM 在运行时设的游戏 flag override 落库，使「不重启即可灰度开关」在进程重启后存活。
+-- name 是环境变量名（大写归一，主键）；value 是覆盖原始字符串（各调用点自行解析真值，本层不解析语义）。
+CREATE TABLE IF NOT EXISTS feature_flag_overrides (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -8,9 +8,9 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"strings"
 
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -31,7 +31,7 @@ const defaultWorldID = "world_default"
 // 默认 shared 安全：relevance 阈值（0.35）+ 锚机制保证无跨会话关系时不会乱浮现，
 // 共享世界只是把跨玩家管线「通电」，而非强制每局都互相干预。
 func worldBindingMode() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_WORLD_BINDING"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_WORLD_BINDING"))) {
 	case "per_session":
 		return "per_session"
 	case "off":

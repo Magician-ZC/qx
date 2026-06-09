@@ -167,9 +167,9 @@ func TestCountForcedOrdersForUnit(t *testing.T) {
 	state := State{
 		DirectiveHistory: []Directive{
 			{Kind: DirectiveKindOrder, TargetUnitID: "u1", AppliesTo: "u1"},
-			{Kind: DirectiveKindTask, TargetUnitID: "u1", AppliesTo: "u1"},     // 非 order
-			{Kind: DirectiveKindOrder, TargetUnitID: "u2", AppliesTo: "u2"},     // 他人
-			{Kind: DirectiveKindOrder, TargetUnitID: "u1", AppliesTo: "u1"},     // 本单位第二条
+			{Kind: DirectiveKindTask, TargetUnitID: "u1", AppliesTo: "u1"},       // 非 order
+			{Kind: DirectiveKindOrder, TargetUnitID: "u2", AppliesTo: "u2"},      // 他人
+			{Kind: DirectiveKindOrder, TargetUnitID: "u1", AppliesTo: "u1"},      // 本单位第二条
 			{Kind: DirectiveKindDoctrine, TargetUnitID: "", AppliesTo: "player"}, // 非 order
 		},
 	}

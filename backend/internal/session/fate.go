@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"qunxiang/backend/internal/engine/narration"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -420,7 +420,7 @@ const serendipityDailyBudget = 1
 
 // serendipityEnabled 读 QUNXIANG_SERENDIPITY（true/1/yes/on 视为开），默认关 → 破圈逻辑零行为（与既有 flag 风格一致）。
 func serendipityEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_SERENDIPITY"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_SERENDIPITY"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:
@@ -1626,7 +1626,7 @@ func SetConsistencyTightened(on bool) {
 
 // consistencyTightenEnabled 读 QUNXIANG_CONSISTENCY_TIGHTEN（true/1/yes/on 视为开），默认关 → 收紧闭环零行为。
 func consistencyTightenEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_CONSISTENCY_TIGHTEN"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_CONSISTENCY_TIGHTEN"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

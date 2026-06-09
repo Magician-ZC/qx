@@ -1,13 +1,14 @@
 /* 文件说明：前端顶层路由。按 URL hash 在三处之间切换——
    默认（无 hash / #fate）→ 主世界「命运开盒」客户端（FateApp），由 AuthGate 包住，登录后才进；
    #battle/<sessionId> → 旧战棋指挥客户端（App）接管某一场关键战，把 sessionId 传给它，并给一个「返回命运」回调；
-   #admin → GM 管理后台占位（后续 W-C 接入）。
+   #admin → GM 管理后台（W-C）：独立 AdminApp 根组件，自管 ops-token 登录与 5 面板。
    hash 变化实时切换。 */
 
 import { useCallback, useEffect, useState } from "react";
 import { App } from "./App";
 import { FateApp } from "./fate/FateApp";
 import { AuthGate } from "./components/AuthGate";
+import AdminApp from "./admin/AdminApp";
 
 // Route 是当前解析出的路由意图。
 type Route =
@@ -73,17 +74,8 @@ export function Root(): JSX.Element {
   }
 
   if (route.kind === "admin") {
-    // GM 管理后台占位（W-C 接入）：先给一块与命运同风格的占位卡，不误导成已就绪。
-    return (
-      <div className="fate-shell fate-onboarding">
-        <div className="fate-create" style={{ textAlign: "center" }}>
-          <h1>群像 · 司命台</h1>
-          <p className="fate-create-lead" style={{ margin: 0 }}>
-            GM 管理后台尚在筹建（W-C）。此处将接入世界事件注入、赛季运营与零和审计。
-          </p>
-        </div>
-      </div>
-    );
+    // GM 管理后台（W-C 接入）：独立 AdminApp 根组件，自管 ops-token 登录与 5 面板，无需 props。
+    return <AdminApp />;
   }
 
   // 默认：主世界命运客户端，登录门包住——登录后才降生/续上她的人生。

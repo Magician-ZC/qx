@@ -16,18 +16,18 @@ package session
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
 // freezeListEnabled 读 QUNXIANG_FREEZE_LIST（true/1/yes/on 视为开），默认关 → FreezeAndSurrenderToFate 整段
 // no-op、零行为变化、零 DB 写。判定函数 shouldFreezeAction 本身是纯逻辑、不读 flag（供 Wire 在拦截点按需调用）。
 func freezeListEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_FREEZE_LIST"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FREEZE_LIST"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

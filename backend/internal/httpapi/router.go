@@ -27,6 +27,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/engine/turns"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/liveops"
 	"qunxiang/backend/internal/session"
@@ -607,6 +608,102 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"entries": entries})
+	})
+
+	// ---- GM 管理后台手柄（运行时 flag 开关层 + 世界配置），全部 opsTokenGuard ----
+	// flag override 经 featureflags 进程级状态（已注入双驱动 Store 持久化，main.go 启动回灌）；
+	// 世界配置经 session 的 admin_world 服务（每请求新建轻量 Service）。供独立 AdminApp 前端 5 面板驱动。
+
+	// 列出全部已知游戏 flag 的生效态（override / 环境变量 / 默认值三层合一）。
+	router.GET("/api/admin/flags", opsTokenGuard(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"flags": featureflags.SnapshotEffective()})
+	})
+
+	// 设一个 flag 的运行时 override（不重启即灰度）。先校验是已知游戏 flag，再 best-effort 落库持久化。
+	router.POST("/api/admin/flags", opsTokenGuard(), func(c *gin.Context) {
+		var body struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if !featureflags.IsKnownGameplayFlag(body.Name) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown flag"})
+			return
+		}
+		if err := featureflags.SetOverride(body.Name, body.Value); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// 清一个 flag 的运行时 override（回退环境变量/默认值）。existed 透出该 flag 此前是否有 override。
+	// AdminApp 走 DELETE /api/admin/flags?name=（query）；同时注册 /:name（path）便于直接 curl/兼容 spec。
+	adminClearFlag := func(c *gin.Context) {
+		name := strings.TrimSpace(c.Param("name"))
+		if name == "" {
+			name = strings.TrimSpace(c.Query("name"))
+		}
+		existed, err := featureflags.ClearOverride(name)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"existed": existed})
+	}
+	router.DELETE("/api/admin/flags", opsTokenGuard(), adminClearFlag)       // AdminApp：?name=
+	router.DELETE("/api/admin/flags/:name", opsTokenGuard(), adminClearFlag) // 兼容 path 形
+
+	// 世界总览：列出全部世界及其 region/人口概览（GM 总览页数据源）。limit=0 取缺省。
+	// 路径用 /worlds-detail 对齐 AdminApp WorldConfigPanel 的 listWorldsDetail（与已落地的基础列表 /api/worlds 区分）。
+	adminWorldsDetail := func(c *gin.Context) {
+		worlds, err := newSessionService().ListWorldsDetail(c.Request.Context(), 0)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"worlds": worlds})
+	}
+	router.GET("/api/admin/worlds-detail", opsTokenGuard(), adminWorldsDetail)
+	router.GET("/api/admin/worlds", opsTokenGuard(), adminWorldsDetail) // 兼容别名
+
+	// 绝对置位某 region 的威胁等级（GM 人工拉高/清零某地威胁度做活动/演练）。返回置位后的实际威胁值。
+	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsTokenGuard(), func(c *gin.Context) {
+		var body struct {
+			Level int64 `json:"level"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		lvl, err := newSessionService().SetRegionThreatLevel(c.Request.Context(), c.Param("worldId"), c.Param("regionId"), body.Level)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"threat_level": lvl})
+	})
+
+	// 手动为某局/世界确定性织一张 20 人出生关系网（GM 手动播种世界人口）。faction_id 缺省服务内取 session_id。
+	router.POST("/api/admin/worlds/:worldId/seed-village", opsTokenGuard(), func(c *gin.Context) {
+		var body struct {
+			SessionID string `json:"session_id"`
+			FactionID string `json:"faction_id"`
+			Seed      int64  `json:"seed"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		n, err := newSessionService().SeedWorldVillage(c.Request.Context(), body.SessionID, body.FactionID, c.Param("worldId"), body.Seed)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"seeded": n})
 	})
 
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。

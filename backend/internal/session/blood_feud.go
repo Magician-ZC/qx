@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +21,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
@@ -57,7 +57,7 @@ const (
 // bloodFeudEnabled 读 QUNXIANG_BLOOD_FEUD，**默认开**（未设/非法值 → 视为开，玩家默认即可感知血仇传播）。
 // 仅当显式置 false/0/no/off 时才关 → propagateBloodFeud 整段 no-op、零行为变化、零 DB 写（用于回退/对照）。
 func bloodFeudEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_BLOOD_FEUD"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_BLOOD_FEUD"))) {
 	case "false", "0", "no", "off":
 		return false
 	default:

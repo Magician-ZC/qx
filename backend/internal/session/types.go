@@ -557,62 +557,62 @@ type PregnancyState struct {
 
 // State 是服务端权威状态，包含完整可回放信息（含内部审计字段）。
 type State struct {
-	ID                   string             `json:"id"`
-	AccountID            string             `json:"account_id,omitempty"` // 本局所属账户（空=匿名/单机局，账户级成本配额对其 no-op）；随 state_json 持久化，供 LLM 成本闭环按账户记账与配额拦截
-	MinorMode            bool               `json:"minor_mode,omitempty"` // 本局是否未成年模式（建局时由 compliance.Gate 裁定落库）：开启则全程关闭恋爱·生育、降露骨暴力叙事；随 state_json 持久化，断线重连/推进自动带回，匿名/成年局默认 false 零影响
+	ID                    string            `json:"id"`
+	AccountID             string            `json:"account_id,omitempty"`              // 本局所属账户（空=匿名/单机局，账户级成本配额对其 no-op）；随 state_json 持久化，供 LLM 成本闭环按账户记账与配额拦截
+	MinorMode             bool              `json:"minor_mode,omitempty"`              // 本局是否未成年模式（建局时由 compliance.Gate 裁定落库）：开启则全程关闭恋爱·生育、降露骨暴力叙事；随 state_json 持久化，断线重连/推进自动带回，匿名/成年局默认 false 零影响
 	CrossSurfaceWatermark map[string]int    `json:"cross_surface_watermark,omitempty"` // 每角色已浮现到的跨玩家事件 world_tick 水位线：部署边界仅浮现 tick 大于水位线的新跨玩家事件，防同一事件每回合重复刷命运卡（共享世界默认开后必需的去重）
-	WorldID              string             `json:"world_id,omitempty"`   // 本局所属世界（空=未接入多世界；接入后实战交互自动写世界总线）
-	Mode                 string             `json:"mode"`
-	RandomSeed           int64              `json:"random_seed"`
-	PlayerFactionID      string             `json:"player_faction_id"`
-	EnemyFactionID       string             `json:"enemy_faction_id"`
-	SetupPhase           SetupPhase         `json:"setup_phase,omitempty"`
-	SetupDeadlineAt      time.Time          `json:"setup_deadline_at,omitempty"`
-	DraftRequiredPick    int                `json:"draft_required_pick,omitempty"`
-	PlayerDraftPool      []unit.Record      `json:"player_draft_pool,omitempty"`
-	EnemyDraftPool       []unit.Record      `json:"enemy_draft_pool,omitempty"`
-	MapScriptID          string             `json:"map_script_id,omitempty"`
-	MapScriptName        string             `json:"map_script_name,omitempty"`
-	MapSizeID            string             `json:"map_size_id,omitempty"`
-	MapSizeName          string             `json:"map_size_name,omitempty"`
-	FogOfWarEnabled      bool               `json:"fog_of_war_enabled"`
-	RandomEventsDisabled bool               `json:"random_events_disabled,omitempty"`
-	TurnState            turns.State        `json:"turn_state"`
-	PhaseReady           map[string]bool    `json:"phase_ready,omitempty"`
-	ExecutionInProgress  bool               `json:"execution_in_progress,omitempty"`
-	Outcome              Outcome            `json:"outcome"`
-	WinnerFactionID      string             `json:"winner_faction_id,omitempty"`
-	VictoryPath          VictoryPath        `json:"victory_path,omitempty"`
-	Weather              WeatherState       `json:"weather"`
-	Map                  world.MapSnapshot  `json:"map"`
-	CommandPower         CommandPowerState  `json:"command_power"`
-	FactionRelations     []FactionRelation  `json:"faction_relations"`
-	PlayerUnitIDs        []string           `json:"player_unit_ids"`
-	EnemyUnitIDs         []string           `json:"enemy_unit_ids"`
-	WildUnitIDs          []string           `json:"wild_unit_ids,omitempty"`
-	Structures           []Structure        `json:"structures"`
-	GraveMarkers         []GraveMarker      `json:"grave_markers,omitempty"`
-	GroundLootDrops      []GroundLootDrop   `json:"ground_loot_drops,omitempty"`
-	GlobalDirective      Directive          `json:"global_directive"`
-	DirectiveHistory     []Directive        `json:"directive_history"`
+	WorldID               string            `json:"world_id,omitempty"`                // 本局所属世界（空=未接入多世界；接入后实战交互自动写世界总线）
+	Mode                  string            `json:"mode"`
+	RandomSeed            int64             `json:"random_seed"`
+	PlayerFactionID       string            `json:"player_faction_id"`
+	EnemyFactionID        string            `json:"enemy_faction_id"`
+	SetupPhase            SetupPhase        `json:"setup_phase,omitempty"`
+	SetupDeadlineAt       time.Time         `json:"setup_deadline_at,omitempty"`
+	DraftRequiredPick     int               `json:"draft_required_pick,omitempty"`
+	PlayerDraftPool       []unit.Record     `json:"player_draft_pool,omitempty"`
+	EnemyDraftPool        []unit.Record     `json:"enemy_draft_pool,omitempty"`
+	MapScriptID           string            `json:"map_script_id,omitempty"`
+	MapScriptName         string            `json:"map_script_name,omitempty"`
+	MapSizeID             string            `json:"map_size_id,omitempty"`
+	MapSizeName           string            `json:"map_size_name,omitempty"`
+	FogOfWarEnabled       bool              `json:"fog_of_war_enabled"`
+	RandomEventsDisabled  bool              `json:"random_events_disabled,omitempty"`
+	TurnState             turns.State       `json:"turn_state"`
+	PhaseReady            map[string]bool   `json:"phase_ready,omitempty"`
+	ExecutionInProgress   bool              `json:"execution_in_progress,omitempty"`
+	Outcome               Outcome           `json:"outcome"`
+	WinnerFactionID       string            `json:"winner_faction_id,omitempty"`
+	VictoryPath           VictoryPath       `json:"victory_path,omitempty"`
+	Weather               WeatherState      `json:"weather"`
+	Map                   world.MapSnapshot `json:"map"`
+	CommandPower          CommandPowerState `json:"command_power"`
+	FactionRelations      []FactionRelation `json:"faction_relations"`
+	PlayerUnitIDs         []string          `json:"player_unit_ids"`
+	EnemyUnitIDs          []string          `json:"enemy_unit_ids"`
+	WildUnitIDs           []string          `json:"wild_unit_ids,omitempty"`
+	Structures            []Structure       `json:"structures"`
+	GraveMarkers          []GraveMarker     `json:"grave_markers,omitempty"`
+	GroundLootDrops       []GroundLootDrop  `json:"ground_loot_drops,omitempty"`
+	GlobalDirective       Directive         `json:"global_directive"`
+	DirectiveHistory      []Directive       `json:"directive_history"`
 	// UnitCharters 是每单位的离线宪章（unitID → OfflineCharter），玩家不在场时单位据此自治。
 	// 长效授权（区别于随回合刷新的 Directive），整块随 state_json 持久化；omitempty 保旧存档反序列化。
-	UnitCharters    map[string]OfflineCharter `json:"unit_charters,omitempty"`
-	DialogueHistory []DialogueMessage         `json:"dialogue_history"`
-	DecisionTraces  []DecisionTrace           `json:"decision_traces"`
-	LLMInteractions      []LLMInteraction   `json:"llm_interactions"`
-	PigeonQueue          []PigeonDispatch   `json:"pigeon_queue"`
-	Pregnancies          []PregnancyState   `json:"pregnancies,omitempty"`
-	BattleReports        []BattleReport     `json:"battle_reports"`
-	HallArchiveEntries   []HallArchiveEntry `json:"hall_archive_entries,omitempty"`
-	IntelAssets          []IntelAsset       `json:"intel_assets"`
-	IntelReports         []IntelReport      `json:"intel_reports"`
-	ModerationReports    []ModerationReport `json:"moderation_reports"`
-	Metrics              SessionMetrics     `json:"metrics"`
-	RawEventLog          []RawEventEntry    `json:"raw_event_log"`
-	Logs                 []LogEntry         `json:"logs"`
-	CreatedAt            time.Time          `json:"created_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	UnitCharters       map[string]OfflineCharter `json:"unit_charters,omitempty"`
+	DialogueHistory    []DialogueMessage         `json:"dialogue_history"`
+	DecisionTraces     []DecisionTrace           `json:"decision_traces"`
+	LLMInteractions    []LLMInteraction          `json:"llm_interactions"`
+	PigeonQueue        []PigeonDispatch          `json:"pigeon_queue"`
+	Pregnancies        []PregnancyState          `json:"pregnancies,omitempty"`
+	BattleReports      []BattleReport            `json:"battle_reports"`
+	HallArchiveEntries []HallArchiveEntry        `json:"hall_archive_entries,omitempty"`
+	IntelAssets        []IntelAsset              `json:"intel_assets"`
+	IntelReports       []IntelReport             `json:"intel_reports"`
+	ModerationReports  []ModerationReport        `json:"moderation_reports"`
+	Metrics            SessionMetrics            `json:"metrics"`
+	RawEventLog        []RawEventEntry           `json:"raw_event_log"`
+	Logs               []LogEntry                `json:"logs"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at"`
 }
 
 // Snapshot 是下发给前端/客户端的会话视图，不含仅服务端内部使用字段。

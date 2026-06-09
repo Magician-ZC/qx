@@ -291,12 +291,33 @@ CREATE TABLE IF NOT EXISTS gm_events_audit (
   INDEX idx_gm_events_audit_world (world_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// FeatureFlagOverridesTable* GM 后台运行时 flag 覆盖表（GM管理后台：运行时开关层持久化）。
+// 把 GM 在运行时设的游戏 flag override 落库，使「不重启即可灰度开关」在进程重启后存活。
+// 列：name 是环境变量名（大写归一，主键）；value 是覆盖原始字符串（各调用点自行解析真值）；
+// updated_by/updated_at 留痕谁/何时改的。schema.sql 的 fresh 库已含本表；本常量供存量库经 EnsureTable 幂等补建。
+const FeatureFlagOverridesTableSQLite = `
+CREATE TABLE IF NOT EXISTS feature_flag_overrides (
+  name TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const FeatureFlagOverridesTableMySQL = `
+CREATE TABLE IF NOT EXISTS feature_flag_overrides (
+  name VARCHAR(191) PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by VARCHAR(191) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // DesignClosureTables 汇总本波新增表的双驱动 DDL，供 store.go 一次性幂等补建。
 var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{DungeonSegmentsTableSQLite, DungeonSegmentsTableMySQL},
 	{SeasonsTableSQLite, SeasonsTableMySQL},
 	{SeasonContentThemesTableSQLite, SeasonContentThemesTableMySQL},
 	{GmEventsAuditTableSQLite, GmEventsAuditTableMySQL},
+	{FeatureFlagOverridesTableSQLite, FeatureFlagOverridesTableMySQL},
 }
 
 // DungeonSegmentEnteredTurnColumn 给 dungeon_segments 补 entered_turn（评审 L1：副本踏入回合钉死，

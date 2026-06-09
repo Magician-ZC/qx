@@ -28,13 +28,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"qunxiang/backend/internal/engine/arbitration"
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -85,7 +85,7 @@ type ContestContender struct {
 // 默认开理由：排他标的的确定性零和裁决是反 P2W 的机制基石（设计 §2.6），且全程 best-effort + 低频 +
 // 付费不进 Score、胜负只产 append-only cross_event（不直写他人状态），行为受控、无破坏性副作用。
 func zeroSumContestEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_ZEROSUM_CONTEST"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_ZEROSUM_CONTEST"))) {
 	case "false", "0", "no", "off":
 		return false
 	default:

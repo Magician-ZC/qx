@@ -13,10 +13,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
-	"os"
 	"strings"
 
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/villageseed"
@@ -204,7 +204,7 @@ func (service *Service) SeedVillageBestEffort(ctx context.Context, sessionID str
 // 采用项目约定的「默认开但可显式关」反向 envBool 语义。与 onboarding 的 with_village 查询参数互不影响；
 // 重复建局/重连不会重复造人由 seedVillageForSession 内的幂等守卫保证。
 func mainVillageEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_MAIN_VILLAGE"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_MAIN_VILLAGE"))) {
 	case "false", "0", "no", "off":
 		return false
 	default:

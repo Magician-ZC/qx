@@ -17,7 +17,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -26,6 +25,7 @@ import (
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -39,7 +39,7 @@ const (
 
 // dungeonEnabled 读 QUNXIANG_DUNGEON（true/1/yes/on 视为开），默认关 → RunDungeon 直接返回 ErrDungeonDisabled、零行为。
 func dungeonEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_DUNGEON"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_DUNGEON"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

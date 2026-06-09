@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -34,6 +33,7 @@ import (
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -500,7 +500,7 @@ var autoWorldBossHPTiers = []int{120_000, 200_000, 360_000, 600_000}
 // worldBossAutoEnabled 读 QUNXIANG_WORLD_BOSS_AUTO（true/1/yes/on 视为开，大小写不敏感、忽略首尾空白），
 // 默认关 → maybeRefreshWorldBoss 整方法 no-op、零行为变化、零 DB 写。
 func worldBossAutoEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_WORLD_BOSS_AUTO"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_WORLD_BOSS_AUTO"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

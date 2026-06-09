@@ -11,11 +11,11 @@ package session
 import (
 	"context"
 	"hash/fnv"
-	"os"
 	"strings"
 
 	"qunxiang/backend/internal/engine/arbitration"
 	"qunxiang/backend/internal/engine/events"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -66,7 +66,7 @@ const (
 // 仅在本会话单位间撮合 + 阈值保守，行为受控；与 auto_match（默认关，会绑社会客体/牵涉 arbitration 名额）相比，
 // 本扫描只往世界总线记一条关系交互、不抢稀缺资源，风险低，故默认开以让世界「活」起来。
 func autoSocialEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_AUTO_SOCIAL"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_SOCIAL"))) {
 	case "false", "0", "no", "off":
 		return false
 	default:

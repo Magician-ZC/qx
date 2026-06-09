@@ -23,13 +23,13 @@ import (
 	"database/sql"
 	"hash/fnv"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 )
@@ -65,7 +65,7 @@ const (
 
 // autoMatchEnabled 读 QUNXIANG_AUTO_MATCH（true/1/yes/on 视为开），默认关 → scanAndMatch 整方法 no-op、零行为变化、零 DB 写。
 func autoMatchEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_AUTO_MATCH"))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_MATCH"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

@@ -33,7 +33,7 @@ func TestSetUnitCharter_LazyInitAndRoundTrip(t *testing.T) {
 		Redlines: []CharterRedline{
 			{ID: "rl_betray", Text: "绝不背叛血亲", Severity: "hard"},
 			{Text: "勿伤平民"}, // 缺 ID，应补稳定 ID
-			{Text: "   "},      // 空白原文，应被剔除
+			{Text: "   "},  // 空白原文，应被剔除
 		},
 	}
 	SetUnitCharter(state, "u1", in)

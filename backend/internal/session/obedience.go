@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
-	"os"
 	"strings"
 	"time"
 
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -523,7 +523,7 @@ const courageCurveFlagEnv = "QUNXIANG_COURAGE_CURVE"
 // courageCurveEnabled 读 QUNXIANG_COURAGE_CURVE（默认关）。开时离线时长才进抗命概率与广度门。
 // 自包含解析，对齐 ambition_scoring.go / auto_match.go 的 flag idiom。
 func courageCurveEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(courageCurveFlagEnv))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(courageCurveFlagEnv))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

@@ -121,10 +121,10 @@ func driftDelta(sessionID string, turn int, actorID string, reason PersonalityDr
 		return 0 // 当日该维额度已耗尽
 	}
 	salt := fmt.Sprintf("%s|%d|%s|%s|%s|drift", sessionID, turn, actorID, dim.Name, reason)
-	roll := driftRoll(salt)               // [0,1)
-	dirRoll := driftRoll(salt + "|dir")   // [0,1) 决定方向
-	magnitude := driftPerStepCap * roll   // (0, 0.03]
-	bias := clampUnit(dim.Bias(reason))   // [-1,1]
+	roll := driftRoll(salt)             // [0,1)
+	dirRoll := driftRoll(salt + "|dir") // [0,1) 决定方向
+	magnitude := driftPerStepCap * roll // (0, 0.03]
+	bias := clampUnit(dim.Bias(reason)) // [-1,1]
 	// bias 把方向阈值从 0.5 偏移：bias>0 时落在「上调」区间的概率更高。
 	threshold := 0.5 - bias*0.5
 	direction := 1.0

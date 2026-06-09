@@ -18,9 +18,9 @@ package session
 // 仅在显式置 flag 后才灰度启用。纯函数、确定性（只读 record.Ambition，不引随机/时间）、零副作用、零 LLM。
 
 import (
-	"os"
 	"strings"
 
+	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -32,7 +32,7 @@ const ambitionScoringFlagEnv = "QUNXIANG_AMBITION_SCORING"
 // 每次调用现读环境变量——本桥的调用频率（候选打分级）远低于热路径，且便于灰度期动态切换/测试覆盖；
 // 若未来上到极热路径可改为建局时一次性快照。
 func ambitionScoringEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(ambitionScoringFlagEnv))) {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(ambitionScoringFlagEnv))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

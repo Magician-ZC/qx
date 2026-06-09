@@ -558,3 +558,12 @@ CREATE TABLE IF NOT EXISTS gm_events_audit (
 
 -- relevance_anchors 反向索引（§1.5 锚密度计算）。
 CREATE INDEX idx_relevance_anchors_ref ON relevance_anchors(anchor_ref, anchor_kind);
+
+-- GM 后台运行时 flag 覆盖表（GM管理后台：运行时开关层持久化）。
+-- 把 GM 在运行时设的游戏 flag override 落库，使「不重启即可灰度开关」在进程重启后存活。
+CREATE TABLE IF NOT EXISTS feature_flag_overrides (
+  name VARCHAR(191) PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by VARCHAR(191) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
