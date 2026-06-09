@@ -246,6 +246,18 @@ func (service *Service) ResolveConsentRequest(ctx context.Context, reqID string,
 // 先逐条读出将超时的 pending 行做按档兜底（best-effort 旁路，单条失败只吞错），再批量置 expired——兜底与置 expired 解耦，
 // 即便某条兜底失败也仍会被置 expired（避免无限挂起）。返回置 expired 数（与原语义一致，调用方不感知兜底细节）。
 func (service *Service) ExpireStaleConsents(ctx context.Context, cutoff string) (int64, error) {
+	// 公开入口：无作用域（scopeSessionID=""）——层2 兜底自治接受不设 session 谓词（全局，保留原公开语义/ops 与现有用例）。
+	// 边界结算请走 expireStaleConsentsScoped(传 state.ID) 以遵守跨玩家硬不变量（只替本 session 所辖 target 接受）。
+	return service.expireStaleConsentsScoped(ctx, cutoff, "")
+}
+
+// expireStaleConsentsScoped 是 ExpireStaleConsents 的作用域版：把创建早于 cutoff 仍 pending 的请求按档兜底后批量置 expired。
+// scopeSessionID 非空时（边界结算路径）：层2 兜底**自治接受**（走 ResolveConsentRequest→直写发起方 B 一侧 relations）只对
+// **target 属本 session（units.session_id=scopeSessionID）** 的 pending 触发，绝不替别局离线 A 接受而越界写他人 session 的 B 侧
+// relations（跨玩家硬不变量，HIGH）。scopeSessionID 空时（公开/ops 路径）无 session 谓词，保留原全局语义。
+// ② 批量置 expired 保持全局（仅改本表 consent_requests.status，不写他人 units/relations/memory，不违反不变量），
+// 避免别局超 TTL 的 pending 永挂（无限堆积）。返回置 expired 数（与原语义一致）。
+func (service *Service) expireStaleConsentsScoped(ctx context.Context, cutoff, scopeSessionID string) (int64, error) {
 	if service == nil || service.db == nil {
 		return 0, fmt.Errorf("expire consents: missing db")
 	}
@@ -253,12 +265,12 @@ func (service *Service) ExpireStaleConsents(ctx context.Context, cutoff string) 
 	stale, err := service.listStalePendingConsents(ctx, cutoff)
 	if err == nil {
 		for _, req := range stale {
-			service.fallbackOnConsentTimeout(ctx, req)
+			service.fallbackOnConsentTimeout(ctx, req, scopeSessionID)
 		}
 	} else {
 		slog.Warn("list stale consents for timeout fallback failed (best-effort)", "err", err)
 	}
-	// ② 批量置 expired（剩余仍 pending 的——层2 已被兜底接受的此时不再 pending，自然不被覆盖）。
+	// ② 批量置 expired（剩余仍 pending 的——层2 已被兜底接受的此时不再 pending，自然不被覆盖）。全局：仅改本表 status。
 	res, err := service.db.ExecContext(ctx,
 		`UPDATE consent_requests SET status = 'expired', resolved_at = ? WHERE status = 'pending' AND created_at < ?`,
 		nowConsentTS(), cutoff)
@@ -288,11 +300,29 @@ func (service *Service) listStalePendingConsents(ctx context.Context, cutoff str
 	return out, rows.Err()
 }
 
+// targetInSession 判某 consent target 是否属指定 session（units.session_id=scopeSessionID）。供层2 兜底自治接受的作用域门用：
+// 只对本 session 所辖 target 跑兜底接受（绝不越界直写他人 session 的 B 侧 relations，HIGH）。best-effort：查不到/跨分片=不属本 session。
+func (service *Service) targetInSession(ctx context.Context, targetID, scopeSessionID string) bool {
+	if service == nil || service.db == nil || strings.TrimSpace(targetID) == "" || strings.TrimSpace(scopeSessionID) == "" {
+		return false
+	}
+	var n int
+	if err := service.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM units WHERE id = ? AND session_id = ?`, targetID, scopeSessionID).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 // fallbackOnConsentTimeout 对一条即将超时失效的 pending 同意请求按档兜底（§2.5 超时分支）。best-effort 旁路：单条失败只吞错。
 //   - 层3(REQUIRES_CONSENT)：A 长期不上线 → 自动失效 + 给**发起方 B** 投回响卡「她的命没等到回应」；consent_state→timeout。
-//   - 层2(CONTESTED)：按 A 的离线宪章兜底自治回应——归因成立则接受应用效果（ResolveConsentRequest），否则隐忍；
+//     回响卡走 B 自己的命运层（SurfaceFateEvent 落 B 本库的 append-only 事件，不写他人 relations），无作用域之虞、永远跑。
+//   - 层2(CONTESTED)：按 A 的离线宪章兜底**自治接受**——接受会经 ResolveConsentRequest→applyRelationShiftTx 直写发起方 B 一侧
+//     relations，故须作用域门（HIGH）：scopeSessionID 非空时，只对 **target 属本 session(units.session_id=scopeSessionID)** 的
+//     pending 跑兜底接受；不属本 session（别局/跨分片）→ 隐忍（留待该 target 自己的 session 边界结算/超时），绝不越界写他人 B 侧关系。
+//     scopeSessionID 空（公开/ops 路径）= 无 session 谓词，保留原全局兜底语义。归因成立则接受应用效果，否则隐忍；
 //     接受=consent_state accepted，隐忍=declined（仍由 ② 批量置 expired）。
-func (service *Service) fallbackOnConsentTimeout(ctx context.Context, req ConsentRequest) {
+func (service *Service) fallbackOnConsentTimeout(ctx context.Context, req ConsentRequest, scopeSessionID string) {
 	if service == nil {
 		return
 	}
@@ -301,6 +331,11 @@ func (service *Service) fallbackOnConsentTimeout(ctx context.Context, req Consen
 		service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateTimeout)
 		service.surfaceConsentTimeoutEchoToInitiator(ctx, req)
 	case relevance.Contested:
+		// 作用域门（HIGH）：有作用域且 target 不属本 session（别局/跨分片）→ 不替它兜底接受（绝不越界写他人 B 侧 relations），
+		// 留 pending 待其本库 session 结算（仍会被 ② 全局置 expired 清理，不会永挂）。scopeSessionID 空保留原全局语义。
+		if strings.TrimSpace(scopeSessionID) != "" && !service.targetInSession(ctx, req.TargetID, scopeSessionID) {
+			return
+		}
 		// 层2 兜底自治回应：A 不在本库或归因不成立 → 隐忍（留待 ② 置 expired）。
 		if service.units == nil {
 			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
@@ -546,25 +581,37 @@ func (service *Service) settleConsentsAtBoundary(ctx context.Context, state *Sta
 		return
 	}
 	// ① 超时兜底（必须）：以回合边界时刻为「现在」清掉超 TTL 的 pending（内含层3 回响卡 / 层2 宪章兜底）。
-	if _, err := service.expireStaleConsents(ctx, nowConsentTS()); err != nil {
+	//    传本 session 作用域 state.ID——层2 兜底自治接受（走 ResolveConsentRequest→直写发起方 B 一侧 relations）只对
+	//    **本 session 所辖 target** 触发，绝不替别局离线 A 接受而越界写他人 session 的 B 侧关系（跨玩家硬不变量，HIGH）。
+	//    expire 清理本身（不写他人 relations）保持全局，避免别局 pending 永挂。
+	if _, err := service.expireStaleConsentsScoped(ctx, nowConsentTS(), state.ID); err != nil {
 		appendLog(state, "consent", fmt.Sprintf("同意请求超时兜底失败（best-effort，已跳过）：%v", err), "", "")
 	}
-	// ② 自治回应（§2.5 升级）：遍历当前仍有 pending 的目标 A（不限有无宪章），逐个过归因管线自治回应——
+	// ② 自治回应（§2.5 升级）：遍历**本 session 所辖**且仍有 pending 的目标 A（不限有无宪章），逐个过归因管线自治回应——
 	//    归因成立（对 B 显著关系/现实压力）→ 接受应用本侧效果；无源 → 保守隐忍（留待人工/超时）。
-	for _, targetID := range service.listPendingConsentTargets(ctx) {
+	//    作用域门（listPendingConsentTargets JOIN units.session_id=state.ID）确保：别局 session 推进边界绝不替本局离线 A
+	//    自治接受、绝不越界直写 B 侧 relations（与 surfaceCrossEventsAtBoundary 的 WorldID 空早返 + 本阵营过滤同源对齐）。
+	for _, targetID := range service.listPendingConsentTargets(ctx, state.ID) {
 		if _, err := service.autoResolveConsentsByCharter(ctx, state, targetID); err != nil {
 			appendLog(state, "consent", fmt.Sprintf("单位 %s 自治回应结算失败（best-effort，已跳过）：%v", targetID, err), "", "")
 		}
 	}
 }
 
-// listPendingConsentTargets 列出当前仍有 pending 同意请求的去重目标单位（A 方）。best-effort：出错返回空切片（不阻断边界结算）。
-func (service *Service) listPendingConsentTargets(ctx context.Context) []string {
-	if service == nil || service.db == nil {
+// listPendingConsentTargets 列出**本 session(scopeSessionID) 所辖**且仍有 pending 同意请求的去重目标单位（A 方）。
+// 作用域门（跨玩家硬不变量，HIGH）：JOIN units 限 units.session_id=scopeSessionID——只让本 session 边界结算替**自己所辖**的
+// 离线 A 自治回应（接受走 ResolveConsentRequest→直写发起方 B 一侧 relations），绝不替别局 A 越界写他人 session 的 B 侧关系。
+// scopeSessionID 空 → 返回空切片（无作用域=不替任何人自治回应，保守，与 surfaceCrossEventsAtBoundary 的 WorldID 空早返同源）。
+// target 跨分片（不在本库 units 行）自然被 JOIN 排除（其本库 session 才是合法结算方）。best-effort：出错返回空切片（不阻断边界结算）。
+func (service *Service) listPendingConsentTargets(ctx context.Context, scopeSessionID string) []string {
+	if service == nil || service.db == nil || strings.TrimSpace(scopeSessionID) == "" {
 		return nil
 	}
 	rows, err := service.db.QueryContext(ctx,
-		`SELECT DISTINCT target_unit_id FROM consent_requests WHERE status = 'pending'`)
+		`SELECT DISTINCT cr.target_unit_id
+		   FROM consent_requests cr
+		   JOIN units u ON u.id = cr.target_unit_id
+		  WHERE cr.status = 'pending' AND u.session_id = ?`, scopeSessionID)
 	if err != nil {
 		return nil
 	}

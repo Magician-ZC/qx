@@ -623,14 +623,39 @@ func domainBreadthCaution(domain autonomyDomain, offlineHours float64) float64 {
 //	modifier = offlineCaution(offlineHours) · domainBreadthCaution(domain, offlineHours)
 //
 // 离线越久 → offlineCaution 单调升 → 对高风险动作越谨慎；领域未解锁/高代价 → 广度项额外加谨慎。
-// 确定性：offlineHours 由 state 墙钟时间确定性派生（offlineHoursFromState），无随机。
+//
+// 确定性修复（LOW②）：原先用 time.Now() 经 offlineHoursFromState 算离线时长，墙钟会随真实时间漂移，
+// 致同 (sessionID,turn,actor) 重放发散（破坏确定性不变量）。改用**确定性回合差**派生离线时长——
+// 离线时长 = (当前回合 - 离线起始回合) × 每回合等效小时（offlineHoursFromTurns）。脱墙钟、纯回合函数，
+// 故同 (sessionID,turn,actor) 重放逐位复现（time 仅在墙钟超时处用，决策概率链零墙钟）。
 func offlineCourageRejectModifier(state State, decision unitDecisionPayload) float64 {
 	if !courageCurveEnabled() {
 		return 1.0
 	}
-	offlineHours := offlineHoursFromState(state, time.Now())
+	offlineHours := offlineHoursFromTurns(state)
 	domain := decisionAutonomyDomain(decision.Action)
 	return offlineCaution(offlineHours) * domainBreadthCaution(domain, offlineHours)
+}
+
+// offlineTurnEquivHours 是「一个部署回合 ≈ 多少小时离线/托管时长」的确定性换算常量。
+// 取 6.0：使 1 回合≈刚好触发经营领域解锁门（autonomyCivicUnlockHours=6），4 回合≈触发高代价门（24），
+// 让回合差喂进的曲线分档与小时曲线（§5.2）的语义对齐——既「越久越谨慎」单调，又脱墙钟、可确定性重放。
+const offlineTurnEquivHours = 6.0
+
+// offlineHoursFromTurns 从会话状态**确定性**派生「离线已持续多少（等效）小时」——脱墙钟、纯回合函数。
+//
+// 离线起始回合锚（§5.2「用离线起始 turn 推算」）：State 由 types.go 别处定义、本文件不可加字段，
+// 故不存独立的 offlineStartTurn，而用 state 现有可得的确定性回合信息推算——以本局起始回合（turn=1，
+// turns.NewState 钦定）为离线锚起点，回合差 = max(0, 当前回合 - 1)，再 × offlineTurnEquivHours 等效成小时。
+// 语义：玩家不在场时每过一个部署回合即累积一段自治时长（越久越保守），与墙钟离线同向且严格单调。
+//
+// 确定性：仅依赖 state.TurnState.Turn（同 (sessionID,turn,actor) 重放该回合恒定）→ 逐位复现，无随机、无 time.Now。
+func offlineHoursFromTurns(state State) float64 {
+	turnsElapsed := state.TurnState.Turn - 1 // 起始回合(1)为锚：第 1 回合视作 0 离线（在线），其后逐回合累积。
+	if turnsElapsed <= 0 {
+		return 0
+	}
+	return float64(turnsElapsed) * offlineTurnEquivHours
 }
 
 // ambitionComplianceRejectModifier 把野心契合度接进服从（③）：指令目标动作越契合该单位的野心，越乐意执行 → 抗命概率乘数 <1.0。
@@ -653,13 +678,15 @@ func ambitionComplianceRejectModifier(actor *unit.Record, decision unitDecisionP
 	return 1.0 / weight // 契合：按比例降低抗命概率（仅降不升）。
 }
 
-// offlineHoursFromState 从会话状态确定性派生「离线已持续多少小时」。
+// offlineHoursFromState 从会话状态的**墙钟**锚（UpdatedAt vs 传入 now）派生离线小时数。
 //
-// 离线时长来源（§5.2「用 state/单位的 last_active 或离线起始 turn 推算」）：用 State.UpdatedAt
-// 作为「最近一次该局被结算/保存」的墙钟锚点，与传入的 now 做差（time 仅用于墙钟比较，符合不变量）。
-// UpdatedAt 为零值（旧存档/未落库）→ 返回 0（按在线处理，无离线惩罚，失败安全）。负差（时钟回拨）→ 0。
+// 【已不在决策概率链上】LOW② 确定性修复后，胆量曲线改由 offlineHoursFromTurns（纯回合差）喂数，
+// 本函数不再被 offlineCourageRejectModifier 调用——保留它仅为：①暴露「墙钟离线时长」这一可读量给
+// 非决策路径（如运维/调试展示，墙钟漂移在这些场景无害）；②文档化「为何不能把墙钟喂进决策」。
+// **切勿**把本函数接回任何影响 directiveRejectProbability / 决策落地的链路，否则重新引入墙钟发散。
 //
-// 注入 now 而非内部直接 time.Now()，是为了让上层/测试可注入固定墙钟，curve 全链路可确定性复现。
+// 注入 now 而非内部直接 time.Now()，是为了让调用方/测试可注入固定墙钟、可复现。
+// UpdatedAt 为零值（旧存档/未落库）→ 0；负差（时钟回拨）→ 0（失败安全）。
 func offlineHoursFromState(state State, now time.Time) float64 {
 	if state.UpdatedAt.IsZero() {
 		return 0

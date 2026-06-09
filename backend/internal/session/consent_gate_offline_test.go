@@ -278,6 +278,147 @@ func TestSettleConsentsAtBoundary_AutonomousReachesNoCharterUnit(t *testing.T) {
 	}
 }
 
+// cgSeedUnitInSession 落一个属指定 session 的单位（作用域门 JOIN 的是 units.session_id；consent_request 自带 world_id，
+// 不依赖 unit.world_id 列，故此处只设 session_id）。与 cgSeedWorldAndUnit 不同：sessionID 可与 worldID 不同——
+// 专为「同一 world 下分属不同 session 的单位」作用域测试（验证边界结算只替本 session 所辖 target 回应）。
+func cgSeedUnitInSession(t *testing.T, ctx context.Context, repo *unit.Repository, sessionID, id string) {
+	t.Helper()
+	rec := unit.BootstrapRecord(1, sessionID, "player", id)
+	rec.ID = id
+	if err := repo.Save(ctx, rec); err != nil {
+		t.Fatalf("save unit %s in session %s: %v", id, sessionID, err)
+	}
+}
+
+// TestSettleConsentsAtBoundary_DoesNotWriteOtherSessionRelations 是本次 HIGH 修复的核心回归（跨玩家硬不变量）：
+// 两局共享同一 world，离线 A(a1)/发起方 B(b1) 都属 session-1；A 对 B 有显著关系（若被处理必接受）。
+// session-2 推进部署边界（settleConsentsAtBoundary，State{ID:"s2"}）——它既不辖 A 也不辖 B——**绝不得**替 session-1 的
+// 离线 A 自治接受、绝不得直写发起方 B 一侧 (b1→a1) relations。仿 blood_feud_test 的「绝不直写他人一侧」断言。
+//
+// 修复前：listPendingConsentTargets 全库扫 pending（无 session/world 谓词），session-2 边界会捞到 a1 的 pending、
+// 经 autoResolveConsentsByCharter→ResolveConsentRequest(true)→applyRelationShiftTx 直写 source=b1 的 relations，越界污染 session-1。
+func TestSettleConsentsAtBoundary_DoesNotWriteOtherSessionRelations(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	if _, err := world.Create(ctx, service.db, world.World{ID: "w1", Name: "共享世界"}); err != nil {
+		_ = err // 复用容忍重复建
+	}
+	// A(a1) 与 B(b1) 都属 session-1（同一 world w1）。
+	cgSeedUnitInSession(t, ctx, repo, "s1", "a1")
+	cgSeedUnitInSession(t, ctx, repo, "s1", "b1")
+	// session-2 有自己的无关单位 x2（属 s2），但不辖 a1/b1。
+	cgSeedUnitInSession(t, ctx, repo, "s2", "x2")
+	// a1（离线 A）对 b1（B）有强敌视（rivalry 归一 0.7 ≥ 0.3）→ 若被处理则归因成立、必自治接受。
+	cgSeedRelationRow(t, service, "a1", "b1", 0, 0, 0, 7)
+
+	// B(b1) 对 A(a1) 发起联姻（层3 requires_consent）→ 建一条 target=a1 的 pending。
+	res, err := service.RecordSevenInteraction(ctx, "w1", "b1", "a1", InteractionMarriage, 8)
+	if err != nil || res.ConsentRequestID == "" {
+		t.Fatalf("联姻应建 pending，得 %+v err=%v", res, err)
+	}
+
+	// ★ 关键：session-2 推进边界——既不辖 a1 也不辖 b1，绝不得替 session-1 接受/写关系。
+	service.settleConsentsAtBoundary(ctx, &State{ID: "s2"})
+
+	// ① 发起方 B 一侧 (b1→a1) relations 绝不被 session-2 边界写入（跨玩家硬不变量）。
+	var n int
+	if err := service.db.QueryRow(
+		`SELECT COUNT(*) FROM relations WHERE source_unit_id='b1' AND target_unit_id='a1'`).Scan(&n); err != nil {
+		t.Fatalf("查 b1→a1 关系失败: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("session-2 边界绝不得直写发起方 B 一侧 (b1→a1) relations（跨玩家硬不变量），却发现 %d 行", n)
+	}
+	// ② consent_request 仍 pending（未被越界 resolve）。
+	if pend, _ := service.ListPendingConsents(ctx, "a1"); len(pend) != 1 {
+		t.Fatalf("session-2 不辖 a1，pending 应原封不动留 1 条，得 %d 条", len(pend))
+	}
+
+	// ③ 正向对照：a1 的合法 owner session-1 推进边界 → 才会自治接受并写本侧 (b1→a1) 关系。
+	service.settleConsentsAtBoundary(ctx, &State{ID: "s1"})
+	if pend, _ := service.ListPendingConsents(ctx, "a1"); len(pend) != 0 {
+		t.Fatalf("session-1（a1 的 owner）边界应自治接受、清空 pending，得 %d 条", len(pend))
+	}
+	if aff := relAxis(t, service, "affection", "b1", "a1"); aff != 5 {
+		t.Fatalf("owner session-1 自治接受后应写本侧联姻 affection 增量 5，得 %v", aff)
+	}
+}
+
+// TestListPendingConsentTargets_SessionScoped 断言作用域门：listPendingConsentTargets 只返回 target 属指定 session 的 pending；
+// 空 scopeSessionID 一律返回空（无作用域=不替任何人结算，保守）。
+func TestListPendingConsentTargets_SessionScoped(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	if _, err := world.Create(ctx, service.db, world.World{ID: "w1", Name: "共享世界"}); err != nil {
+		_ = err
+	}
+	cgSeedUnitInSession(t, ctx, repo, "s1", "a1") // target 属 s1
+	cgSeedUnitInSession(t, ctx, repo, "s1", "b1")
+	cgSeedUnitInSession(t, ctx, repo, "s2", "a2") // target 属 s2
+	cgSeedUnitInSession(t, ctx, repo, "s2", "b2")
+
+	if _, err := service.RecordSevenInteraction(ctx, "w1", "b1", "a1", InteractionMarriage, 8); err != nil {
+		t.Fatalf("s1 联姻: %v", err)
+	}
+	if _, err := service.RecordSevenInteraction(ctx, "w1", "b2", "a2", InteractionMarriage, 8); err != nil {
+		t.Fatalf("s2 联姻: %v", err)
+	}
+
+	// s1 作用域只见 a1（不见别局 a2）。
+	s1Targets := service.listPendingConsentTargets(ctx, "s1")
+	if len(s1Targets) != 1 || s1Targets[0] != "a1" {
+		t.Fatalf("s1 作用域应只见自辖 target a1，得 %v", s1Targets)
+	}
+	// s2 作用域只见 a2。
+	s2Targets := service.listPendingConsentTargets(ctx, "s2")
+	if len(s2Targets) != 1 || s2Targets[0] != "a2" {
+		t.Fatalf("s2 作用域应只见自辖 target a2，得 %v", s2Targets)
+	}
+	// 空作用域 → 空（保守不替任何人结算）。
+	if got := service.listPendingConsentTargets(ctx, ""); len(got) != 0 {
+		t.Fatalf("空 scopeSessionID 应返回空切片（无作用域不结算），得 %v", got)
+	}
+}
+
+// TestExpireStaleConsents_ContestedScopedFallbackIsolation 断言层2 超时兜底的作用域隔离（HIGH 第二触发路径）：
+// 经 expireStaleConsentsScoped 传 session-2 作用域跑超时兜底，绝不替 session-1 所辖 A 走层2 自治接受而越界写 B 侧关系；
+// 但仍全局把超 TTL 的 pending 置 expired（清理不写他人 relations，可保持全局）。owner session-1 作用域兜底才接受应用效果。
+func TestExpireStaleConsents_ContestedScopedFallbackIsolation(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	if _, err := world.Create(ctx, service.db, world.World{ID: "w1", Name: "共享世界"}); err != nil {
+		_ = err
+	}
+	cgSeedUnitInSession(t, ctx, repo, "s1", "a1")
+	cgSeedUnitInSession(t, ctx, repo, "s1", "b1")
+	cgSeedUnitInSession(t, ctx, repo, "s2", "x2")
+	// a1 对 b1 有强敌视 → 层2 兜底若被处理则有源接受。
+	cgSeedRelationRow(t, service, "a1", "b1", 0, 0, 0, 7)
+
+	// 反目 = 层2 contested，b1→a1（target=a1 属 s1）。
+	res, err := service.RecordSevenInteraction(ctx, "w1", "b1", "a1", InteractionFallout, 7)
+	if err != nil || res.ConsentRequestID == "" {
+		t.Fatalf("反目应建 pending，得 %+v err=%v", res, err)
+	}
+
+	// ★ session-2 作用域跑超时兜底：不得替 s1 的 a1 走层2 自治接受、不得写 b1→a1 关系。
+	if _, err := service.expireStaleConsentsScoped(ctx, "9999-12-31 00:00:00", "s2"); err != nil {
+		t.Fatalf("expire(s2 scope): %v", err)
+	}
+	var n int
+	if err := service.db.QueryRow(
+		`SELECT COUNT(*) FROM relations WHERE source_unit_id='b1' AND target_unit_id='a1'`).Scan(&n); err != nil {
+		t.Fatalf("查 b1→a1 关系失败: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("session-2 作用域层2 兜底绝不得越界写 (b1→a1) relations，却发现 %d 行", n)
+	}
+	// 但全局 expire 仍把超 TTL 的 pending 清成 expired（不写他人 relations，可保持全局——避免别局 pending 永挂）。
+	if pend, _ := service.ListPendingConsents(ctx, "a1"); len(pend) != 0 {
+		t.Fatalf("超 TTL 的 pending 应被全局置 expired，得 %d 条仍 pending", len(pend))
+	}
+}
+
 // TestConsentResponseAttribution_Pure 断言归因合成纯函数：显著关系→relation 前因；无关系有压力→pressure 前因；
 // 皆无→无源（false）。这是 ③ 自治回应「过归因」的核心，纯逻辑可测。
 func TestConsentResponseAttribution_Pure(t *testing.T) {

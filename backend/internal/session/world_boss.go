@@ -92,35 +92,44 @@ func (service *Service) SpawnWorldBoss(ctx context.Context, worldID string, name
 }
 
 // StrikeWorldBoss 对一头世界Boss出手一次：原子扣血 + 把伤害记进世界总线（贡献账本）；
-// 若这一击清零血池，则由抢到结算闩锁的请求读账本全员分赃并广播。
+// 若这一击清零血池，则由抢到结算闩锁的请求读账本全员分赃并广播。这是唯一的 HTTP 出手入口（不传 party）。
 //
-// 这是**协作出手**入口：世界Boss 是共享血池的异步协作机制，不同玩家的角色在不同时间各自出手共同消耗血池——
-// 这本身就是「组队/协力」语义，故协作出手不受单人物理锁约束（共享血池的每一击都是这场群体围猎的一份子）。
-// 「单人独自撼动世界Boss」的物理锁见 StrikeWorldBossParty（显式声明参战 party，party 单人且 severity>cap → 锁）。
+// 世界Boss 是共享血池的异步协作机制，不同玩家的角色在不同时间各自出手共同消耗血池。是否真有协作，**以账本的
+// distinct-actor 集合为事实来源**（≥2 名不同出手者 = 已成群体围猎、解锁），而非凭「是否显式传 party」。
+// 故协作入口（party=nil）仍会评估单人物理锁：存亡级 Boss 的**首位单人出手者**会被锁（不开打、返回高光卡），
+// 待账本沉淀 ≥1 名别的出手者后单人迟到者即解锁。这堵住了「单人反复 POST /strike 凿穿世界Boss」的缺口（finding antip2w）。
+// 「单人独自撼动世界Boss」的物理锁逻辑由 StrikeWorldBossParty 统一承载（含 nil/协作入口）。
 func (service *Service) StrikeWorldBoss(ctx context.Context, worldID string, bossID string, attacker *unit.Record) (WorldBossStrikeResult, error) {
 	if attacker == nil {
 		return WorldBossStrikeResult{}, fmt.Errorf("strike world boss: missing dependencies")
 	}
-	// 协作入口：把本击并入共享血池的群体围猎——party 取「账本既有不同出手者 ∪ 本人」，恒视作协作（不触发单人锁）。
+	// 协作入口：party=nil；StrikeWorldBossParty 以账本 distinct-actor 集合判是否真有协作（≥2 不同出手者才解锁单人锁）。
 	return service.StrikeWorldBossParty(ctx, worldID, bossID, attacker, nil)
 }
 
-// StrikeWorldBossParty 是带**显式 party 声明**的世界Boss出手入口（设计 §7 单人物理锁）。
+// StrikeWorldBossParty 是世界Boss出手入口（设计 §7 单人物理锁），承载 nil（协作）与显式 party 两种调用。
 // partyUnitIDs 是本次参战队伍的全部成员（含 attacker）；为空/仅含 attacker 即「单人独闯」。
-//   - ① 单人物理锁：world_boss 的 severity 恒 >soloCap（存亡级威胁），若声明的 party 实为单人——物理上撼不动它，
-//     **根本不让 strike**（不扣血、不记账本），返回「这不是一个人能撼动的」高光卡。组队（≥2 不同成员）才解锁。
+//   - ① 单人物理锁：world_boss 的 severity 恒 >soloCap（存亡级威胁）。**是否真有协作以账本 distinct-actor 集合为事实来源**：
+//     显式声明 ≥2 成员的组队（isSoloParty=false）直接放行；否则（显式单人 **或** party=nil 协作入口）评估 worldBossSoloLocked——
+//     账本里本次 attacker 之外已有 ≥1 名别的出手者（≥2 distinct）= 已成群体围猎、解锁；否则（首位/唯一出手者=真·单人）
+//     **根本不让 strike**（不扣血、不记账本），返回「这不是一个人能撼动的」高光卡。
 //   - 解锁后落入与共享血池协作完全一致的原子扣血 + 记账本 + 闩锁结算链路。
 //
-// 确定性、付费不进：是否锁只看 hp_max（战力派生 severity）+ party 成员数，绝不含 wallet/billing/出手频率。
+// 确定性、付费不进：是否锁只看 hp_max（战力派生 severity）+ party 成员数 + 账本 distinct-actor 集合，绝不含 wallet/billing/出手频率。
 func (service *Service) StrikeWorldBossParty(ctx context.Context, worldID string, bossID string, attacker *unit.Record, partyUnitIDs []string) (WorldBossStrikeResult, error) {
 	if service == nil || service.db == nil || attacker == nil {
 		return WorldBossStrikeResult{}, fmt.Errorf("strike world boss: missing dependencies")
 	}
 	result := WorldBossStrikeResult{BossID: bossID, AttackerID: attacker.ID}
 
-	// ① 单人物理锁（设计 §7）：仅当**显式声明了 party 且其为单人**时才判锁；party 为空表示「协作共享血池出手」（不锁）。
-	// 组队（party 含 ≥2 不同成员，或账本里已沉淀别的出手者）才解锁。world_boss severity 恒 >cap，故单人必锁。
-	if soloParty := isSoloParty(attacker.ID, partyUnitIDs); soloParty {
+	// ① 单人物理锁（设计 §7）：是否真有协作以**账本 distinct-actor 集合**为事实来源，不依赖显式 party 声明。
+	// 旧实现仅在「显式声明了单人 party」时判锁——但唯一 HTTP 出手入口 StrikeWorldBoss 恒传 nil party，
+	// 致 isSoloParty(id,nil)=false 短路、整套单人锁生产不可达，单人反复 POST /strike 可凿穿存亡级 Boss（finding antip2w）。
+	// 修：显式声明单人 party **或** 未声明（nil/协作入口）时一律评估 worldBossSoloLocked——它内部数账本里
+	// **不同**出手者：本次 attacker 之外**已有 ≥1 名**别的出手者（≥2 distinct）→ 已成协作围猎、解锁；否则（本次是
+	// 唯一/首位出手者=真·单人）→ 物理锁、不开打。显式声明含 ≥2 成员的组队仍由 isSoloParty=false 直接放行（已有协作意图）。
+	// 确定性、付费不进：判定只看 hp_max（战力派生 severity）+ 账本 distinct-actor 集合，绝不含 wallet/billing/出手频率。
+	if isSoloParty(attacker.ID, partyUnitIDs) || len(partyUnitIDs) == 0 {
 		locked, hpNow, bossName, err := service.worldBossSoloLocked(ctx, worldID, bossID, attacker.ID)
 		if err != nil {
 			return result, err
@@ -128,6 +137,9 @@ func (service *Service) StrikeWorldBossParty(ctx context.Context, worldID string
 		if locked {
 			result.SoloLocked = true
 			result.HPRemaining = hpNow
+			// 记一条单人撞门 attempt（append-only、不扣血、不进贡献账本）：让第二名**不同** actor 撞门时能看到前者→双方解锁自举。
+			// best-effort：留痕失败只吞错（绝不让「记 attempt」失败改变「被锁、不打」这个确定性结果）。
+			service.recordWorldBossSoloAttempt(ctx, worldID, bossID, attacker.ID)
 			result.SoloCard = service.surfaceWorldBossSoloLock(ctx, worldID, attacker, bossID, bossName)
 			return result, nil
 		}
@@ -260,6 +272,13 @@ func isSoloParty(attackerID string, partyUnitIDs []string) bool {
 // 与 encounter.SoloAllowed 的 soloCap 同义；定为 60——elite(40)/dungeon 可单人，world_boss 的 severity 恒在其上。
 const worldBossSeverityCap = 60.0
 
+// worldBossSoloAttemptKind 是「单人撞门被锁」的世界总线留痕类型（append-only、owner=出手者、不进贡献账本/不扣血）。
+// 作用：让协作能从「各自单人撞门」自举——首位单人被锁时记一条 attempt，第二名**不同** actor 撞门即在账本里看到前者
+// （≥2 distinct）→ 视作群体围猎、解锁，双方随后真打。单个玩家反复撞门只会累积同一 actor 的 attempt（distinct 仍 1）→
+// 恒锁、永不扣血（堵住「单人反复 POST /strike 凿穿世界Boss」的反 P2W 缺口）。它**不是** KindWorldBossStrike，
+// 故 settleWorldBoss 只按 strike 读账本时绝不会把「只撞门没真打」的人算进分赃。
+const worldBossSoloAttemptKind worldbus.EventKind = "WORLD_BOSS_SOLO_ATTEMPT"
+
 // worldBossSeverity 把世界Boss的血上限（hp_max，来自战力派生、非付费）映射为确定性 severity（设计 §1 四档表：
 // world_boss 是「存亡级威胁」）。world_boss 的 severity **恒 > worldBossSeverityCap**——任何被当作 world_boss 投放的目标
 // 都视为单人物理不解锁。血量越高 severity 越高（在 [cap+10, 100) 单调），但下限钉死在 cap+10，确保单人门恒触发。
@@ -280,8 +299,10 @@ func worldBossSeverity(hpMax int) float64 {
 // worldBossSoloLocked 判定一次出手是否应被单人物理锁挡下（设计 §7）。返回 (是否锁住, Boss 当前血, Boss 名)。
 //   - 读 Boss 的 hp_max/hp_remaining/name/status（确定性、不含付费）；非 active 不在此判（交由 strikeTx 报 ErrWorldBossInactive）。
 //   - severity = worldBossSeverity(hp_max)；若 encounter.SoloAllowed(severity, cap) 为真（低威胁可 solo）→ 不锁。
-//   - 否则数贡献账本里**不同**的既往出手者：本次 attacker 之外**已有 ≥1 名**别的出手者 → 视作组队，解锁；
-//     否则（本次出手者是唯一/首位 → 单人）→ 锁住，返回「这不是一个人能撼动的」高光卡。
+//   - 否则数账本里**不同**的既往参与者（真出手 KindWorldBossStrike **或** 撞门 attempt KindWorldBossSoloAttempt）：
+//     本次 attacker 之外**已有 ≥1 名**别的不同 actor → 视作群体围猎，解锁；否则（本次出手者是唯一/首位 → 真·单人）→ 锁住。
+//     算上 attempt 是为让协作能从「各自单人撞门」自举：首位被锁记 attempt，第二名不同 actor 撞门即见前者→双方解锁真打；
+//     单个玩家反复撞门只累积同一 actor 的 attempt（distinct 仍 1）→ 恒锁、永不扣血（反 P2W）。
 //
 // 反 P2W / 确定性：判定只用 hp_max（战力派生）+ 账本里的不同 actor 集合，绝不含 wallet/billing/出手频率。
 // best-effort 读：DB 故障按「不锁」放行（绝不因读失败把本可出手的玩家挡在门外——锁是保护、非门禁），由 strikeTx 兜底校验 active。
@@ -303,29 +324,46 @@ func (service *Service) worldBossSoloLocked(ctx context.Context, worldID, bossID
 		return false, hpRemaining, bossName, nil // 低威胁档：单人可挑战，不锁
 	}
 
-	// 数账本里**不同**的既往出手者（本次 attacker 之外有别人 → 组队 → 解锁）。
-	busEvents, err := worldbus.ListByWorldKind(ctx, service.db, worldID, worldbus.KindWorldBossStrike)
-	if err != nil {
-		// best-effort：读账本失败时不锁（锁是保护非门禁，宁可放行也不误挡），strikeTx 仍会原子兜底。
-		return false, hpRemaining, bossName, nil
-	}
+	// 数账本里**不同**的既往参与者（真出手 + 撞门 attempt 都算），本次 attacker 之外有别人 → 群体围猎 → 解锁。
 	others := map[string]bool{}
-	for _, ev := range busEvents {
-		var p struct {
-			BossID string `json:"boss_id"`
+	for _, kind := range []worldbus.EventKind{worldbus.KindWorldBossStrike, worldBossSoloAttemptKind} {
+		busEvents, err := worldbus.ListByWorldKind(ctx, service.db, worldID, kind)
+		if err != nil {
+			// best-effort：读账本失败时不锁（锁是保护非门禁，宁可放行也不误挡），strikeTx 仍会原子兜底。
+			return false, hpRemaining, bossName, nil
 		}
-		if raw, ok := ev.Payload.(json.RawMessage); ok {
-			_ = json.Unmarshal(raw, &p)
+		for _, ev := range busEvents {
+			var p struct {
+				BossID string `json:"boss_id"`
+			}
+			if raw, ok := ev.Payload.(json.RawMessage); ok {
+				_ = json.Unmarshal(raw, &p)
+			}
+			if p.BossID != bossID || ev.ActorID == "" || ev.ActorID == attackerID {
+				continue
+			}
+			others[ev.ActorID] = true
 		}
-		if p.BossID != bossID || ev.ActorID == "" || ev.ActorID == attackerID {
-			continue
-		}
-		others[ev.ActorID] = true
 	}
 	if len(others) >= 1 {
-		return false, hpRemaining, bossName, nil // 已有别的角色出手过 → 组队协力，解锁
+		return false, hpRemaining, bossName, nil // 已有别的角色出手/撞门过 → 群体围猎，解锁
 	}
-	return true, hpRemaining, bossName, nil // 唯一/首位出手者 = 单人 → 物理锁
+	return true, hpRemaining, bossName, nil // 唯一/首位参与者 = 单人 → 物理锁
+}
+
+// recordWorldBossSoloAttempt 把一次「单人撞门被锁」追加进世界总线（append-only、actor=出手者、kind=SOLO_ATTEMPT）。
+// 它不扣血、不进贡献账本（settleWorldBoss 只读 KindWorldBossStrike），仅供 worldBossSoloLocked 的 distinct-actor 自举判定。
+// best-effort：留痕失败只 log，绝不改变「被锁、不打」的确定性结果，也绝不外抛中断。
+// payload 记 boss_id（与 strike 同口径，供 worldBossSoloLocked 按 boss 过滤）+ 标记，确定性、不含 wallet/billing/频率。
+func (service *Service) recordWorldBossSoloAttempt(ctx context.Context, worldID, bossID, attackerID string) {
+	if service == nil || service.db == nil || worldID == "" || attackerID == "" {
+		return
+	}
+	if _, err := service.RecordCrossInteraction(ctx, worldID, attackerID, bossID,
+		worldBossSoloAttemptKind, 2,
+		map[string]any{"boss_id": bossID, "solo_locked": true}); err != nil {
+		slog.Warn("record world boss solo attempt failed (best-effort)", "world", worldID, "boss", bossID, "actor", attackerID, "err", err)
+	}
 }
 
 // surfaceWorldBossSoloLock 在单人物理锁触发时，把「这不是一个人能撼动的」祖魂语气高光卡路由进发起者命运收件箱。

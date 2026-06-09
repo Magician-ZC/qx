@@ -646,6 +646,18 @@ func (service *Service) PropagateCrossBetrayal(
 		return 0
 	}
 
+	// LOW① 当日冷却（防回声室洪泛）：同 (betrayer,victim,CROSS_BETRAYAL) 每自然日 ≤1 次全量传播。
+	// 缺这道闸时，自治反目（social_scan）对同一对每约 18 turn 触发一次（pairCycleSlot），每次都全量铺开
+	// 受害者卡 + 衍生第三方 + echo + 同盟绑定 → 同一桩反目被反复放大。复用 worldize_inbound.go 的
+	// inboundCooldownActive 范式：按 (actor=betrayer, target=victim, code=CROSS_BETRAYAL) + UTC 日窗查 events 去重。
+	// 冷却内 return 0、不重复传播（与 flag 关同样零行为）。冷却是软抑制：查错保守放行（见 crossBetrayalCooldownActive）。
+	if service.crossBetrayalCooldownActive(ctx, betrayerID, victim.ID) {
+		return 0
+	}
+	// 先写冷却锚（best-effort），使本日后续同 (betrayer,victim,CROSS_BETRAYAL) 传播被上面这道闸挡下。
+	// 写在实际传播之前：即便后续子步部分失败，当日也不再重复全量铺开（去重优先于完整度，反洪泛硬要求）。
+	service.markCrossBetrayalCooldown(ctx, sessionID, betrayerID, victim.ID)
+
 	// ③ 黑吃黑受害者回应卡（追讨/认栽记仇/求和）+ 受害者侧本侧关系增量 + debt_grudge_love 锚。
 	service.surfaceBetrayalVictimCard(ctx, sessionID, victim, betrayerID, crossEventID, betrayalSummary)
 
@@ -656,6 +668,66 @@ func (service *Service) PropagateCrossBetrayal(
 	service.bindBloodFeudAlliance(ctx, worldID, crossEventID, victim.ID, betrayerID, derivedOwners)
 
 	return len(derivedOwners)
+}
+
+// crossBetrayalCooldownMarker 是当日黑吃黑传播冷却锚的 payload 判别键（与 worldize_inbound 的 WORLDIZE_OUTBOUND
+// 锚区分：后者无 kind 键、reason 取入向白名单码；本锚有此 kind 且 reason=CROSS_BETRAYAL，两者 payload 永不互相误命中）。
+const crossBetrayalCooldownMarker = "cross_betrayal_cooldown"
+
+// crossBetrayalCooldownActive 判定同 (betrayer,victim,CROSS_BETRAYAL) 当天是否已传播过（已写过冷却锚）。
+// 复用 worldize_inbound.go 的 inboundCooldownActive 范式：按 actor=betrayer 的 WORLDIZE_OUTBOUND 锚在 UTC 日窗内查，
+// 再用 payload 精确比对 kind+target+reason（payload 是确定性 JSON，含这三键）。冷却是软抑制：查错保守返回 false
+// （放行，宁可多传一次也不静默吞掉应有的血仇牵连——与 inboundCooldownActive 同向）。
+func (service *Service) crossBetrayalCooldownActive(ctx context.Context, betrayerID, victimID string) bool {
+	if service == nil || service.db == nil || strings.TrimSpace(betrayerID) == "" {
+		return false
+	}
+	dayLo := dayStartUTC().Format(time.RFC3339Nano)
+	rows, err := service.db.QueryContext(
+		ctx,
+		`SELECT payload_json FROM events
+		 WHERE actor_unit_id = ? AND reason_code = ? AND occurred_at >= ?`,
+		betrayerID, string(events.ReasonWorldizeOutbound), dayLo,
+	)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payloadJSON string
+		if scanErr := rows.Scan(&payloadJSON); scanErr != nil {
+			return false
+		}
+		// 精确比对 kind（区分自 worldize 锚）+ target（victim）+ reason（CROSS_BETRAYAL）。
+		if strings.Contains(payloadJSON, `"kind":"`+crossBetrayalCooldownMarker+`"`) &&
+			strings.Contains(payloadJSON, `"reason":"`+string(events.ReasonCrossBetrayal)+`"`) &&
+			strings.Contains(payloadJSON, `"target":"`+victimID+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// markCrossBetrayalCooldown 写一条当日黑吃黑传播冷却锚（WORLDIZE_OUTBOUND，payload 带 kind 判别键 + betrayer/victim/code）。
+// best-effort：缺 db / betrayer 空 → 跳过；写失败吞错（冷却是软抑制，写不成只是本日可能多传一次，不阻断主结算）。
+// OwnerUnitID=betrayer（恒真实单位），RelatedUnitID 故意留空回落为 owner——victim 完整写进 payload.target 供冷却比对
+// （与 worldize_inbound 同款：target 写 payload 而非 target_unit_id，避免非单位引用触发 events 表 FK，本处亦保持一致）。
+func (service *Service) markCrossBetrayalCooldown(ctx context.Context, sessionID, betrayerID, victimID string) {
+	if service == nil || service.db == nil || strings.TrimSpace(betrayerID) == "" {
+		return
+	}
+	_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		SessionID:   sessionID,
+		OwnerUnitID: betrayerID,
+		Code:        events.ReasonWorldizeOutbound,
+		Category:    events.CategoryFate,
+		Payload: map[string]any{
+			"kind":   crossBetrayalCooldownMarker,
+			"actor":  betrayerID,
+			"target": victimID,
+			"reason": string(events.ReasonCrossBetrayal),
+		},
+	})
 }
 
 // surfaceBetrayalVictimCard 给黑吃黑受害者投一张回应卡（追讨/认栽记仇/求和，经 SurfaceFateEvent 走自相关待决策路径），

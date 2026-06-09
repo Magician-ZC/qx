@@ -90,10 +90,16 @@ const (
 	eliteMaxRounds  = 30
 	eliteFleeHP     = 25   // HP 低于此值反射撤退（HP 上限 100，≈0.25）
 	eliteMissChance = 0.08 // 确定性掷骰命中判定
-	// eliteHPMax 是角色 HP 上限（与 eliteFleeHP 的 0.25 口径同源），用于把当前 HP 归一化喂 encounter.IsNearDeathReversal。
+	// eliteHPMax 是角色 HP 上限（与 eliteFleeHP 的 0.25 口径同源），用于把当前 HP 归一化判濒死带（selfHPFraction）。
 	eliteHPMax = 100
-	// eliteFleeFraction 是「濒死反杀」的归一化撤退线（= eliteFleeHP/eliteHPMax，0.25）：自身归一 HP 跌破此线仍打出有效输出即濒死反杀。
+	// eliteFleeFraction 是归一化撤退线（= eliteFleeHP/eliteHPMax，0.25）：HP 跌破此线本回合开头即反射撤退（永不到达攻击分支）。
 	eliteFleeFraction = float64(eliteFleeHP) / float64(eliteHPMax)
+	// eliteNearDeathFraction 是「濒死反杀」的归一化濒死带上沿（= eliteFleeFraction*1.5，0.375），**位于撤退线之上**。
+	// 修死代码（finding）：原濒死反杀判 selfHPFraction<eliteFleeFraction（撤退线之下），但反射护栏在每回合开头先于攻击分支
+	// 触发——HP<eliteFleeHP 当场撤退 break，攻击分支恒在「HP≥撤退线」执行，故撤退线之下的判定永不到达=死代码、永不计分。
+	// 改判「撤退线之上的濒死带」[eliteFleeFraction, eliteNearDeathFraction]：刚过撤退线、伤未透、仍咬牙打出有效输出的孤勇——
+	// 这一带在攻击分支真实可达（角色撑过护栏、HP 略高于撤退线时攻击），让 Clutch 濒死反杀真正进 Score。
+	eliteNearDeathFraction = eliteFleeFraction * 1.5
 )
 
 // TriggerEliteEncounter 为某角色生成一头与其战力相称的精英怪并跑通完整遭遇（供 API 触发）。
@@ -557,12 +563,13 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 			contribution.Damage += float64(dmg)
 			// ① 关键救场（Clutch）进 Score（设计 §5「关键救场」1.2 权重的数据来源）：
 			//   - 终结一击：这一下把威胁从 >0 打到 ≤0（最靠近它心脏的那一击）；
-			//   - 濒死反杀：自身归一化 HP 已跌破撤退线却仍打出有效输出且未当场倒下（不退反进的孤勇）。
+			//   - 濒死反杀：自身归一化 HP 落在**撤退线之上的濒死带**（≤eliteNearDeathFraction，0.375）却仍打出有效输出且
+			//     未当场倒下（不退反进的孤勇）。判在撤退线之上是因为反射护栏会在撤退线之下当场撤退、永不到此分支（见 const 注释）。
 			if encounter.IsFinalBlow(eliteHPBefore, eliteHP) {
 				contribution = encounter.MarkClutch(contribution, encounter.ClutchFinalBlow)
 			}
 			selfHPFraction := float64(actor.Status.HP) / float64(eliteHPMax)
-			if encounter.IsNearDeathReversal(selfHPFraction, eliteFleeFraction, dmg, actor.Status.HP > 0) {
+			if selfHPFraction <= eliteNearDeathFraction && dmg > 0 && actor.Status.HP > 0 {
 				contribution = encounter.MarkClutch(contribution, encounter.ClutchNearDeathReversal)
 			}
 		}

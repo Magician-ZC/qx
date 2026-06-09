@@ -113,6 +113,19 @@ function parsePayloadChoices(raw: unknown): { id: string; label: string; resolve
   return out.length > 0 ? out : undefined;
 }
 
+// fateDedupKey 给一张卡算「WS 与首屏共用」的去重标识：
+//   - pending 卡（有 decision_id）→ 直接用 decision_id（同一待决策跨来源唯一）；
+//   - 其余卡（highlight/echo）→ 用「route 冒号 narrative」拼接 key。
+// route 入参：WS payload 自带 route 字段；feed 卡无显式 route，由调用方按 kind→route 映射传入
+//   （kind 与 route 同词表：pending/highlight/echo），从而 WS 与首屏落进同一 seenRef 去重集，
+//   消除「同一卡先经首屏 feed、再经 WS 推送」的瞬态重复。
+function fateDedupKey(route: string, decisionId: string, narrative: string): string {
+  const r = route.trim();
+  const id = decisionId.trim();
+  if (r === "pending" && id) return id;
+  return `${r}:${narrative}`;
+}
+
 // fateCardKey 给一张高光卡取稳定标识：优先 decision_id，否则对 narrative 做短哈希（FNV-1a 32bit → base36）。
 // 与埋点 props.card 同源，确保去重 Set 与后端聚合用同一标识。
 function fateCardKey(card: FateCard): string {
@@ -145,6 +158,12 @@ export function FateView({ sessionId, unitId }: Props) {
     try {
       const [unit, feed] = await Promise.all([getUnitStatus(unitId), getFateFeed(unitId)]);
       setStatus(readStatus(unit));
+      // 把首屏 feed 的每张卡按同形 key 播种进 seenRef，使 WS 推送与首屏共用同一去重集——
+      // 否则同一事件「先经 feed 渲染、后经 WS 推来」会因 seenRef 未含首屏卡而重复插入（瞬态重复卡）。
+      // feed 卡无显式 route 字段，按 kind→route 映射（kind 与 route 同词表）传入，与 onFateInbox 对齐。
+      for (const c of feed) {
+        seenRef.current.add(fateDedupKey(c.kind, c.decision_id ?? "", c.narrative ?? ""));
+      }
       setCards(feed);
     } catch (err) {
       setToast(`读取命运失败：${err instanceof Error ? err.message : String(err)}`);
@@ -168,10 +187,11 @@ export function FateView({ sessionId, unitId }: Props) {
     const unsub = subscribeSessionStream(sessionId, {
       onFateInbox: (payload) => {
         if (String(payload.unit_id ?? "") !== unitId) return;
-        const key = `${payload.route}:${cardText(payload)}`;
+        const route = String(payload.route ?? "");
+        // 用与 refresh() 播种首屏 feed 完全一致的同形 key 去重：pending 卡用 decision_id、其余卡用「route 冒号 narrative」。
+        const key = fateDedupKey(route, payload.decision_id ? String(payload.decision_id) : "", cardText(payload));
         if (seenRef.current.has(key)) return;
         seenRef.current.add(key);
-        const route = String(payload.route ?? "");
         // WS payload 通常不含 expires_at/countdown_hours（后端只推 occurred_at 或更少）；
         // 有就透传，没有则留空，由 computeFateCountdown 按 occurred_at + 48h 兜底。
         // choices 同理：WS 多半不带（情境化选项随 feed 返回），带了就透传以便即时上 Copilot 选项，

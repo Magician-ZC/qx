@@ -103,6 +103,10 @@ func zeroSumContestEnabled() bool {
 //   - 胜负**只产 append-only cross_event**（带 arbitration_key + score_initiator/score_target 可仲裁留痕，仅 worldID 非空时）；
 //     本侧只为**本会话**败者记补偿记忆（跨会话败者的本侧补偿由其各自 session 读 cross_event 后翻译，不在此直写他人状态）。
 //
+// 两用途分离（跨玩家硬不变量）：**裁决用全量候选**（含跨会话者的 Score，胜率∝Score 不被分离影响）；
+// **补偿只遍历本会话败者**——本公开入口对全部败者尝试补偿，由 recordContestConsolation 的 loser.SessionID 守卫兜底
+// （绝不直写他库记忆）；内部扫描路径（resolveContestsOfType）另传 localLoserIDs 白名单，在补偿循环里**真正剔除**跨会话败者。
+//
 // 返回胜者 UnitID。守卫：nil 依赖 / 争夺者 <1 → 返回空串 + err（无可裁决）。单争夺者直接判其胜（无冲突仍可幂等调用）。
 // 本函数**只裁决与留痕**，不落地标的归属（联姻成立等副作用由调用方按情境处理）——保持原语通用、可被席位/战利品复用。
 func (service *Service) ResolveExclusiveContest(
@@ -111,6 +115,24 @@ func (service *Service) ResolveExclusiveContest(
 	socialObjectID string,
 	resource string,
 	contenders []ContestContender,
+) (string, error) {
+	// 公开入口：补偿名单 = 全部败者（localLoserIDs=nil）。跨会话败者的本侧守卫由 recordContestConsolation 的
+	// loser.SessionID 核验兜底（纵深第二道防线）——即便调用方传入跨会话争夺者，也绝不直写他库记忆。
+	return service.resolveExclusiveContest(ctx, state, socialObjectID, resource, contenders, nil)
+}
+
+// resolveExclusiveContest 是裁决内核，把「裁决用全量候选」与「补偿只遍历本会话败者」两个用途显式分离（守卫 b）：
+//   - contenders：参与 arbitration 的**全量**候选（含跨会话者，其 Score 照常进裁决，胜率∝Score 不被分离影响）。
+//   - localLoserIDs：允许在本侧记补偿记忆的 UnitID 白名单（仅本会话败者）。为 nil → 退回「全部败者」（由公开入口
+//     的纵深守卫 a 兜底）；非 nil（内部扫描路径）→ 只对名单内本会话败者记补偿，跨会话败者从补偿循环中**真正剔除**，
+//     仅经 recordContestCrossEvents 的 CROSS_CONTEST_LOSE 留痕、由其各自 session 读出翻译。
+func (service *Service) resolveExclusiveContest(
+	ctx context.Context,
+	state *State,
+	socialObjectID string,
+	resource string,
+	contenders []ContestContender,
+	localLoserIDs map[string]bool,
 ) (string, error) {
 	if service == nil {
 		return "", fmt.Errorf("resolve contest: missing service")
@@ -160,9 +182,14 @@ func (service *Service) ResolveExclusiveContest(
 
 	// 败者「退而求其次」补偿：仅给**本会话**败者记一条「这次没争过，但…」记忆（跨会话败者由其各自 session 处理，
 	// 不在此直写他人状态——跨玩家硬不变量）。best-effort，绝不阻断。
+	// localLoserIDs 非 nil → 跨会话败者已在上游从补偿名单剔除（守卫 b），此处 continue 跳过；
+	// 为 nil（公开入口）→ 遍历全部，由 recordContestConsolation 的 loser.SessionID 守卫兜底（守卫 a）。
 	for _, c := range valid {
 		if c.UnitID == winnerID {
 			continue
+		}
+		if localLoserIDs != nil && !localLoserIDs[c.UnitID] {
+			continue // 跨会话败者：补偿循环中真正剔除，仅经 cross_event 留痕由各自 session 翻译
 		}
 		service.recordContestConsolation(ctx, state, c.UnitID, resource, detailByID[c.UnitID])
 	}
@@ -173,6 +200,12 @@ func (service *Service) ResolveExclusiveContest(
 // 每个「胜者→败者」对落一条 CROSS_CONTEST_LOSE（actor=胜者、target=败者），事实唯一、可仲裁（occurred_at + arbitration_key）。
 // 跨玩家硬不变量：本函数只 INSERT cross_events，**绝不** UPDATE/DELETE，也绝不触碰任一方 units/relations。
 // best-effort：任一步失败只吞错（这里直接静默），绝不阻断主裁决/阶段推进。
+//
+// 跨会话幂等（修 ② MEDIUM 的硬化第 ③ 点）：cross_event 的主键 id 由 (arbitrationKey, actorID, targetID) 确定性派生
+// （newContestEventID）。无 world-runner 单一裁决者时，两个 session 都会就同 Key 各自裁决——经 ① 候选集合 view-independent
+// + ② 离线楼板统一施加，两侧**必得同胜者**，于是各自写出的 (actor=胜者, target=同一败者) 行 id 完全相同；先写者落库后，
+// 后写者 INSERT 撞主键冲突，错误被此处 `_ =` **安全忽略**（append-only：既不 UPDATE 也不报错阻断）——最终全 world 对同一
+// (worldID, SO.id, tick) 只留**一条** CROSS_CONTEST_WIN，不再产生两条矛盾胜者。
 func (service *Service) recordContestCrossEvents(
 	ctx context.Context,
 	state *State,
@@ -292,8 +325,11 @@ func (service *Service) sessionIDForUnit(ctx context.Context, unitID string) str
 
 // recordContestConsolation 给一名争夺失败者记一条「退而求其次」的命运补偿（best-effort，绝不阻断）。
 // 优先记一条单位记忆（让 AI 后续决策能引用「我这次没争过」），并在有 state 时追加一条可读日志。
-// 跨玩家硬不变量：只对**本会话**败者记忆（service.units.GetByID 即便能读到他人单位，rememberUnitWithSource 写的是本库记忆，
-// 但补偿语义应归各自 session——故由调用方只把本会话败者传给本路径；本函数自身只对「能读到的本库单位」记，不直写他人 relations）。
+// 跨玩家硬不变量（纵深守卫 a）：**永不**对他人 session 的单位记忆/units.Save——即便上游（localContenderIDs 白名单）
+// 已先把跨会话败者剔出补偿名单（守卫 b），本函数仍在写入前**独立**核验 loser.SessionID：
+// 读到 loser 后，若 loser.SessionID 非空且 state 非空且 loser.SessionID != state.ID（跨会话他库单位），
+// 则只 appendLog 本侧可读日志后 return，**绝不** rememberUnitWithSource/units.Save 直写他库记忆 blob。
+// 跨会话败者的本侧补偿只经 recordContestCrossEvents 的 CROSS_CONTEST_LOSE，由其各自 session 读出翻译。
 func (service *Service) recordContestConsolation(ctx context.Context, state *State, loserID string, resource string, detail string) {
 	if service == nil || strings.TrimSpace(loserID) == "" {
 		return
@@ -312,6 +348,11 @@ func (service *Service) recordContestConsolation(ctx context.Context, state *Sta
 	}
 	if service.units != nil {
 		if loser, err := service.units.GetByID(ctx, loserID); err == nil && loser.ID != "" {
+			// 本侧守卫（a）：跨会话他库单位绝不直写记忆——只记本侧可读日志后 return（硬不变量第二道防线）。
+			if state != nil && strings.TrimSpace(loser.SessionID) != "" && strings.TrimSpace(loser.SessionID) != strings.TrimSpace(state.ID) {
+				appendLog(state, "contest_consolation", summary, loserID, "")
+				return
+			}
 			// importanceBoost=1：略高于日常琐事，让「错失」这件事在记忆里多留几回合（衰减 tau≈120）。
 			_ = service.rememberUnitWithSource(ctx, &loser, turn, summary, "exclusive_contest", 1)
 		}
@@ -391,12 +432,19 @@ type contestPoolUnit struct {
 }
 
 // buildContestPool 组装候选池：本会话玩家阵营存活单位 + （WorldID 非空时）跨会话同 world 的存活单位。
-// 跨会话单位**只读**载入（service.units.GetByID 按 ID 读，不写）。按 unitID 确定性排序 + 截断，保证与「谁先在线」无关。
+// 跨会话单位**只读**载入（service.units.GetByID 按 ID 读，不写）。
+//
+// 跨会话确定性硬化（修 ② MEDIUM 的「候选集合因视角而异」）：先把本会话与跨会话候选**全部收齐**到一个池，
+// 再**按 unitID 统一排序 + 单一上限截断**——而非「本会话先占 24 名额、跨会话再占 96」的分桶截断（分桶截断下，
+// 同一物理单位从 A 视角进「本会话桶」、从 B 视角进「跨会话桶」，单位数超额时两侧截出的集合可能不同 → 候选集合
+// view-dependent → 同 Key 可产不同胜者）。统一排序 + 单一截断使 A、B 两 session 收敛到**同一候选集合**（共享 DB 下，
+// 本会话 units 与跨会话 SELECT 合起来即该 world 全部同标的候选；ownLocal 仅决定补偿归属、不再影响集合本身）。
 func (service *Service) buildContestPool(ctx context.Context, state *State, units []unit.Record) []contestPoolUnit {
+	const poolCap = contestScanMaxUnits + contestCrossPoolMaxUnits // 统一上限（不再按本会话/跨会话分桶）
 	pool := make([]contestPoolUnit, 0, len(units))
 	seen := make(map[string]bool, len(units))
 
-	// ① 本会话单位（玩家在场）。
+	// ① 本会话单位（玩家在场）——先全部纳入候选（不在此截断，截断留到统一排序后做）。
 	for i := range units {
 		u := units[i]
 		if state.PlayerFactionID != "" && u.FactionID != state.PlayerFactionID {
@@ -410,9 +458,6 @@ func (service *Service) buildContestPool(ctx context.Context, state *State, unit
 		}
 		seen[u.ID] = true
 		pool = append(pool, contestPoolUnit{rec: u, ownLocal: true, offline: false})
-		if len(pool) >= contestScanMaxUnits {
-			break
-		}
 	}
 
 	// ② 跨会话同 world 的其他单位（只读）。WorldID 空 → 跳过（退回纯本会话行为，向后兼容）。
@@ -421,9 +466,6 @@ func (service *Service) buildContestPool(ctx context.Context, state *State, unit
 		for _, cid := range crossIDs {
 			if seen[cid] {
 				continue
-			}
-			if len(pool) >= contestScanMaxUnits+contestCrossPoolMaxUnits {
-				break
 			}
 			rec, err := service.units.GetByID(ctx, cid)
 			if err != nil || rec.ID == "" {
@@ -434,9 +476,15 @@ func (service *Service) buildContestPool(ctx context.Context, state *State, unit
 			}
 			seen[cid] = true
 			// 离线判定：跨会话单位是否「玩家不在场」由其所属 session 的活跃态决定。此处保守地把所有跨会话单位视为
-			// 「可能离线」，统一走离线宪章兜底投入下限——既不被在线方零成本抢走标的，又不假定其满额认真投入（反 P2W 中庸）。
+			// 「可能离线」（仅供留痕/遥测）；离线楼板已与「是否本 session」解耦、按 view-independent 规则统一施加。
 			pool = append(pool, contestPoolUnit{rec: rec, ownLocal: false, offline: true})
 		}
+	}
+
+	// 统一排序（按 unitID）+ 单一上限截断 → view-independent 候选集合（与「谁先扫到/谁是 self」无关、可复现）。
+	sort.Slice(pool, func(i, j int) bool { return pool[i].rec.ID < pool[j].rec.ID })
+	if len(pool) > poolCap {
+		pool = pool[:poolCap]
 	}
 	return pool
 }
@@ -516,10 +564,11 @@ func (service *Service) resolveContestsOfType(
 			continue // 该标的至多一个争夺者 → 无排他冲突，no-op
 		}
 		resource := string(ctype) + ":" + tid
-		// 跨会话败者的本侧补偿不在此直写（硬不变量）；只把**本会话**败者传给 ResolveExclusiveContest 的补偿路径，
-		// 跨会话败者仅经 cross_event 留痕、由其各自 session 读出翻译。
-		localContenders := service.filterLocalContenders(cs, pool)
-		winnerID, err := service.ResolveExclusiveContest(ctx, state, tid, resource, localContenders)
+		// 两用途分离（守卫 b）：裁决用**全量** cs（含跨会话者，Score 照常进 arbitration，胜率∝Score 不变）；
+		// 补偿只遍历**本会话**败者（localLoserIDs 白名单）——跨会话败者从补偿循环中真正剔除，仅经 cross_event 留痕、
+		// 由其各自 session 读出翻译，本侧绝不直写他库记忆 blob。
+		localLoserIDs := service.localContenderIDs(pool)
+		winnerID, err := service.resolveExclusiveContest(ctx, state, tid, resource, cs, localLoserIDs)
 		if err != nil || winnerID == "" {
 			continue // best-effort：裁决失败只吞错
 		}
@@ -547,28 +596,17 @@ func (service *Service) resolveContestsOfType(
 	return resolved
 }
 
-// filterLocalContenders 从全体争夺者里挑出**本会话**的，作为「需在本侧记补偿记忆」的对象（跨会话败者由各自 session 处理）。
-// 跨会话争夺者仍已参与上游裁决（其 Score 已进 arbitration），此处只是把「本侧写记忆」的范围收敛到本库单位。
-func (service *Service) filterLocalContenders(all []ContestContender, pool []contestPoolUnit) []ContestContender {
+// localContenderIDs 从候选池里挑出**本会话**单位的 UnitID 集合，作为「允许在本侧记补偿记忆」的白名单（守卫 b）。
+// 跨会话争夺者**不**进此集合——它们仍以全量 Score 参与上游 arbitration（胜率∝Score 不受影响），但补偿循环按此白名单
+// 把跨会话败者真正剔除，其本侧补偿仅经 recordContestCrossEvents 的 CROSS_CONTEST_LOSE 由各自 session 读出翻译。
+func (service *Service) localContenderIDs(pool []contestPoolUnit) map[string]bool {
 	local := make(map[string]bool, len(pool))
 	for i := range pool {
 		if pool[i].ownLocal {
 			local[pool[i].rec.ID] = true
 		}
 	}
-	out := make([]ContestContender, 0, len(all))
-	for _, c := range all {
-		// 本会话争夺者照常传入（参与裁决 + 本侧补偿）；跨会话争夺者也传入裁决，但标记 Offline，
-		// recordContestConsolation 内部对读不到的他库单位天然 no-op（GetByID 仍能读到，但其记忆归本库——
-		// 为严守不变量，这里把非本会话者从「本侧补偿」名单剔除，仅保留其 Score 经裁决的影响）。
-		if local[c.UnitID] {
-			out = append(out, c)
-			continue
-		}
-		// 跨会话争夺者：保留进裁决但不进本侧补偿名单（Detail 清空避免误记），仍带 Offline 标记供 cross_event 留痕。
-		out = append(out, ContestContender{UnitID: c.UnitID, Score: c.Score, Offline: c.Offline})
-	}
-	return out
+	return local
 }
 
 // aggregateContenders 按标的聚合争夺者：对每个 (争夺者, 标的) 判「想争夺」意图并算零和 Score（付费不进）。
@@ -603,9 +641,14 @@ func (service *Service) aggregateContenders(ctx context.Context, pool []contestP
 			if !wants {
 				continue
 			}
-			// 离线方（跨会话/玩家不在场）凭离线宪章社交授权自动投入兜底：Score 不低于离线下限——
+			// 离线宪章兜底楼板（§2.6）：玩家不在场时其单位仍按宪章自动投入争夺，Score 不低于离线下限——
 			// 让离线一侧不被在线方零成本抢走标的，但仍是真实投入口径（远低于在场认真争夺）。
-			if actor.offline && score < contestOfflineCharterFloorScore {
+			// 跨会话确定性硬化（修 ② MEDIUM「同 Key 两 session 各裁各的、楼板因视角而异 → 矛盾 CROSS_CONTEST_WIN」）：
+			// **楼板与「是否本 session」解耦**——无 world-runner/在线注册表时，按 view-independent 规则**统一**施加：
+			// 任何低于楼板的 wants 候选都抬到楼板（既然已过 wants 阈即「真想争」，抬到最低真实投入口径合理），
+			// 从而 A、B 两 session 对同一物理单位算出**同一 Score**（不再「我方不抬/他方抬」），同 Key 必得同胜者。
+			// （楼板是「下限」只抬不降，不破坏胜率∝Score；Offline 仅留痕/遥测，不再决定 Score。）
+			if score < contestOfflineCharterFloorScore {
 				score = contestOfflineCharterFloorScore
 			}
 			contendersByTarget[target.rec.ID] = append(contendersByTarget[target.rec.ID], ContestContender{

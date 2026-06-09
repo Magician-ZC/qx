@@ -738,3 +738,117 @@ func TestPropagateCrossBetrayal_FlagOffNoOp(t *testing.T) {
 		t.Fatalf("db=nil 时应安全返回 0，得 %d", n)
 	}
 }
+
+// TestPropagateCrossBetrayal_DailyCooldown 是 LOW① 回归：同 (betrayer,victim,CROSS_BETRAYAL) 当日二次传播被冷却挡下。
+// 第一次全量铺开（受害者卡 + 衍生第三方 echo），第二次（即便换了 crossEventID）应 no-op 返回 0、不再新增 echo/留痕。
+// 这堵住「自治反目对同一对每约 18 turn 重复全量铺开」的回声室洪泛。
+func TestPropagateCrossBetrayal_DailyCooldown(t *testing.T) {
+	orig := os.Getenv("QUNXIANG_BLOOD_FEUD")
+	defer os.Setenv("QUNXIANG_BLOOD_FEUD", orig)
+	os.Setenv("QUNXIANG_BLOOD_FEUD", "true")
+
+	ctx := context.Background()
+	db, repo, service := newBloodFeudTestService(t)
+	seedFeudWorld(t, ctx, db, repo) // victim/betrayer + 密友 f1(直系)/f2(二跳)
+
+	victim, err := repo.GetByID(ctx, "victim")
+	if err != nil {
+		t.Fatalf("读受害者失败: %v", err)
+	}
+
+	// 第一次传播：应衍生到 f1/f2（>0），并写冷却锚。
+	n1 := service.PropagateCrossBetrayal(ctx, "s1", "", "xevt-A", victim, "betrayer", "她信过的人反咬了一口。")
+	if n1 <= 0 {
+		t.Fatalf("首次传播应衍生到 ≥1 名第三方，得 %d", n1)
+	}
+
+	// 冷却锚应已写入 betrayer 的 events（WORLDIZE_OUTBOUND + cross_betrayal_cooldown 判别键）。
+	var cdCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE actor_unit_id='betrayer' AND reason_code=? AND payload_json LIKE '%cross_betrayal_cooldown%'`,
+		string(events.ReasonWorldizeOutbound)).Scan(&cdCount); err != nil {
+		t.Fatalf("查冷却锚失败: %v", err)
+	}
+	if cdCount != 1 {
+		t.Fatalf("首次传播应写恰好 1 条冷却锚，得 %d", cdCount)
+	}
+
+	// 第二次传播（同 betrayer/victim、换 crossEventID）：当日冷却内 → 应 no-op 返回 0。
+	n2 := service.PropagateCrossBetrayal(ctx, "s1", "", "xevt-B", victim, "betrayer", "又一次反咬。")
+	if n2 != 0 {
+		t.Fatalf("当日二次传播应被冷却挡下、返回 0，得 %d", n2)
+	}
+	// 第二次的 crossEventID 不应产生任何 echo（被冷却挡在 propagateCrossDerived 之前）。
+	echoesB, err := service.ListCrossEventEchoes(ctx, "xevt-B")
+	if err != nil {
+		t.Fatalf("列 echo 失败: %v", err)
+	}
+	if len(echoesB) != 0 {
+		t.Fatalf("冷却内二次传播不应写 echo，xevt-B 却有 %d 条", len(echoesB))
+	}
+	// 冷却锚不重复写（仍恰好 1 条）。
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE actor_unit_id='betrayer' AND reason_code=? AND payload_json LIKE '%cross_betrayal_cooldown%'`,
+		string(events.ReasonWorldizeOutbound)).Scan(&cdCount); err != nil {
+		t.Fatalf("二次查冷却锚失败: %v", err)
+	}
+	if cdCount != 1 {
+		t.Fatalf("冷却内二次传播不应再写冷却锚，仍应为 1，得 %d", cdCount)
+	}
+
+	// 换一对（不同 victim）不受这条冷却影响：另起一对应能正常传播（冷却按 (betrayer,victim) 维度，非全局）。
+	seedUnit(t, ctx, repo, 9, "victim2")
+	seedUnit(t, ctx, repo, 10, "g1")
+	seedRelation(t, ctx, db, "g1", "victim2", 8, 1, 9, 0) // g1 在乎 victim2（过衍生门）
+	victim2, _ := repo.GetByID(ctx, "victim2")
+	n3 := service.PropagateCrossBetrayal(ctx, "s1", "", "xevt-C", victim2, "betrayer", "另一桩反咬。")
+	if n3 <= 0 {
+		t.Fatalf("不同 victim 的传播不应被前一对的冷却挡下，得 %d", n3)
+	}
+}
+
+// TestCrossBetrayalCooldown_OnlyWritesBetrayerSideEvent 验证冷却锚只在 betrayer 自己的 events 留痕（OwnerUnitID=betrayer），
+// 绝不直写他人 session 的 units/relations/memory（跨玩家硬不变量）：冷却锚不创建任何 relations 行、不改 victim 状态。
+func TestCrossBetrayalCooldown_OnlyWritesBetrayerSideEvent(t *testing.T) {
+	ctx := context.Background()
+	db, repo, service := newBloodFeudTestService(t)
+	for i, id := range []string{"victim", "betrayer"} {
+		seedUnit(t, ctx, repo, int64(i)+1, id)
+	}
+
+	// 仅调用冷却锚写入（隔离测试它的副作用边界）。
+	service.markCrossBetrayalCooldown(ctx, "s1", "betrayer", "victim")
+
+	// ① 冷却锚 actor_unit_id 恒为 betrayer（owner），且只此一处留痕。
+	var ownerOfMarker string
+	if err := db.QueryRowContext(ctx,
+		`SELECT actor_unit_id FROM events WHERE reason_code=? AND payload_json LIKE '%cross_betrayal_cooldown%'`,
+		string(events.ReasonWorldizeOutbound)).Scan(&ownerOfMarker); err != nil {
+		t.Fatalf("查冷却锚 owner 失败: %v", err)
+	}
+	if ownerOfMarker != "betrayer" {
+		t.Fatalf("冷却锚 owner 应为 betrayer（永不挂他人），得 %q", ownerOfMarker)
+	}
+
+	// ② 绝不直写任何 relations 行（冷却纯留痕，不触碰关系图）。
+	var relN int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relations`).Scan(&relN); err != nil {
+		t.Fatalf("查 relations 失败: %v", err)
+	}
+	if relN != 0 {
+		t.Fatalf("冷却锚不应创建任何 relations 行（不写他人侧），得 %d 行", relN)
+	}
+
+	// ③ 冷却判定确定性：同输入立即复查应判为已冷却（active=true）。
+	if !service.crossBetrayalCooldownActive(ctx, "betrayer", "victim") {
+		t.Fatalf("写过冷却锚后，同 (betrayer,victim) 应判为已冷却")
+	}
+	// 不同 victim 不命中（冷却按对维度）。
+	if service.crossBetrayalCooldownActive(ctx, "betrayer", "other-victim") {
+		t.Fatalf("不同 victim 不应命中该冷却锚")
+	}
+	// 不同 betrayer 不命中。
+	if service.crossBetrayalCooldownActive(ctx, "other-betrayer", "victim") {
+		t.Fatalf("不同 betrayer 不应命中该冷却锚")
+	}
+}

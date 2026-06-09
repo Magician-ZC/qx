@@ -202,9 +202,9 @@ func TestOfflineCourageRejectModifierMonotonic(t *testing.T) {
 }
 
 // TestCourageCurveStacksWithExistingModifiers 验证胆量曲线进 directiveRejectProbability 后与既有信号叠加不替代：
-// 同一单位/风险下，flag 开 + 长离线的抗命概率应 ≥ flag 关的基线（曲线只抬高、不抹掉既有判定）。
+// 同一单位/风险下，flag 开 + 长离线（回合差驱动）的抗命概率应 ≥ flag 关的基线（曲线只抬高、不抹掉既有判定）。
+// LOW② 后离线时长由回合差派生（脱墙钟），故用较晚回合（turn=13≈72h 等效离线）制造「长离线」。
 func TestCourageCurveStacksWithExistingModifiers(t *testing.T) {
-	now := time.Now()
 	actor := &unit.Record{
 		ID:        "u1",
 		FactionID: "player",
@@ -218,16 +218,18 @@ func TestCourageCurveStacksWithExistingModifiers(t *testing.T) {
 	dec := unitDecisionPayload{Action: DecisionActionAttack, TargetUnitID: ""}
 	const risk = 1.6
 
-	stLong := State{ID: "s", PlayerFactionID: "player", UpdatedAt: now.Add(-72 * time.Hour)}
+	// 长离线由回合差驱动：turn=13 → 12 回合差 × 6h = 72h 等效离线（脱墙钟、确定性）。
+	stLong := State{ID: "s", PlayerFactionID: "player"}
+	stLong.TurnState.Turn = 13
 
 	// flag 关：基线（无离线项）。
 	t.Setenv(courageCurveFlagEnv, "false")
 	base := directiveRejectProbability(stLong, byID, actor, dec, risk)
-	// flag 开 + 长离线：应 ≥ 基线（叠加非替代；上限仍 0.85）。
+	// flag 开 + 长离线：应 > 基线（曲线确实叠加抬高，非替代；上限仍 0.85）。
 	t.Setenv(courageCurveFlagEnv, "true")
 	boosted := directiveRejectProbability(stLong, byID, actor, dec, risk)
-	if !(boosted >= base) {
-		t.Fatalf("胆量曲线应叠加抬高抗命概率：boosted=%v 应 ≥ base=%v", boosted, base)
+	if !(boosted > base) {
+		t.Fatalf("胆量曲线应叠加抬高抗命概率：boosted=%v 应 > base=%v", boosted, base)
 	}
 	// 上限仍夹 0.85（曲线不得突破既有硬顶）。
 	if boosted > 0.85 {
@@ -253,6 +255,96 @@ func TestCourageCurveDeterministic(t *testing.T) {
 			if got := offlineCaution(h) * domainBreadthCaution(dom, h); got != want {
 				t.Fatalf("非确定：action=%s 第%d 次 %v != %v", dec.Action, i, got, want)
 			}
+		}
+	}
+}
+
+// TestOfflineHoursFromTurns 验证 LOW② 的确定性回合差派生：起始回合(1)为 0 离线，其后逐回合 ×6h 累积。
+func TestOfflineHoursFromTurns(t *testing.T) {
+	cases := []struct {
+		turn int
+		want float64
+	}{
+		{0, 0},                           // 异常/未初始化回合 → 0（失败安全）
+		{1, 0},                           // 起始回合视作在线，0 离线
+		{2, offlineTurnEquivHours},       // 第 2 回合 = 1 回合差 × 6h
+		{5, 4 * offlineTurnEquivHours},   // 第 5 回合 = 4 回合差 × 6h = 24h（触发高代价门）
+		{11, 10 * offlineTurnEquivHours}, // 严格单调累积
+	}
+	for _, tc := range cases {
+		st := State{}
+		st.TurnState.Turn = tc.turn
+		if got := offlineHoursFromTurns(st); math.Abs(got-tc.want) > 1e-9 {
+			t.Fatalf("offlineHoursFromTurns(turn=%d)=%v，期望 %v", tc.turn, got, tc.want)
+		}
+	}
+	// 单调：回合越大离线时长越大（脱墙钟、纯回合函数）。
+	prev := -1.0
+	for turn := 1; turn <= 20; turn++ {
+		st := State{}
+		st.TurnState.Turn = turn
+		cur := offlineHoursFromTurns(st)
+		if cur < prev {
+			t.Fatalf("回合 %d 离线时长 %v 应 ≥ 前一回合 %v（单调）", turn, cur, prev)
+		}
+		prev = cur
+	}
+}
+
+// TestOfflineCourageRejectModifier_TurnDeterministic 是 LOW② 核心回归：胆量曲线脱墙钟后，
+// 同一 state（同 turn）多次调用 offlineCourageRejectModifier 逐位一致——不再随 time.Now() 漂移。
+// 这正是「同 (sessionID,turn,actor) 重放逐位复现」的最小证明（曲线项不读墙钟）。
+func TestOfflineCourageRejectModifier_TurnDeterministic(t *testing.T) {
+	withCourageCurve(t, "true")
+	// 第 5 回合（=24h 等效离线，已过高代价门），高代价动作。
+	st := State{}
+	st.TurnState.Turn = 5
+	// UpdatedAt 故意置成「会随墙钟漂移」的近况——若实现仍偷读墙钟，两次调用会因 time.Now() 推进而不同。
+	st.UpdatedAt = time.Now().Add(-3 * time.Hour)
+
+	dec := unitDecisionPayload{Action: DecisionActionRomance}
+	first := offlineCourageRejectModifier(st, dec)
+	for i := 0; i < 8; i++ {
+		if got := offlineCourageRejectModifier(st, dec); got != first {
+			t.Fatalf("胆量曲线应脱墙钟、逐位确定：第%d 次 %v != 首次 %v", i, got, first)
+		}
+	}
+	// 该回合（24h 等效）+ 高代价动作应 >1.0（确实受曲线影响，非恒等 1.0 的退化）。
+	if !(first > 1.0) {
+		t.Fatalf("turn=5（24h 等效离线）高代价动作应 >1.0（曲线生效），得 %v", first)
+	}
+
+	// 回合差驱动单调：更晚的回合（更久离线）抗命乘数应更大。
+	stLater := State{}
+	stLater.TurnState.Turn = 12
+	stLater.UpdatedAt = st.UpdatedAt
+	if !(offlineCourageRejectModifier(stLater, dec) > first) {
+		t.Fatalf("更晚回合（更久离线）应更谨慎：turn12 应 > turn5(%v)", first)
+	}
+}
+
+// TestDirectiveRejectProbability_TurnDeterministic 验证修复落到 directiveRejectProbability 顶层：
+// 同输入两次调用逐位一致（胆量曲线脱墙钟后，整条抗命概率链无任何墙钟读取）。
+func TestDirectiveRejectProbability_TurnDeterministic(t *testing.T) {
+	t.Setenv(courageCurveFlagEnv, "true")
+	actor := &unit.Record{ID: "u1", FactionID: "player"}
+	actor.Personality.Courage = 0.5
+	actor.Personality.Loyalty = 0.5
+	actor.Status.Loyalty = 0.5
+	actor.Status.HP = 80
+	actor.Status.Morale = 0.6
+	byID := map[string]*unit.Record{"u1": actor}
+	dec := unitDecisionPayload{Action: DecisionActionRomance}
+	const risk = 1.6
+
+	st := State{ID: "s", PlayerFactionID: "player"}
+	st.TurnState.Turn = 6
+	st.UpdatedAt = time.Now().Add(-9 * time.Hour) // 即便墙钟锚在，结果也不应随墙钟变
+
+	first := directiveRejectProbability(st, byID, actor, dec, risk)
+	for i := 0; i < 8; i++ {
+		if got := directiveRejectProbability(st, byID, actor, dec, risk); got != first {
+			t.Fatalf("抗命概率应逐位确定（无墙钟）：第%d 次 %v != 首次 %v", i, got, first)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -80,6 +81,39 @@ func (a billingEntitlementAdapter) ActiveEntitlementSKUs(ctx context.Context, ac
 	}
 	return skus, nil
 }
+
+// healthzPlayerOOCTTL 是 /healthz 玩家口径 OOC（FateOOCDualChannel 的 product_events 覆盖扫描）结果的进程级缓存有效期。
+// 取 30s：健康检查常被秒级高频轮询，对 product_events 的 O(N) 覆盖索引扫描若每次都跑会放大 DB 负载；
+// 缓存窗口内多次 /healthz 复用上次扫描结果即可。纯观测读、不进任何结算/latch，30s 陈旧度对运营观测无影响。
+const healthzPlayerOOCTTL = 30 * time.Second
+
+// healthzPlayerOOCCache 是「玩家主观三键 OOC」DB 扫描结果的进程级 TTL 缓存。
+// 只缓存昂贵的玩家口径（PlayerOOCRate/PlayerSamples，来自 product_events 扫描）；
+// 机器口径（AttributionStats 等内存读）由调用方每次现读不走此缓存，故 attribution/机器 OOC 永远是最新值。
+type healthzPlayerOOCCache struct {
+	mu        sync.Mutex
+	fetchedAt time.Time
+	rate      float64
+	samples   int
+}
+
+// playerOOC 返回玩家主观 OOC 率与样本数：缓存命中（距上次扫描 < ttl）直接复用，否则用 fetch 重扫并刷新缓存。
+// fetch 失败/为 0 也照常写缓存（短路后续重试，避免热路径上对失败查询反复打 DB）；缓存为空时 fetchedAt 零值必然过期，首访必扫。
+func (c *healthzPlayerOOCCache) playerOOC(now time.Time, ttl time.Duration, fetch func() (float64, int)) (float64, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.fetchedAt.IsZero() && now.Sub(c.fetchedAt) < ttl {
+		return c.rate, c.samples
+	}
+	rate, samples := fetch()
+	c.rate = rate
+	c.samples = samples
+	c.fetchedAt = now
+	return rate, samples
+}
+
+// healthzOOCCache 是 /healthz 玩家口径 OOC 的进程级缓存单例（每进程一份，跨 /healthz 请求共享）。
+var healthzOOCCache = &healthzPlayerOOCCache{}
 
 // NewRouter 组装 HTTP 路由、会话服务与实时推送链路。
 func NewRouter(deps Dependencies) *gin.Engine {
@@ -305,7 +339,24 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		gateTotal, gateBlocked := session.SurpriseGateStats()
 		surpriseCapTotal, surpriseCapDeferred := session.SurpriseCapStats()
 		// §8 OOC 双口径交叉观测（玩家主观三键 OOC + 归因机器 OOC + 两旋钮态）。纯读、幂等（不驱动 latch）。
-		oocDual := newSessionService().FateOOCDualChannel(c.Request.Context())
+		// 机器口径 + 两旋钮态恒现读（内存读，零成本、永远最新，与 attribution 块同源）；
+		// 玩家口径（PlayerOOCRate/PlayerSamples）走进程级 TTL 缓存——它是对 product_events 的 O(N) 覆盖扫描，
+		// 高频健康轮询若每次都打 DB 会放大负载，故缓存 healthzPlayerOOCTTL，窗口内复用上次扫描结果。
+		// 关键：把昂贵的 FateOOCDualChannel（含 NorthStar 扫描）只放进缓存 miss 分支，命中时根本不建 Service、不打 DB。
+		oocDual := session.OOCDualChannel{
+			MachineTotal:         attrTotal,
+			MachineOOC:           attrOOC,
+			MachineOOCRate:       attrOOCRate,
+			ConsistencyTightened: session.ConsistencyTightened(),
+			AttributionDegraded:  attrDegraded,
+		}
+		oocDual.PlayerOOCRate, oocDual.PlayerSamples = healthzOOCCache.playerOOC(
+			time.Now(), healthzPlayerOOCTTL,
+			func() (float64, int) {
+				fresh := newSessionService().FateOOCDualChannel(c.Request.Context())
+				return fresh.PlayerOOCRate, fresh.PlayerSamples
+			},
+		)
 
 		status := gin.H{
 			"status":                     "ok",

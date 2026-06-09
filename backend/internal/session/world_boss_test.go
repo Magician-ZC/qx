@@ -36,6 +36,13 @@ func bossStriker(t *testing.T, ctx context.Context, repo *unit.Repository, seed 
 	return &rec
 }
 
+// coopStrike 以「显式组队」语义对世界Boss出手一次（party = {attacker, 一名陪打者}），绕过单人物理锁让攻击真正落地。
+// 世界Boss severity 恒 >cap，单人（含 nil 协作入口的首位撞门者）会被锁；这些协作流测试要的是「真打、扣血、记账本」，
+// 故声明 ≥2 成员的 party（isSoloParty=false）直接放行——等价于「已有协作意图的群体围猎」，与生产新语义一致。
+func coopStrike(ctx context.Context, service *Service, worldID, bossID string, attacker *unit.Record) (WorldBossStrikeResult, error) {
+	return service.StrikeWorldBossParty(ctx, worldID, bossID, attacker, []string{attacker.ID, "coop_ally"})
+}
+
 func countCrossKind(t *testing.T, service *Service, worldID string, kind worldbus.EventKind) int {
 	t.Helper()
 	evs, err := worldbus.ListByWorld(context.Background(), service.db, worldID, 0)
@@ -63,14 +70,14 @@ func TestWorldBossDefeatAndLoot(t *testing.T) {
 	a := bossStriker(t, ctx, repo, 51, "甲", 30)
 	b := bossStriker(t, ctx, repo, 52, "乙", 30)
 
-	r1, err := service.StrikeWorldBoss(ctx, wid, bossID, a) // 50 -> 20
+	r1, err := coopStrike(ctx, service, wid, bossID, a) // 50 -> 20（组队真打，绕过单人锁）
 	if err != nil {
 		t.Fatalf("甲出手失败: %v", err)
 	}
 	if r1.Defeated || r1.HPRemaining != 20 {
 		t.Fatalf("首击后应剩 20 血、未死，得到 defeated=%v hp=%d", r1.Defeated, r1.HPRemaining)
 	}
-	r2, err := service.StrikeWorldBoss(ctx, wid, bossID, b) // 20 -> 0，致命一击 + 结算
+	r2, err := coopStrike(ctx, service, wid, bossID, b) // 20 -> 0，致命一击 + 结算
 	if err != nil {
 		t.Fatalf("乙出手失败: %v", err)
 	}
@@ -118,15 +125,15 @@ func TestWorldBossStrikeAfterDefeatRejected(t *testing.T) {
 
 	bossID, _ := service.SpawnWorldBoss(ctx, wid, "脆皮", 5, "")
 	a := bossStriker(t, ctx, repo, 61, "甲", 30)
-	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err != nil {
+	if _, err := coopStrike(ctx, service, wid, bossID, a); err != nil {
 		t.Fatalf("首击失败: %v", err)
 	}
 	// 已被讨平，再出手应被拒。
-	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err == nil {
+	if _, err := coopStrike(ctx, service, wid, bossID, a); err == nil {
 		t.Fatalf("对已讨平的 Boss 出手应返回 ErrWorldBossInactive")
 	}
 	// 对不存在的 Boss 出手也应被拒。
-	if _, err := service.StrikeWorldBoss(ctx, wid, "nope", a); err == nil {
+	if _, err := coopStrike(ctx, service, wid, "nope", a); err == nil {
 		t.Fatalf("对不存在的 Boss 出手应被拒")
 	}
 }
@@ -147,7 +154,7 @@ func TestWorldBossStrikeRollsBackOnLedgerFailure(t *testing.T) {
 	if _, err := service.db.ExecContext(ctx, `DELETE FROM worlds WHERE id = ?`, wid); err != nil {
 		t.Fatalf("删世界失败: %v", err)
 	}
-	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err == nil {
+	if _, err := coopStrike(ctx, service, wid, bossID, a); err == nil {
 		t.Fatalf("账本写入失败时出手应报错")
 	}
 	// 关键：扣血必须已回滚——Boss 仍是满血、active。
@@ -178,11 +185,11 @@ func TestWorldBossContributionIsFrequencyInvariant(t *testing.T) {
 	// 狂刷者连刷 15 次（75 伤害），强者补刀（40 伤害，致命）。总计 >100。
 	var settle WorldBossStrikeResult
 	for i := 0; i < 15; i++ {
-		if _, err := service.StrikeWorldBoss(ctx, wid, bossID, spammer); err != nil {
+		if _, err := coopStrike(ctx, service, wid, bossID, spammer); err != nil {
 			break // 若中途被打死则停
 		}
 	}
-	r, err := service.StrikeWorldBoss(ctx, wid, bossID, striker)
+	r, err := coopStrike(ctx, service, wid, bossID, striker)
 	if err != nil {
 		t.Fatalf("强者补刀失败: %v", err)
 	}
@@ -222,19 +229,19 @@ func TestWorldBossLedgerNotTruncated(t *testing.T) {
 
 	// 早期出手者：先打 1 次（这条若被 LIMIT 截断就会漏掉它的贡献）。
 	early := bossStriker(t, ctx, repo, 101, "先锋", 7)
-	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, early); err != nil {
+	if _, err := coopStrike(ctx, service, wid, bossID, early); err != nil {
 		t.Fatalf("先锋出手失败: %v", err)
 	}
 	// 制造 >200 条后续出手（同一个强者刷很多次，把先锋的早期记录挤出旧 LIMIT 窗口）。
 	filler := bossStriker(t, ctx, repo, 102, "填充", 3)
 	for i := 0; i < 210; i++ {
-		if _, err := service.StrikeWorldBoss(ctx, wid, bossID, filler); err != nil {
+		if _, err := coopStrike(ctx, service, wid, bossID, filler); err != nil {
 			t.Fatalf("填充出手失败: %v", err)
 		}
 	}
 	// 致命一击。
 	finisher := bossStriker(t, ctx, repo, 103, "终结", 100000)
-	r, err := service.StrikeWorldBoss(ctx, wid, bossID, finisher)
+	r, err := coopStrike(ctx, service, wid, bossID, finisher)
 	if err != nil || !r.SettledByMe {
 		t.Fatalf("终结一击应结算，得到 err=%v settled=%v", err, r.SettledByMe)
 	}
@@ -491,7 +498,7 @@ func TestWorldBossConcurrentSettleOnce(t *testing.T) {
 		wg.Add(1)
 		go func(actor *unit.Record) {
 			defer wg.Done()
-			res, err := service.StrikeWorldBoss(ctx, wid, bossID, actor)
+			res, err := coopStrike(ctx, service, wid, bossID, actor)
 			if err != nil {
 				return // 已被讨平的迟到出手会被拒，正常
 			}
@@ -584,23 +591,148 @@ func TestWorldBossGroupPartyUnlocks(t *testing.T) {
 	}
 }
 
-// 协作共享血池出手（StrikeWorldBoss，party 未声明=nil）不受单人物理锁约束：共享血池机制本身即协作语义。
-func TestWorldBossCooperativeStrikeNotSoloLocked(t *testing.T) {
+// 修缺口（finding antip2w，MEDIUM）：唯一 HTTP 出手入口 StrikeWorldBoss 恒传 nil party，旧实现因
+// isSoloParty(id,nil)=false 短路、单人锁生产不可达，单人反复 POST /strike 可凿穿存亡级 Boss。
+// 新语义：nil 协作入口的**首位单人出手者**对存亡级 Boss 也会被锁——不扣血、不记贡献账本、记一条 SOLO_ATTEMPT。
+func TestWorldBossFirstSoloStrikeViaCoopEntryIsLocked(t *testing.T) {
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 	wid := mustCreateWorld(t, ctx, service)
 	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
 	a := bossStriker(t, ctx, repo, 221, "甲", 40)
 
+	// HTTP 入口（nil party）首位单人出手 → 物理锁、不开打。
 	r, err := service.StrikeWorldBoss(ctx, wid, bossID, a)
 	if err != nil {
-		t.Fatalf("协作出手失败: %v", err)
+		t.Fatalf("单人撞门不应报错（应被锁、返回高光卡）: %v", err)
 	}
-	if r.SoloLocked {
-		t.Fatalf("协作共享血池出手（party 未声明）不应触发单人物理锁")
+	if !r.SoloLocked {
+		t.Fatalf("nil 协作入口首位单人出手应被单人物理锁，得到 SoloLocked=%v", r.SoloLocked)
 	}
-	if r.Damage != 40 {
-		t.Fatalf("协作出手应真打，期望 damage=40，得到 %d", r.Damage)
+	if r.Damage != 0 || r.Defeated {
+		t.Fatalf("物理锁不应开打：期望 damage=0 defeated=false，得到 damage=%d defeated=%v", r.Damage, r.Defeated)
+	}
+	if hp := worldBossHP(t, service, bossID); hp != 200_000 {
+		t.Fatalf("物理锁不应扣血，期望满血 200000，得到 %d", hp)
+	}
+	// 不记贡献账本（strike），但记一条 SOLO_ATTEMPT（供协作自举判定）。
+	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossStrike); got != 0 {
+		t.Fatalf("物理锁不应记贡献账本（strike），得到 %d 条", got)
+	}
+	if got := countCrossKind(t, service, wid, worldBossSoloAttemptKind); got != 1 {
+		t.Fatalf("被锁应记 1 条 SOLO_ATTEMPT 自举留痕，得到 %d", got)
+	}
+}
+
+// 单人反复撞门（同一 actor）恒被锁、永不扣血：distinct-actor 仍为 1，凿穿不了世界Boss（反 P2W 核心）。
+func TestWorldBossSingleActorRepeatedStrikeNeverPierces(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
+	lone := bossStriker(t, ctx, repo, 241, "独夫", 40)
+
+	for i := 0; i < 20; i++ {
+		r, err := service.StrikeWorldBoss(ctx, wid, bossID, lone)
+		if err != nil {
+			t.Fatalf("第 %d 次撞门不应报错: %v", i, err)
+		}
+		if !r.SoloLocked || r.Damage != 0 {
+			t.Fatalf("单人反复撞门应恒被锁、零伤害，第 %d 次得到 SoloLocked=%v damage=%d", i, r.SoloLocked, r.Damage)
+		}
+	}
+	// 关键不变量：20 次撞门后 Boss 仍满血、贡献账本一条 strike 都没有（凿不穿）。
+	if hp := worldBossHP(t, service, bossID); hp != 200_000 {
+		t.Fatalf("单人反复撞门后 Boss 应仍满血，得到 %d（被凿穿即反 P2W 失效）", hp)
+	}
+	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossStrike); got != 0 {
+		t.Fatalf("单人反复撞门不应记任何贡献账本（strike），得到 %d 条", got)
+	}
+}
+
+// 2 个不同 actor 出手 → 解锁（协作自举）：甲撞门被锁记 attempt → 乙撞门见甲（≥2 distinct）→ 解锁真打 →
+// 甲再来也见乙 → 解锁真打。这是「单人锁堵 P2W 但真协作仍能成立」的端到端证据。
+func TestWorldBossTwoDistinctActorsBootstrapUnlock(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
+	jia := bossStriker(t, ctx, repo, 251, "甲", 40)
+	yi := bossStriker(t, ctx, repo, 252, "乙", 40)
+
+	// 甲首位撞门 → 被锁、记 attempt。
+	r1, err := service.StrikeWorldBoss(ctx, wid, bossID, jia)
+	if err != nil {
+		t.Fatalf("甲撞门失败: %v", err)
+	}
+	if !r1.SoloLocked {
+		t.Fatalf("甲为首位单人，应被锁")
+	}
+	// 乙撞门 → 账本已有甲的 attempt（≥2 distinct）→ 解锁、真打、记 strike。
+	r2, err := service.StrikeWorldBoss(ctx, wid, bossID, yi)
+	if err != nil {
+		t.Fatalf("乙出手失败: %v", err)
+	}
+	if r2.SoloLocked {
+		t.Fatalf("乙撞门时账本已有甲（≥2 distinct）→ 应解锁，得到 SoloLocked=true")
+	}
+	if r2.Damage != 40 || r2.HPRemaining != 200_000-40 {
+		t.Fatalf("乙解锁后应真打：期望 damage=40 hp=%d，得到 damage=%d hp=%d", 200_000-40, r2.Damage, r2.HPRemaining)
+	}
+	// 甲再来 → 见乙的真出手 → 也解锁真打。
+	r3, err := service.StrikeWorldBoss(ctx, wid, bossID, jia)
+	if err != nil {
+		t.Fatalf("甲再出手失败: %v", err)
+	}
+	if r3.SoloLocked || r3.Damage != 40 {
+		t.Fatalf("甲再来应解锁真打（群体已成），得到 SoloLocked=%v damage=%d", r3.SoloLocked, r3.Damage)
+	}
+}
+
+// 跨玩家硬不变量：单人撞门被锁时，只产 append-only cross_event（SOLO_ATTEMPT），绝不直写任何单位的受保护状态/钱包，
+// 也绝不改另一名玩家（旁观者）的任何单位行。只读改本侧（这里连本侧 HP/wallet 都不动，因为根本没开打）。
+func TestWorldBossSoloLockWritesOnlyAppendOnlyCrossEventNotOthersState(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
+	lone := bossStriker(t, ctx, repo, 261, "撞门者", 40)
+	// 另一名「旁观」玩家的单位：撞门者被锁绝不能动它一根毫毛。
+	bystander := bossStriker(t, ctx, repo, 262, "局外人", 40)
+	bystander.Status.HP = 77
+	bystander.Status.Wallet = 333
+	bystander.Status.Morale = 0.5
+	if err := repo.Save(ctx, *bystander); err != nil {
+		t.Fatalf("保存局外人失败: %v", err)
+	}
+
+	loneBefore, _ := repo.GetByID(ctx, lone.ID)
+
+	r, err := service.StrikeWorldBoss(ctx, wid, bossID, lone)
+	if err != nil {
+		t.Fatalf("撞门不应报错: %v", err)
+	}
+	if !r.SoloLocked {
+		t.Fatalf("应被单人锁")
+	}
+
+	// 撞门者自身受保护状态/钱包不变（没开打，零状态变更）。
+	loneAfter, _ := repo.GetByID(ctx, lone.ID)
+	if loneAfter.Status.HP != loneBefore.Status.HP || loneAfter.Status.Wallet != loneBefore.Status.Wallet ||
+		loneAfter.Status.Morale != loneBefore.Status.Morale || loneAfter.Status.Loyalty != loneBefore.Status.Loyalty {
+		t.Fatalf("单人锁不应改撞门者任何受保护状态/钱包：before=%+v after=%+v", loneBefore.Status, loneAfter.Status)
+	}
+	// 旁观玩家的单位行分毫不动（绝不直写他人 units）。
+	byAfter, _ := repo.GetByID(ctx, bystander.ID)
+	if byAfter.Status.HP != 77 || byAfter.Status.Wallet != 333 || byAfter.Status.Morale != 0.5 {
+		t.Fatalf("单人锁绝不应改另一玩家单位：期望 hp=77 wallet=333 morale=0.5，得到 %+v", byAfter.Status)
+	}
+	// 只产了一条 append-only cross_event（SOLO_ATTEMPT），且不是 strike（不进贡献账本）。
+	if got := countCrossKind(t, service, wid, worldBossSoloAttemptKind); got != 1 {
+		t.Fatalf("应恰产 1 条 append-only SOLO_ATTEMPT，得到 %d", got)
+	}
+	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossStrike); got != 0 {
+		t.Fatalf("单人锁绝不应记贡献账本（strike），得到 %d", got)
 	}
 }
 
@@ -613,11 +745,13 @@ func TestWorldBossSoloPartyUnlockedWhenLedgerHasOthers(t *testing.T) {
 	a := bossStriker(t, ctx, repo, 231, "先驱", 40)
 	b := bossStriker(t, ctx, repo, 232, "后到", 40)
 
-	// 先驱以协作入口出手，账本里留下一名出手者。
-	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err != nil {
-		t.Fatalf("先驱出手失败: %v", err)
+	// 先驱以协作入口（nil party）首位撞门 → 被单人锁、账本留下一条 SOLO_ATTEMPT（自举留痕）。
+	if r, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err != nil {
+		t.Fatalf("先驱撞门失败: %v", err)
+	} else if !r.SoloLocked {
+		t.Fatalf("先驱为首位单人，应被锁、记 attempt")
 	}
-	// 后到者即便声明单人 party：账本已有别人（先驱）→ 围猎已成群体 → 解锁。
+	// 后到者即便声明单人 party：账本已有别人（先驱的 attempt，≥2 distinct）→ 围猎已成群体 → 解锁。
 	r, err := service.StrikeWorldBossParty(ctx, wid, bossID, b, []string{b.ID})
 	if err != nil {
 		t.Fatalf("后到者出手失败: %v", err)

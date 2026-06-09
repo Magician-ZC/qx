@@ -8,8 +8,10 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -552,6 +554,220 @@ func TestScanExclusiveContests_FlagOff(t *testing.T) {
 	service.scanExclusiveContestsAtBoundary(ctx, state, []unit.Record{suitor1, suitor2, beloved})
 	if len(state.Logs) != 0 {
 		t.Fatalf("flag 关应整方法 no-op，却写了 %d 条日志", len(state.Logs))
+	}
+}
+
+// crossUnitDBSnapshot 直读 units 表的 (version, profile_json, session_id)——用于断言「跨会话单位在本会话裁决后零改写」。
+// 直查表列（绕过 ORM）确保我们看见的是物理行真相，而非内存视图。
+func crossUnitDBSnapshot(t *testing.T, db *sql.DB, unitID string) (version int64, profileJSON string, sessionID string) {
+	t.Helper()
+	if err := db.QueryRow(
+		`SELECT version, profile_json, session_id FROM units WHERE id = ?`, unitID,
+	).Scan(&version, &profileJSON, &sessionID); err != nil {
+		t.Fatalf("读 units 行 %q 失败: %v", unitID, err)
+	}
+	return version, profileJSON, sessionID
+}
+
+// TestScanExclusiveContests_CrossSessionLoserMemoryUntouched 是修 ①(HIGH 跨玩家硬不变量) 的补盲区回归：
+// 本会话裁决里有一个**跨会话**败者时，绝不直写他库单位的记忆 blob——其 units 行的 version / profile_json / session_id
+// 在本会话边界扫描前后必须**逐字节不变**（旧 bug：filterLocalContenders 保留跨会话 UnitID → recordContestConsolation
+// 对其 GetByID + rememberUnitWithSource→units.Save 直写他库 profile_json，使 version+1、profile_json 被改写）。
+// 跨会话败者的补偿只应经 cross_event 的 CROSS_CONTEST_LOSE，由其各自 session 读出翻译。
+func TestScanExclusiveContests_CrossSessionLoserMemoryUntouched(t *testing.T) {
+	t.Setenv("QUNXIANG_ZEROSUM_CONTEST", "true")
+	db, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	// 本会话 s1 的强求亲者（高魅力/好感 → Score 远高）+ 对象；另一会话 s2 的弱求亲者（跨会话，必为败者）。
+	// 固定 unitID（BootstrapRecord 默认随机 UUID 会使 arbitration Key 随机 → 胜者非确定）：用固定 ID + 悬殊 Score 差，
+	// 使本会话强者在这组固定 Key 下**确定性**胜出，跨会话弱者**确定性**落败 → 稳定走「败者补偿」分支（否则胜者无补偿、
+	// 不变量会变成空过，无法捕获 bug）。
+	localSuitor := unit.BootstrapRecord(2, "s1", "player", "本会话郎")
+	localSuitor.ID = "local_suitor_fixed"
+	localSuitor.Stats.Primary.Charisma = 60 // 抬高本侧 Score，使跨会话弱者确定性落败、走败者补偿分支
+	beloved := unit.BootstrapRecord(6, "s1", "player", "对象")
+	beloved.ID = "beloved_fixed"
+	crossSuitor := unit.BootstrapRecord(8, "s2", "rival", "异乡客")
+	crossSuitor.ID = "cross_suitor_fixed"
+	crossSuitor.Stats.Primary.Charisma = 1 // 跨会话弱者：仅离线楼板兜底，Score 远低于本侧
+	for _, u := range []unit.Record{localSuitor, beloved, crossSuitor} {
+		if err := repo.Save(ctx, u); err != nil {
+			t.Fatalf("save %s: %v", u.ID, err)
+		}
+		if err := repo.SetUnitScope(ctx, u.ID, "w1", "r1"); err != nil {
+			t.Fatalf("set scope %s: %v", u.ID, err)
+		}
+	}
+	for _, s := range []unit.Record{localSuitor, crossSuitor} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO relations (source_unit_id, target_unit_id, trust, fear, affection, rivalry) VALUES (?, ?, ?, ?, ?, ?)`,
+			s.ID, beloved.ID, 6.0, 0.0, 7.0, 0.0,
+		); err != nil {
+			t.Fatalf("insert relation: %v", err)
+		}
+	}
+
+	// 快照跨会话单位的物理行（裁决前）。
+	verBefore, profBefore, sessBefore := crossUnitDBSnapshot(t, db, crossSuitor.ID)
+	if sessBefore != "s2" {
+		t.Fatalf("前置：跨会话单位应属 s2，实得 %q", sessBefore)
+	}
+
+	state := &State{ID: "s1", PlayerFactionID: "player", WorldID: "w1"}
+	state.TurnState.Turn = 6
+	// 本会话 units 只含本局单位；crossSuitor 经跨会话候选池拉入并参与裁决（其 Score 进 arbitration）。
+	service.scanExclusiveContestsAtBoundary(ctx, state, []unit.Record{localSuitor, beloved})
+
+	// 核心断言：无论谁胜，跨会话单位的物理行（version / profile_json / session_id）必须**逐字节不变**——
+	// 它绝不被本会话的补偿路径写入记忆（跨玩家硬不变量）。
+	verAfter, profAfter, sessAfter := crossUnitDBSnapshot(t, db, crossSuitor.ID)
+	if verAfter != verBefore {
+		t.Fatalf("跨会话单位 version 被改写（疑似直写他库记忆）：前 %d 后 %d", verBefore, verAfter)
+	}
+	if profAfter != profBefore {
+		t.Fatalf("跨会话单位 profile_json 被改写（疑似直写他库记忆 blob）：\n前=%s\n后=%s", profBefore, profAfter)
+	}
+	if sessAfter != "s2" {
+		t.Fatalf("绝不应改写他人单位 session_id：期望 s2，实得 %q", sessAfter)
+	}
+
+	// 同时验证「确实发生了跨会话裁决」（否则上面的不变量是空过）：应裁出 1 条联姻日志 + 至少 1 条带 arbitration_key 的 cross_event。
+	var marriageLog int
+	var winnerID string
+	for _, l := range state.Logs {
+		if l.Kind == "contest_marriage" {
+			marriageLog++
+			winnerID = l.ActorUnitID
+		}
+	}
+	if marriageLog != 1 {
+		t.Fatalf("应裁出 1 条联姻日志（证明跨会话候选已接通、不变量非空过），实得 %d", marriageLog)
+	}
+	// 显式锁定「跨会话者确为败者」——固定 ID + 悬殊 Score 下本会话强者确定性胜出，从而**确实**走到「跨会话败者补偿」
+	// 分支（这正是旧 bug 直写他库记忆的触发路径）；若此处变成跨会话者胜出，上面的不变量会沦为空过，需调参数。
+	if winnerID != localSuitor.ID {
+		t.Fatalf("本测试需本会话强者确定性胜出（使跨会话者为败者、命中补偿分支）：胜者实得 %q，期望 %q", winnerID, localSuitor.ID)
+	}
+	var crossCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cross_events WHERE arbitration_key IS NOT NULL AND arbitration_key <> ''`,
+	).Scan(&crossCount); err != nil {
+		t.Fatalf("统计 cross_events 失败: %v", err)
+	}
+	if crossCount == 0 {
+		t.Fatalf("跨会话裁决应留痕 cross_event（败者补偿走 cross_event 而非直写他库记忆），实得 0")
+	}
+
+	// 本会话败者（若有）才允许被本侧记补偿——这里 localSuitor 若胜则无补偿、若败则记本侧；二者都不触碰跨会话行。
+	// 再校验：localSuitor 自己的物理行可被本侧写（合法），但绝不影响上面对 crossSuitor 的不变量。
+}
+
+// TestResolveExclusiveContest_PublicPathGuardsCrossSessionLoser 是守卫 (a) 的单元级回归：直接走**公开入口**
+// （localLoserIDs=nil，补偿名单含全部败者），传入一个真实属于他 session 的败者，验证 recordContestConsolation 的
+// loser.SessionID 守卫兜底——他库单位的 version / profile_json 不被改写，只在本侧记一条可读日志。
+func TestResolveExclusiveContest_PublicPathGuardsCrossSessionLoser(t *testing.T) {
+	db, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	// 本会话 s1 强者（让其大概率胜）+ 他会话 s2 弱者（大概率败、走补偿守卫）。
+	winner := unit.BootstrapRecord(2, "s1", "player", "本会话胜者")
+	otherLoser := unit.BootstrapRecord(8, "s2", "rival", "他会话败者")
+	for _, u := range []unit.Record{winner, otherLoser} {
+		if err := repo.Save(ctx, u); err != nil {
+			t.Fatalf("save %s: %v", u.ID, err)
+		}
+	}
+	verBefore, profBefore, _ := crossUnitDBSnapshot(t, db, otherLoser.ID)
+
+	// 公开入口：worldID 非空触发 cross_event 留痕；全量候选含 s2 单位，Score 让 s1 强者占优。
+	state := &State{ID: "s1", WorldID: "w1"}
+	state.TurnState.Turn = 6
+	logsBefore := len(state.Logs)
+	if _, err := service.ResolveExclusiveContest(ctx, state, "so_x", "marriage:so_x", []ContestContender{
+		{UnitID: winner.ID, Score: 100},   // 本会话强者，几乎必胜
+		{UnitID: otherLoser.ID, Score: 1}, // 他会话弱者，几乎必败 → 触发补偿守卫
+	}); err != nil {
+		t.Fatalf("公开入口裁决出错: %v", err)
+	}
+
+	// 无论谁胜：他会话单位的物理行必须不变（公开入口的 loser.SessionID 守卫兜底，绝不直写他库记忆 blob）。
+	verAfter, profAfter, sessAfter := crossUnitDBSnapshot(t, db, otherLoser.ID)
+	if verAfter != verBefore || profAfter != profBefore {
+		t.Fatalf("公开入口绝不应直写他会话败者记忆：version 前 %d 后 %d；profile_json 是否变=%v",
+			verBefore, verAfter, profAfter != profBefore)
+	}
+	if sessAfter != "s2" {
+		t.Fatalf("绝不应改写他会话单位 session_id：期望 s2，实得 %q", sessAfter)
+	}
+	// 守卫触发时仍允许在本侧记一条可读日志（本会话视角可见的「这次没争过」）——不强制条数，仅确认未 panic、流程走通。
+	_ = logsBefore
+}
+
+// TestScanExclusiveContests_CrossSessionSameWinnerAndIdempotent 是修 ②(MEDIUM) 的回归：
+// 两个 session 视角对同一 (worldID, SO.id, tick) 各自裁决，应得**同一胜者**（候选集合 view-independent + 离线楼板统一施加），
+// 且 cross_event 幂等——同 Key 同胜者重复写主键冲突被安全忽略，全 world 对同一裁决只留**一条** CROSS_CONTEST_WIN。
+func TestScanExclusiveContests_CrossSessionSameWinnerAndIdempotent(t *testing.T) {
+	t.Setenv("QUNXIANG_ZEROSUM_CONTEST", "true")
+	db, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	// 两会话各一求亲者（魅力不同 → Score 不同，但楼板统一施加使两视角对同一单位算同一 Score）+ 共同对象。
+	a := unit.BootstrapRecord(2, "s1", "player", "甲求亲")
+	a.Stats.Primary.Charisma = 12
+	beloved := unit.BootstrapRecord(6, "s1", "player", "对象")
+	b := unit.BootstrapRecord(8, "s2", "rival", "乙求亲")
+	b.Stats.Primary.Charisma = 5
+	for _, u := range []unit.Record{a, beloved, b} {
+		if err := repo.Save(ctx, u); err != nil {
+			t.Fatalf("save %s: %v", u.ID, err)
+		}
+		if err := repo.SetUnitScope(ctx, u.ID, "w1", "r1"); err != nil {
+			t.Fatalf("scope %s: %v", u.ID, err)
+		}
+	}
+	for _, s := range []unit.Record{a, b} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO relations (source_unit_id, target_unit_id, trust, fear, affection, rivalry) VALUES (?, ?, ?, ?, ?, ?)`,
+			s.ID, beloved.ID, 6.0, 0.0, 7.0, 0.0,
+		); err != nil {
+			t.Fatalf("insert relation: %v", err)
+		}
+	}
+
+	winnerFrom := func(stateID string, turn int, localUnits []unit.Record) string {
+		st := &State{ID: stateID, PlayerFactionID: factionOf(localUnits[0]), WorldID: "w1"}
+		st.TurnState.Turn = turn
+		service.scanExclusiveContestsAtBoundary(ctx, st, localUnits)
+		for _, l := range st.Logs {
+			if l.Kind == "contest_marriage" {
+				return l.ActorUnitID
+			}
+		}
+		return ""
+	}
+	// 甲方视角（self=s1，a 是本会话、b 是跨会话）与乙方视角（self=s2，b 是本会话、a 是跨会话）——
+	// 同 world + 同对象 + 同补投窗口 tick=6 → 候选集合一致、楼板对每个物理单位一致 → 必得同胜者（与「谁是 self」无关）。
+	w1 := winnerFrom("s1", 6, []unit.Record{a, beloved})
+	w2 := winnerFrom("s2", 6, []unit.Record{b, beloved})
+	if w1 == "" || w2 == "" {
+		t.Fatalf("两侧都应裁出胜者：w1=%q w2=%q", w1, w2)
+	}
+	if w1 != w2 {
+		t.Fatalf("修 ②：两 session 视角同 Key 应得同胜者（候选集合+楼板 view-independent），甲方=%s 乙方=%s", w1, w2)
+	}
+
+	// 幂等：两侧都写 CROSS_CONTEST_WIN（actor=target=同一胜者、同 arbitration_key → 同主键），第二次撞 PK 被忽略，
+	// 全 world 对该 Key 只应留 1 条 CROSS_CONTEST_WIN（不再两条矛盾胜者）。
+	var winRows int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cross_events WHERE event_kind = ? AND world_id = ? AND arbitration_key IS NOT NULL`,
+		string(events.ReasonCrossContestWin), "w1",
+	).Scan(&winRows); err != nil {
+		t.Fatalf("统计 CROSS_CONTEST_WIN 失败: %v", err)
+	}
+	if winRows != 1 {
+		t.Fatalf("修 ② 幂等：同 (world,SO,tick) 应只留 1 条 CROSS_CONTEST_WIN，实得 %d（两条=矛盾胜者/未幂等）", winRows)
 	}
 }
 
