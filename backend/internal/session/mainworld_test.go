@@ -16,9 +16,9 @@ import (
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/faction"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
-	"qunxiang/backend/internal/villageseed"
 )
 
 // newMainWorldTestService 起一个临时 SQLite 上的完整 Service（含 sessions 仓库），用于主世界入口集成测试。
@@ -79,9 +79,9 @@ func TestCreateMainWorldCharacter_BirthBindingAndCharter(t *testing.T) {
 	if len(state.PlayerUnitIDs) != 1 {
 		t.Fatalf("主世界入口应只造 1 个玩家角色，得到 %d", len(state.PlayerUnitIDs))
 	}
-	// 敌方 NPC 保留（战棋接管战需要对手）。
-	if len(state.EnemyUnitIDs) == 0 {
-		t.Fatalf("敌方 NPC 阵营应保留，得到 0 个敌方单位")
+	// 阵营开放世界 F1：不再播种固定敌方 NPC（EnemyUnitIDs 应为空）。
+	if len(state.EnemyUnitIDs) != 0 {
+		t.Fatalf("阵营开放世界不应有固定敌方单位，得到 %d 个", len(state.EnemyUnitIDs))
 	}
 	if state.WorldID != defaultWorldID {
 		t.Fatalf("state.WorldID 应为 world_default，得到 %q", state.WorldID)
@@ -117,6 +117,64 @@ func TestCreateMainWorldCharacter_BirthBindingAndCharter(t *testing.T) {
 	if len(charter.Redlines) == 0 || charter.Redlines[0].Text != "绝不向背叛者低头" {
 		t.Fatalf("红线应落进宪章 Redlines，得到 %+v", charter.Redlines)
 	}
+
+	// 阵营开放世界 F1：玩家角色应带阵营 + 道德轴（=该阵营道德基准）。
+	// 本例出身「边境猎户」+ 夙愿「找到失散的妹妹」无秩序/混乱触发词，但「猎户」无自由触发词 → 默认 freedom。
+	if hero.Faction != faction.IDFreedom {
+		t.Fatalf("玩家角色应落 freedom 阵营（默认），得到 %q", hero.Faction)
+	}
+	if hero.MoralAlignment != faction.BaselineFor(faction.IDFreedom) {
+		t.Fatalf("玩家角色道德轴应=freedom 道德基准，得到 %+v", hero.MoralAlignment)
+	}
+	// 视图应回显阵营 + 道德轴 + 出生据点。
+	if view.Faction != faction.IDFreedom {
+		t.Fatalf("视图应回显阵营 freedom，得到 %q", view.Faction)
+	}
+	if view.SpawnRegion == "" || faction.FactionForSpawnPoint(view.SpawnRegion) != faction.IDFreedom {
+		t.Fatalf("视图出生据点应属 freedom 阵营，得到 %q", view.SpawnRegion)
+	}
+
+	// 阵营开放世界 F1：出生据点应播种公共同阵营 NPC（带 freedom 道德基准、阵营指纹 Lineage），
+	// 且**绝无玩家↔NPC 的私人 relations 行**（公共非私人）。
+	factionNPCs := 0
+	for _, rec := range units {
+		if isFactionNPCRecord(&rec) {
+			factionNPCs++
+			if rec.Faction != faction.IDFreedom {
+				t.Fatalf("公共 NPC 应属 freedom 阵营，得到 %q", rec.Faction)
+			}
+			if rec.MoralAlignment.IsZero() {
+				t.Fatalf("公共 NPC 道德轴不应为零值（应≈freedom 基准），NPC=%s", rec.Identity.Name)
+			}
+			// 道德轴应≈基准（freedom 维应仍占主导）。
+			if faction.DominantFaction(rec.MoralAlignment) != faction.IDFreedom {
+				t.Fatalf("公共 NPC 道德轴主导维应仍为 freedom，得到 %+v", rec.MoralAlignment)
+			}
+		}
+	}
+	if factionNPCs < 8 || factionNPCs > 12 {
+		t.Fatalf("出生据点应播种 8–12 个公共同阵营 NPC，得到 %d", factionNPCs)
+	}
+	// 公共非私人：不存在以玩家主角为一端的 relations 行（关系靠后天游历相遇结成）。
+	if rows := countRelationsForUnit(ctx, t, service.db, view.UnitID); rows != 0 {
+		t.Fatalf("公共阵营 NPC 不应建玩家↔NPC 私人关系行，得到 %d 行", rows)
+	}
+}
+
+// countRelationsForUnit 查 relations 表中以某单位为任一端的关系行数（验「公共非私人=零玩家关系行」）。
+// relations 表不存在/无该单位行均返回 0（best-effort：表结构未知时保守返回 0，不让测试因 schema 偏差误失败）。
+func countRelationsForUnit(ctx context.Context, t *testing.T, db *sql.DB, unitID string) int {
+	t.Helper()
+	var n int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM relations WHERE source_unit_id = ? OR target_unit_id = ?`,
+		unitID, unitID,
+	).Scan(&n)
+	if err != nil {
+		// 表/列不存在时（schema 与预期不符）保守返回 0：本断言只在 relations 表存在时有意义。
+		return 0
+	}
+	return n
 }
 
 // TestCreateMainWorldCharacter_Idempotent 验证幂等持久：同账号二次 POST 不重复降生，GET resume 拿到同一角色。
@@ -205,51 +263,84 @@ func TestMainWorldCharacter_AccountIsolation(t *testing.T) {
 	}
 }
 
-// TestCreateMainWorldCharacter_OriginStillSeedsVillage 是 H1 回归：带「出身」的主角降生后，身边仍应织满 20 人村庄。
-// bug：applyMainWorldPersona 把主角 Lineage 覆写为出身原型（如「边境猎户」），命中 isSeededVillagerRecord 的村民
-// Lineage 指纹；旧版 sessionAlreadyHasVillage 不剔除玩家单位，会把先于 seedVillage 落库的主角误判为「本局已织村」，
-// 致整张 20 人关系网被整体跳过（零村民），破「她身边已有二十个有名有姓的人」核心承诺。
-// 这里**显式校验村民人数恰为 20**（剔除玩家单位后命中村民指纹的记录数），正是旧测试漏掉的断言。
-func TestCreateMainWorldCharacter_OriginStillSeedsVillage(t *testing.T) {
+// TestCreateMainWorldCharacter_ExplicitFactionSpawnsCorrectly 验证显式选阵营降生：
+// 玩家角色落该阵营 + 道德基准、出生据点属该阵营、出生点公共 NPC 全属该阵营且无玩家私人关系行。
+func TestCreateMainWorldCharacter_ExplicitFactionSpawnsCorrectly(t *testing.T) {
 	_, service := newMainWorldTestService(t)
 	ctx := context.Background()
 
-	view, err := service.CreateMainWorldCharacter(ctx, "acc-origin", MainWorldCharacterInput{
-		Name:   "苏霜",
-		Origin: "边境猎户", // 触发 bug 的关键：出身覆写主角 Lineage，命中村民 Lineage 指纹
+	view, err := service.CreateMainWorldCharacter(ctx, "acc-order", MainWorldCharacterInput{
+		Name:    "执律者",
+		Faction: faction.IDOrder, // 显式选秩序阵营
 	})
 	if err != nil {
-		t.Fatalf("带出身降生失败: %v", err)
+		t.Fatalf("选秩序阵营降生失败: %v", err)
+	}
+	if view.Faction != faction.IDOrder {
+		t.Fatalf("玩家应落秩序阵营，得到 %q", view.Faction)
+	}
+	if view.MoralAlignment != faction.BaselineFor(faction.IDOrder) {
+		t.Fatalf("玩家道德轴应=秩序道德基准，得到 %+v", view.MoralAlignment)
+	}
+	if faction.FactionForSpawnPoint(view.SpawnRegion) != faction.IDOrder {
+		t.Fatalf("出生据点应属秩序阵营，得到 %q", view.SpawnRegion)
 	}
 
 	records, err := service.units.ListBySession(ctx, view.SessionID)
 	if err != nil {
 		t.Fatalf("ListBySession 失败: %v", err)
 	}
-	// 玩家主角单位集合（须从村民计数中剔除——主角带出身会命中村民指纹）。
-	playerSet := map[string]struct{}{view.UnitID: {}}
-
-	villagers := 0
-	heroLineage := ""
-	heroCountedAsVillager := false
+	npcs := 0
 	for i := range records {
-		if _, isPlayer := playerSet[records[i].ID]; isPlayer {
-			heroLineage = records[i].Identity.Lineage
-			// 确认主角确实命中了村民指纹（否则 bug 前提不成立、测试无意义）。
-			if isSeededVillagerRecord(&records[i]) {
-				heroCountedAsVillager = true
+		if isFactionNPCRecord(&records[i]) {
+			npcs++
+			if records[i].Faction != faction.IDOrder {
+				t.Fatalf("公共 NPC 应属秩序阵营，得到 %q", records[i].Faction)
 			}
-			continue
-		}
-		if isSeededVillagerRecord(&records[i]) {
-			villagers++
 		}
 	}
-	if !heroCountedAsVillager {
-		t.Fatalf("前提失效：带出身的主角应命中村民 Lineage 指纹（lineage=%q），否则本回归无意义", heroLineage)
+	if npcs < 8 || npcs > 12 {
+		t.Fatalf("秩序据点应播种 8–12 个公共 NPC，得到 %d", npcs)
 	}
-	if villagers != villageseed.VillageSize {
-		t.Fatalf("带出身降生后村民应恰为 %d 人（H1：出身致整张村庄被跳过的回归），得到 %d", villageseed.VillageSize, villagers)
+	if rows := countRelationsForUnit(ctx, t, service.db, view.UnitID); rows != 0 {
+		t.Fatalf("公共阵营 NPC 不应建玩家↔NPC 私人关系行，得到 %d 行", rows)
+	}
+}
+
+// TestSeedFactionSpawn_Idempotent 验证出生据点播种的幂等守卫：同 session 重复播种不重复造人。
+func TestSeedFactionSpawn_Idempotent(t *testing.T) {
+	_, service := newMainWorldTestService(t)
+	ctx := context.Background()
+
+	const sessionID = "sess-spawn-idem"
+	first, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42)
+	if err != nil {
+		t.Fatalf("首次播种失败: %v", err)
+	}
+	if first < 8 || first > 12 {
+		t.Fatalf("首次应播种 8–12 个公共 NPC，得到 %d", first)
+	}
+	// 二次播种：幂等守卫命中，返回 0、不重复造人。
+	again, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42)
+	if err != nil {
+		t.Fatalf("二次播种失败: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("二次播种应幂等命中返回 0，得到 %d", again)
+	}
+	// 落库层硬校验：阵营 NPC 总数仍等于首次播种数（未重复）。
+	records, err := service.units.ListBySession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("ListBySession 失败: %v", err)
+	}
+	total := 0
+	for i := range records {
+		if isFactionNPCRecord(&records[i]) {
+			total++
+		}
+	}
+	if total != first {
+		t.Fatalf("幂等后阵营 NPC 总数应仍为 %d（未重复造人），得到 %d", first, total)
 	}
 }
 

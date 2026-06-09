@@ -218,13 +218,15 @@ func mergeStringSet(next []string, current []string) []string {
 // marshalUnitBlobs 把 Record 的四个 JSON blob 序列化出来（Save / SaveOptimistic 共用）。
 func marshalUnitBlobs(record Record) (profile, personality, statusJSON, inventory string, err error) {
 	encodedProfile, err := json.Marshal(profileDocument{
-		Identity: record.Identity,
-		Stats:    record.Stats,
-		Skills:   record.Skills,
-		Social:   record.Social,
-		Memory:   record.Memory,
-		Ambition: record.Ambition,
-		Pinned:   record.Pinned,
+		Identity:       record.Identity,
+		Stats:          record.Stats,
+		Skills:         record.Skills,
+		Social:         record.Social,
+		Memory:         record.Memory,
+		Ambition:       record.Ambition,
+		Faction:        record.Faction,
+		MoralAlignment: record.MoralAlignment,
+		Pinned:         record.Pinned,
 	})
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("marshal unit profile: %w", err)
@@ -437,6 +439,8 @@ func (repository *Repository) GetByID(ctx context.Context, unitID string) (Recor
 	}
 	record.Memory = profile.Memory
 	record.Ambition = profile.Ambition
+	record.Faction = profile.Faction
+	record.MoralAlignment = profile.MoralAlignment
 	record.Pinned = profile.Pinned
 	if record.Identity.Name == "" {
 		record.Identity.Name = displayName
@@ -514,6 +518,8 @@ func (repository *Repository) ListBySession(ctx context.Context, sessionID strin
 		record.Skills = profile.Skills
 		record.Memory = profile.Memory
 		record.Ambition = profile.Ambition
+		record.Faction = profile.Faction
+		record.MoralAlignment = profile.MoralAlignment
 		record.Pinned = profile.Pinned
 		if record.Identity.Name == "" {
 			record.Identity.Name = displayName

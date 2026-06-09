@@ -2,6 +2,8 @@ package unit
 
 // 文件说明：单位档案核心数据结构定义，覆盖身份、属性、技能、状态、记忆与库存序列化模型。
 
+import "qunxiang/backend/internal/faction"
+
 type Identity struct {
 	Name             string `json:"name"`
 	Nickname         string `json:"nickname"`
@@ -162,30 +164,39 @@ type Inventory struct {
 
 // Profile 结构体用于承载该模块的核心数据。
 type Profile struct {
-	Identity    Identity      `json:"identity"`
-	Stats       Stats         `json:"stats"`
-	Skills      SkillSet      `json:"skills"`
-	Personality Personality   `json:"personality"`
-	Ambition    Ambition      `json:"ambition,omitempty"` // 六维野心向量；可被人格漂移调节，供离线自治目标重估参考
-	Social      SocialState   `json:"social"`
-	Status      Status        `json:"status"`
-	Memory      MemoryProfile `json:"memory"`
+	Identity       Identity               `json:"identity"`
+	Stats          Stats                  `json:"stats"`
+	Skills         SkillSet               `json:"skills"`
+	Personality    Personality            `json:"personality"`
+	Ambition       Ambition               `json:"ambition,omitempty"`        // 六维野心向量；可被人格漂移调节，供离线自治目标重估参考
+	Faction        string                 `json:"faction,omitempty"`         // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
+	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"` // 3 维数值道德轴；F2 阵营切换输入、自治偏置
+	Social         SocialState            `json:"social"`
+	Status         Status                 `json:"status"`
+	Memory         MemoryProfile          `json:"memory"`
 }
 
 // Record 结构体用于承载该模块的核心数据。
 type Record struct {
-	ID          string        `json:"id"`
-	SessionID   string        `json:"session_id"`
-	FactionID   string        `json:"faction_id"`
-	Identity    Identity      `json:"identity"`
-	Stats       Stats         `json:"stats"`
-	Skills      SkillSet      `json:"skills"`
-	Personality Personality   `json:"personality"`
-	Ambition    Ambition      `json:"ambition,omitempty"` // 六维野心向量（与 Profile.Ambition 对齐），可被人格漂移调节
-	Social      SocialState   `json:"social"`
-	Status      Status        `json:"status"`
-	Memory      MemoryProfile `json:"memory"`
-	Inventory   Inventory     `json:"inventory"`
+	ID          string      `json:"id"`
+	SessionID   string      `json:"session_id"`
+	FactionID   string      `json:"faction_id"`
+	Identity    Identity    `json:"identity"`
+	Stats       Stats       `json:"stats"`
+	Skills      SkillSet    `json:"skills"`
+	Personality Personality `json:"personality"`
+	Ambition    Ambition    `json:"ambition,omitempty"` // 六维野心向量（与 Profile.Ambition 对齐），可被人格漂移调节
+	// Faction 是单位当前所属阵营（freedom/order/chaos）——阵营开放世界 F1 引入的非保护字段（仿 Ambition，
+	// 直接读写、不走 StatusMutator），随 profile blob 持久化。omitempty：旧存档/既有单位无此字段反序列化为空阵营，向后兼容。
+	Faction string `json:"faction,omitempty"`
+	// MoralAlignment 是单位的 3 维数值道德轴 {Freedom,Order,Chaos}（各 [0,100]）——F2 阵营切换的输入、自治决策偏置。
+	// 非保护字段（仿 Ambition，直接读写、不走 StatusMutator），随 profile blob 持久化。
+	// omitempty + 内嵌零值省略：旧存档/既有单位无此字段反序列化为零值道德轴（无明显倾向），向后兼容、零影响。
+	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"`
+	Social         SocialState            `json:"social"`
+	Status         Status                 `json:"status"`
+	Memory         MemoryProfile          `json:"memory"`
+	Inventory      Inventory              `json:"inventory"`
 	// Pinned 标记「不可自动处置」的角色（如传家血脉/受保护单位）——离线自治逻辑绝不自动卖/弃/送走。
 	// omitempty：旧存档无此字段反序列化为 false，向后兼容。
 	Pinned bool `json:"pinned,omitempty"`
@@ -206,24 +217,28 @@ func (record Record) DisplayName() string {
 // Profile 导出单位可序列化的档案视图。
 func (record Record) Profile() Profile {
 	return Profile{
-		Identity:    record.Identity,
-		Stats:       record.Stats,
-		Skills:      record.Skills,
-		Personality: record.Personality,
-		Ambition:    record.Ambition,
-		Social:      record.Social,
-		Status:      record.Status,
-		Memory:      record.Memory,
+		Identity:       record.Identity,
+		Stats:          record.Stats,
+		Skills:         record.Skills,
+		Personality:    record.Personality,
+		Ambition:       record.Ambition,
+		Faction:        record.Faction,
+		MoralAlignment: record.MoralAlignment,
+		Social:         record.Social,
+		Status:         record.Status,
+		Memory:         record.Memory,
 	}
 }
 
 // profileDocument 结构体用于承载该模块的核心数据。
 type profileDocument struct {
-	Identity Identity      `json:"identity"`
-	Stats    Stats         `json:"stats"`
-	Skills   SkillSet      `json:"skills"`
-	Social   SocialState   `json:"social"`
-	Memory   MemoryProfile `json:"memory"`
-	Ambition Ambition      `json:"ambition,omitempty"` // 六维野心向量（自发行为引力源），随 profile blob 持久化
-	Pinned   bool          `json:"pinned,omitempty"`   // 角色级「不可自动处置」标记（离线自治绝不自动卖/弃/送走）
+	Identity       Identity               `json:"identity"`
+	Stats          Stats                  `json:"stats"`
+	Skills         SkillSet               `json:"skills"`
+	Social         SocialState            `json:"social"`
+	Memory         MemoryProfile          `json:"memory"`
+	Ambition       Ambition               `json:"ambition,omitempty"`        // 六维野心向量（自发行为引力源），随 profile blob 持久化
+	Faction        string                 `json:"faction,omitempty"`         // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
+	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"` // 3 维数值道德轴；F2 阵营切换输入、自治偏置
+	Pinned         bool                   `json:"pinned,omitempty"`          // 角色级「不可自动处置」标记（离线自治绝不自动卖/弃/送走）
 }

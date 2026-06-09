@@ -1169,8 +1169,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			Desire  string `json:"desire"`
 			Wound   string `json:"wound"`
 			Redline string `json:"redline"`
+			Faction string `json:"faction"` // 阵营开放世界 F1：玩家选阵营（freedom/order/chaos，空则据出身/夙愿启发选）
 		}
-		// 解析失败不致命：全字段可空（降生会用占位名兜底），故仅尽力绑定。
+		// 解析失败不致命：全字段可空（降生会用占位名兜底、阵营据启发选），故仅尽力绑定。
 		_ = c.ShouldBindJSON(&request)
 		character, err := newSessionService().CreateMainWorldCharacter(c.Request.Context(), accountID, session.MainWorldCharacterInput{
 			Name:    request.Name,
@@ -1178,6 +1179,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			Desire:  request.Desire,
 			Wound:   request.Wound,
 			Redline: request.Redline,
+			Faction: request.Faction,
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

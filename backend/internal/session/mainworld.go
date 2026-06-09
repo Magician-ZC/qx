@@ -25,6 +25,7 @@ import (
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/turns"
+	"qunxiang/backend/internal/faction"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
@@ -38,17 +39,24 @@ type MainWorldCharacterInput struct {
 	Desire  string // 夙愿（长期目标，写进传记 + 离线宪章 LongTermGoals）
 	Wound   string // 创伤（写进传记，作为性格底色）
 	Redline string // 红线（绝对禁区，写进离线宪章 Redlines + 归因校验锚）
+	// Faction 是玩家选择的阵营（freedom/order/chaos，亦容中文别名「自由/秩序/混乱」）。
+	// 空/非法 → 据出身/夙愿启发选（resolveBirthFaction），最终恒落三阵营之一（默认 freedom）。
+	// 决定玩家角色的 Faction + MoralAlignment（=该阵营道德基准）、出生据点 region、出生点公共 NPC 阵营。
+	Faction string
 }
 
 // MainWorldCharacter 是「账号在主世界的角色」对外视图（resume / 降生都返回它）。
 type MainWorldCharacter struct {
-	HasCharacter bool   `json:"has_character"`        // 该账号在 world_default 是否已有角色
-	SessionID    string `json:"session_id,omitempty"` // 角色所在 session（命运/战棋推进都用它）
-	UnitID       string `json:"unit_id,omitempty"`    // 玩家主角单位 ID
-	Name         string `json:"name,omitempty"`       // 角色名
-	WorldID      string `json:"world_id,omitempty"`   // 所属世界（恒 world_default）
-	Origin       string `json:"origin,omitempty"`     // 出身
-	Created      bool   `json:"created,omitempty"`    // 本次调用是否新降生（幂等命中既有时为 false）
+	HasCharacter   bool                   `json:"has_character"`             // 该账号在 world_default 是否已有角色
+	SessionID      string                 `json:"session_id,omitempty"`      // 角色所在 session（命运/战棋推进都用它）
+	UnitID         string                 `json:"unit_id,omitempty"`         // 玩家主角单位 ID
+	Name           string                 `json:"name,omitempty"`            // 角色名
+	WorldID        string                 `json:"world_id,omitempty"`        // 所属世界（恒 world_default）
+	Origin         string                 `json:"origin,omitempty"`          // 出身
+	Faction        string                 `json:"faction,omitempty"`         // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
+	SpawnRegion    string                 `json:"spawn_region,omitempty"`    // 出生据点 region（据 faction+seed 确定性落点）
+	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"` // 3 维数值道德轴（=阵营道德基准），供前端/F2 读
+	Created        bool                   `json:"created,omitempty"`         // 本次调用是否新降生（幂等命中既有时为 false）
 }
 
 // ResumeMainWorldCharacter 查某账号在共享主世界 world_default 的持久角色（GET /api/me/character 的后端）。
@@ -99,6 +107,9 @@ func (service *Service) mainWorldCharacterView(ctx context.Context, sessionID st
 	if hero, ok := byID[view.UnitID]; ok {
 		view.Name = hero.Identity.Name
 		view.Origin = hero.Identity.Lineage
+		view.Faction = hero.Faction
+		view.MoralAlignment = hero.MoralAlignment
+		view.SpawnRegion = faction.PickSpawnPoint(hero.Faction, state.RandomSeed)
 	}
 	return view, nil
 }
@@ -182,6 +193,11 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		UpdatedAt:            now,
 	}
 
+	// 阵营开放世界 F1：解析玩家阵营（空/非法 → 据出身/夙愿启发选，最终恒落三阵营之一），
+	// 并据 faction + seed 确定性选出生据点 region。
+	chosenFaction := resolveBirthFaction(in)
+	spawnRegion := faction.PickSpawnPoint(chosenFaction, seed)
+
 	// 玩家主角（1 人）：复用 bootstrapBattleUnit（与建局同一造人底座），再覆写捏人字段（名字/出身/传记）。
 	heroName := strings.TrimSpace(in.Name)
 	if heroName == "" {
@@ -192,24 +208,18 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, err
 	}
 	applyMainWorldPersona(&hero, in)
+	// 玩家角色的阵营 + 道德轴（=该阵营道德基准）：非保护字段，直接写（不走 Mutator，仿 Ambition）。
+	hero.Faction = chosenFaction
+	hero.MoralAlignment = faction.BaselineFor(chosenFaction)
 	if err := service.units.Save(ctx, hero); err != nil {
 		return MainWorldCharacter{}, err
 	}
 	state.PlayerUnitIDs = append(state.PlayerUnitIDs, hero.ID)
 
-	// 敌方 NPC 阵营（保留，供关键战接管对手）：server-authoritative，敌方全局策略执行期由 LLM 生成（与旧局一致）。
-	enemySpawns := []world.Coord{{Q: 5, R: 2}, {Q: 5, R: 4}, {Q: 4, R: 3}}
-	enemyNames := []string{"灰狼前锋", "断桥游兵", "黑镰斥候"}
-	for index, spawn := range enemySpawns {
-		record, bErr := bootstrapBattleUnit(seed+int64(index)+101, sessionID, state.EnemyFactionID, enemyNames[index], spawn)
-		if bErr != nil {
-			return MainWorldCharacter{}, bErr
-		}
-		if err := service.units.Save(ctx, record); err != nil {
-			return MainWorldCharacter{}, err
-		}
-		state.EnemyUnitIDs = append(state.EnemyUnitIDs, record.ID)
-	}
+	// 阵营开放世界 F1：不再播种固定敌方 NPC（EnemyUnitIDs 留空）。开放世界没有「固定对手阵营」，
+	// 战斗对手（PvE 威胁/跨阵营遭遇）由 F3 在游历相遇时动态接入；当前留空对 session 安全
+	// （updateOutcome 对「从未配过敌方」的开放世界局短路、不误判胜负——见 updateOutcome 注释）。
+	state.EnemyUnitIDs = []string{}
 
 	appendDirective(&state, Directive{
 		ID:        uuid.NewString(),
@@ -243,8 +253,9 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 
 	// 离线调度 seed（开关关时 no-op，best-effort）。
 	_ = service.seedAmbientForUnits(ctx, sessionID, state.WorldID, state.PlayerUnitIDs)
-	// 20 人出生关系网（QUNXIANG_MAIN_VILLAGE 默认开，best-effort，幂等守卫防重复造人）。
-	service.seedVillageForSession(ctx, &state)
+	// 阵营开放世界 F1：在出生据点播种 8–12 个公共同阵营 NPC（替换原 20 人私人村庄网）。
+	// 公共而非私人——不建玩家↔NPC 的 relations 行，关系靠后天游历相遇结成。best-effort、幂等。
+	service.SeedFactionSpawnBestEffort(ctx, sessionID, chosenFaction, spawnRegion, seed+1)
 
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return MainWorldCharacter{}, err
@@ -265,21 +276,57 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, err
 	}
 
-	// 敌方全局策略首刷（LLM，失败走启发式 fallback；与建局非 draft 路径同口径）。
+	// 阵营开放世界 F1：开放世界局无固定敌方阵营（EnemyUnitIDs 留空），跳过敌方全局策略首刷
+	// （否则会为不存在的对手白白发一次 LLM 调用）。仅当本局确有敌方单位时才刷（战斗对手 F3 动态接入后此分支自然恢复）。
 	loadedState, units, err := service.loadSession(ctx, sessionID)
 	if err != nil {
 		return MainWorldCharacter{}, err
 	}
 	state = loadedState
-	service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
-	if err := service.sessions.Save(ctx, &state); err != nil {
-		return MainWorldCharacter{}, err
+	if len(state.EnemyUnitIDs) > 0 {
+		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
+		if err := service.sessions.Save(ctx, &state); err != nil {
+			return MainWorldCharacter{}, err
+		}
 	}
 	if err := service.recordPhaseBoundarySnapshot(ctx, &state, nil); err != nil {
 		return MainWorldCharacter{}, err
 	}
 
 	return service.mainWorldCharacterView(ctx, sessionID, worldID, true)
+}
+
+// resolveBirthFaction 解析玩家选择的阵营，确保最终恒落三阵营之一：
+//   - 显式给了合法阵营（freedom/order/chaos，或中文别名「自由/秩序/混乱」）→ 直接用。
+//   - 空/非法 → 据出身/夙愿做关键词启发式选阵营（自由/秩序/混乱各有触发词）；无命中默认 freedom。
+//
+// 确定性、纯字符串匹配（无 LLM、无随机）：同一输入永远解析同一阵营，可复现。
+func resolveBirthFaction(in MainWorldCharacterInput) string {
+	if fid := faction.Normalize(in.Faction); fid != "" {
+		return fid
+	}
+	hay := strings.ToLower(strings.TrimSpace(in.Origin + " " + in.Desire + " " + in.Wound))
+	if hay != "" {
+		// 秩序触发词：律法/规矩/守护/官府等。
+		for _, kw := range []string{"律", "法", "规", "守", "护", "官", "府", "秩序", "教谕", "卫"} {
+			if strings.Contains(hay, kw) {
+				return faction.IDOrder
+			}
+		}
+		// 混乱触发词：复仇/破坏/废墟/亡命等。
+		for _, kw := range []string{"仇", "恨", "复仇", "破", "废", "乱", "逃", "盗", "黑市", "亡命"} {
+			if strings.Contains(hay, kw) {
+				return faction.IDChaos
+			}
+		}
+		// 自由触发词：游侠/流浪/自由/野等（命中即归自由；其余落默认自由）。
+		for _, kw := range []string{"侠", "游", "浪", "自由", "野", "牧", "漂"} {
+			if strings.Contains(hay, kw) {
+				return faction.IDFreedom
+			}
+		}
+	}
+	return faction.IDFreedom
 }
 
 // applyMainWorldPersona 把捏人的出身/夙愿/创伤覆写进角色身份与传记（决策 prompt 会读 Biography）。

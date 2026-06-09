@@ -4229,6 +4229,13 @@ func nearestBattleReady(targetIDs []string, byID map[string]*unit.Record, actor 
 
 // updateOutcome 根据当前战场结果推进胜负状态。
 func updateOutcome(state *State, byID map[string]*unit.Record) bool {
+	// 阵营开放世界 F1：开放世界局从不配固定敌方阵营（EnemyUnitIDs 始终为空）——此时「敌方全灭」判胜没有意义，
+	// 不能因「0 个敌方=enemyAlive==0」就在第一个行动后误判玩家获胜、提前结束这局。故无敌方时短路、保持 ongoing。
+	// 正常战棋局的敌方单位即便战死仍留在 EnemyUnitIDs 里（只是 isBattleReady=false），故 len>0 恒成立，行为不变。
+	// 战斗对手由 F3 在游历相遇时动态接入 EnemyUnitIDs，届时本短路自然失效、胜负判定恢复。
+	if len(state.EnemyUnitIDs) == 0 {
+		return false
+	}
 	playerAlive := countBattleReady(state.PlayerUnitIDs, byID)
 	enemyAlive := countBattleReady(state.EnemyUnitIDs, byID)
 
