@@ -201,6 +201,9 @@ func (repository *Repository) Get(ctx context.Context, sessionID string) (State,
 	if state.WildUnitIDs == nil {
 		state.WildUnitIDs = []string{}
 	}
+	if state.AmbientUnitIDs == nil {
+		state.AmbientUnitIDs = []string{}
+	}
 	if state.PhaseReady == nil {
 		state.PhaseReady = map[string]bool{}
 	}

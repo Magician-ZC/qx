@@ -255,7 +255,12 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	_ = service.seedAmbientForUnits(ctx, sessionID, state.WorldID, state.PlayerUnitIDs)
 	// 阵营开放世界 F1：在出生据点播种 8–12 个公共同阵营 NPC（替换原 20 人私人村庄网）。
 	// 公共而非私人——不建玩家↔NPC 的 relations 行，关系靠后天游历相遇结成。best-effort、幂等。
-	service.SeedFactionSpawnBestEffort(ctx, sessionID, chosenFaction, spawnRegion, seed+1)
+	// 命运地图舞台：把落库 NPC 的 ID 收进 state.AmbientUnitIDs（**不是 WildUnitIDs**）——使其静态上图可见
+	// （进 AmbientUnits 快照、有 hex 坐标），但绝不进执行 order（不自治、零 LLM）。须在下方 sessions.Save 前 append。
+	// 把内存里已生成的 state.Map 直接传进去给 NPC 散布坐标（此时 state 尚未落库——不能绕 DB 读，否则 NPC 全叠 (0,0)；
+	// 也不能在此早 Save，会触发并发降生唯一索引 TOCTOU 报错，绕过 W-E 的冲突兜底）。
+	ambientNPCIDs := service.SeedFactionSpawnBestEffort(ctx, sessionID, chosenFaction, spawnRegion, seed+1, state.Map)
+	state.AmbientUnitIDs = append(state.AmbientUnitIDs, ambientNPCIDs...)
 
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return MainWorldCharacter{}, err

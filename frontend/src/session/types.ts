@@ -795,4 +795,9 @@ export type SessionSnapshot = {
   player_units: BattleUnit[];
   enemy_units: BattleUnit[];
   wild_units?: BattleUnit[];
+  // ambient_units：阵营据点的公共 NPC（faction_spawn 播种、命运主世界静态可见）。
+  // 契约（crossFileNeeds）：后端 State.AmbientUnitIDs → Snapshot.AmbientUnits（json:"ambient_units"）。
+  // 这些 NPC **只作静态可见**（在格子上有坐标、可被她在地图上看到），**绝不进 WildUnitIDs/执行 order**，
+  // 否则每拍会多触发 8~12 次 LLM 决策、成本爆炸。前端只读渲染：区别色 + 小一号 token。
+  ambient_units?: BattleUnit[];
 };

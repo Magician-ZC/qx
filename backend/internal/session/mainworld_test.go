@@ -19,6 +19,7 @@ import (
 	"qunxiang/backend/internal/faction"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/world"
 )
 
 // newMainWorldTestService 起一个临时 SQLite 上的完整 Service（含 sessions 仓库），用于主世界入口集成测试。
@@ -313,20 +314,20 @@ func TestSeedFactionSpawn_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	const sessionID = "sess-spawn-idem"
-	first, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42)
+	first, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42, world.MapSnapshot{})
 	if err != nil {
 		t.Fatalf("首次播种失败: %v", err)
 	}
-	if first < 8 || first > 12 {
-		t.Fatalf("首次应播种 8–12 个公共 NPC，得到 %d", first)
+	if n := len(first.UnitIDs); n < 8 || n > 12 {
+		t.Fatalf("首次应播种 8–12 个公共 NPC，得到 %d", n)
 	}
-	// 二次播种：幂等守卫命中，返回 0、不重复造人。
-	again, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42)
+	// 二次播种：幂等守卫命中，返回空 UnitIDs、不重复造人。
+	again, err := service.SeedFactionSpawn(ctx, sessionID, faction.IDChaos, "ash_warrens", 42, world.MapSnapshot{})
 	if err != nil {
 		t.Fatalf("二次播种失败: %v", err)
 	}
-	if again != 0 {
-		t.Fatalf("二次播种应幂等命中返回 0，得到 %d", again)
+	if n := len(again.UnitIDs); n != 0 {
+		t.Fatalf("二次播种应幂等命中返回 0，得到 %d", n)
 	}
 	// 落库层硬校验：阵营 NPC 总数仍等于首次播种数（未重复）。
 	records, err := service.units.ListBySession(ctx, sessionID)
@@ -339,8 +340,8 @@ func TestSeedFactionSpawn_Idempotent(t *testing.T) {
 			total++
 		}
 	}
-	if total != first {
-		t.Fatalf("幂等后阵营 NPC 总数应仍为 %d（未重复造人），得到 %d", first, total)
+	if total != len(first.UnitIDs) {
+		t.Fatalf("幂等后阵营 NPC 总数应仍为 %d（未重复造人），得到 %d", len(first.UnitIDs), total)
 	}
 }
 

@@ -178,6 +178,7 @@ var knownGameplayFlags = []FlagSpec{
 	// —— 三阵营开放世界（F2/F3） —— //
 	{Name: "QUNXIANG_FACTION_SWITCH", Description: "阵营切换（满足隐藏条件时角色概率切换阵营）；默认关。", DefaultOn: false},
 	{Name: "QUNXIANG_FACTION_PVE", Description: "阵营冲突遭遇（游历中撞见敌对阵营的人时低频概率触发一次冲突遭遇，对手入敌方队列、出命运卡可接管）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_AMBIENT_WANDER", Description: "出生点公共 NPC 轻量游走（回合边界确定性低概率挪一格，让命运地图舞台活起来，纯代码零 LLM）；默认关，关时 NPC 静态站着。", DefaultOn: false},
 
 	// —— 多档字符串型 —— //
 	{

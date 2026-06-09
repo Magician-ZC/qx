@@ -590,11 +590,17 @@ type State struct {
 	PlayerUnitIDs         []string          `json:"player_unit_ids"`
 	EnemyUnitIDs          []string          `json:"enemy_unit_ids"`
 	WildUnitIDs           []string          `json:"wild_unit_ids,omitempty"`
-	Structures            []Structure       `json:"structures"`
-	GraveMarkers          []GraveMarker     `json:"grave_markers,omitempty"`
-	GroundLootDrops       []GroundLootDrop  `json:"ground_loot_drops,omitempty"`
-	GlobalDirective       Directive         `json:"global_directive"`
-	DirectiveHistory      []Directive       `json:"directive_history"`
+	// AmbientUnitIDs 是阵营开放世界出生点的「公共同阵营 NPC」单位 ID（faction_spawn.go SeedFactionSpawn 落库）。
+	// 这批 NPC **静态上图可见**（进 AmbientUnits 快照、有 hex 坐标），但**绝不自治、零 LLM**——
+	// 故**绝不进 PlayerUnitIDs/EnemyUnitIDs/WildUnitIDs**（那三者会进 buildExecutionOrderByATB 被唤醒决策，
+	// 每拍 +8~12 次 LLM 成本爆炸）。仅做轻量确定性微游走（settleExecutionToDeploymentBoundary，flag 门控）。
+	// 随 state_json 持久化；omitempty 保旧存档反序列化兼容。
+	AmbientUnitIDs   []string         `json:"ambient_unit_ids,omitempty"`
+	Structures       []Structure      `json:"structures"`
+	GraveMarkers     []GraveMarker    `json:"grave_markers,omitempty"`
+	GroundLootDrops  []GroundLootDrop `json:"ground_loot_drops,omitempty"`
+	GlobalDirective  Directive        `json:"global_directive"`
+	DirectiveHistory []Directive      `json:"directive_history"`
 	// UnitCharters 是每单位的离线宪章（unitID → OfflineCharter），玩家不在场时单位据此自治。
 	// 长效授权（区别于随回合刷新的 Directive），整块随 state_json 持久化；omitempty 保旧存档反序列化。
 	UnitCharters       map[string]OfflineCharter `json:"unit_charters,omitempty"`
@@ -667,6 +673,9 @@ type Snapshot struct {
 	PlayerUnits         []unit.Record      `json:"player_units"`
 	EnemyUnits          []unit.Record      `json:"enemy_units"`
 	WildUnits           []unit.Record      `json:"wild_units,omitempty"`
+	// AmbientUnits 是出生点公共同阵营 NPC 的快照视图（静态上图可见，有 hex 坐标）。前端据此把 NPC 画上命运地图。
+	// **观战性质**：这批 NPC 不自治、零 LLM、不进执行 order；前端按位置渲染即可（契约：SessionSnapshot.ambient_units）。
+	AmbientUnits []unit.Record `json:"ambient_units,omitempty"`
 }
 
 // PhaseBoundarySnapshotMeta 结构体用于承载该模块的核心数据。

@@ -1940,6 +1940,7 @@ func buildDecisionPrompt(
 	fmt.Fprintln(&builder, "6. 每次只执行一个动作；不要在一个 JSON 里表达移动后再交易、移动后再攻击、采集后再建造。")
 	fmt.Fprintln(&builder, "行动取舍:")
 	fmt.Fprintln(&builder, "1. 生存：饥饿度低于 10 且有 eat:ration 必须先吃；低于 30 且有 eat:ration 时优先吃。若没有口粮但饥饿偏低，要优先找吃的：候选里有 gather/hunt/forage/fish 就采集食物，有 trade/dialogue/say 就向相邻单位交易或求口粮，有 move 就朝森林、河谷、村庄、城市、农田或可采集地块移动。受伤且有治疗药剂时，可选择治疗。")
+	fmt.Fprintln(&builder, "1b. 探索：没有饥饿、伤情或贴身威胁时，不要原地干站着；有 move 候选就主动逛起来——朝可见的同阵营 NPC、村庄、城市或地标移动，去串门、打探、四处走走，让自己活在世界里而不是钉在原地。")
 	fmt.Fprintln(&builder, "2. 方针：defiant=false 时方针是强信号，但不是遥控；能落实且不违背生存、人格、关键记忆、关系和现场风险的候选应优先。defiant=true 时可优先保命或按自身判断。")
 	fmt.Fprintln(&builder, "3. 战斗：有贴身敌人时，优先攻击、防御、撤离、支援或治疗；没有安全压力时，不要把 observe/defend 当默认动作。")
 	fmt.Fprintf(&builder, "4. 关系：romance/family 是主动推进亲密关系或家庭的候选；romance 用于表白/确认伴侣，但需要双方至少多个不同回合真实交流并有熟悉基础后才会出现或触发。只在你本人愿意、对方也可能愿意且候选存在时选择；没有 romance 候选时，应先用 dialogue/say 自然相处。family 用于互为恋人且已过至少一回合后共同养育孩子；双方同意后进入 %d 回合孕期，到期才会出生；孕期单位不能参与战斗和建筑；阵营方针不能强迫恋爱或生育。\n", pregnancyDurationTurns)
