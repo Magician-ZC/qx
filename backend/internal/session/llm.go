@@ -315,6 +315,9 @@ func (service *Service) generateUnitDecision(
 					Category:    events.CategoryLifecycle,
 					Payload:     map[string]any{"reason": reason, "turn": state.TurnState.Turn},
 					WorldID:     state.WorldID,
+					// F4 H1：补 Tick = 执行回合（OOC 在执行期产生）。漏设则恒落 tick=0，致边界道德漂移按执行回合
+					// 查询时这条 OOC→Freedom 信号永不命中（与战斗杀伤主信号同病）。
+					Tick: state.TurnState.Turn,
 				})
 			}
 			return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil

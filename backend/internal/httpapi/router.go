@@ -2213,6 +2213,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"encounter": result})
 	})
 
+	// 玩家亲自接管一场阵营冲突（F4 H3 接管侧）：把扫描期出可接管命运卡所造的对手接入 EnemyUnitIDs，
+	// 仅此刻（玩家在场）才让对手进可致死战斗——绝不在玩家离线的异步执行里离线掷骰打死主角。
+	// opponentId 取命运卡 battle.threat_id（阵营冲突对手 ID，fconflict_ 前缀）。真实动作，QUNXIANG_FACTION_PVE 门控的产物。
+	router.POST("/api/sessions/:id/faction-conflict/:opponentId/takeover", func(c *gin.Context) {
+		if err := newSessionService().ResolveFactionConflictTakeover(c.Request.Context(), c.Param("id"), c.Param("opponentId")); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// 玩家直接接管/嘱咐某角色一次（落成可被回响 order_echo 引用的真实事件）。真实动作。
 	router.POST("/api/sessions/:id/units/:unitId/intervene", func(c *gin.Context) {
 		var body struct {

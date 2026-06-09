@@ -217,6 +217,70 @@ func TestSettleMoralDrift_NilSafe(t *testing.T) {
 	}
 }
 
+// TestSettleMoralDrift_TickOffByOneContract 复现 F4 H1「写事件 tick=N、边界查询 turn=N+1」差一契约：
+// 执行期事件落 tick=N（执行回合），但回合边界恒在 TurnState.Advance 之后跑（state.TurnState.Turn 已 = N+1）。
+// 故 settleMoralDrift 必须按**执行回合 N**（= 边界 turn-1 = executedTurn）查信号，否则战斗杀伤主信号永不命中、漂移名存实亡。
+//
+// 本测试刻意让「写事件 tick」与「错误查询 turn(N+1)」差一来复现真实漏判，再证修后传 executedTurn=N 能命中：
+//   - 用 executedTurn=N 调 settleMoralDrift → 命中 Chaos 信号、确有漂移（修后契约）。
+//   - 直接用边界回合 N+1 调 moralSignalsThisTurn → 查不到（证明若按部署回合查就会漏，修前的 bug 行为）。
+func TestSettleMoralDrift_TickOffByOneContract(t *testing.T) {
+	db, repo, service := newDriftTestService(t)
+	ctx := context.Background()
+
+	rec := unit.BootstrapRecord(11, "s-tick", "player", "阿契")
+	rec.Faction = faction.IDFreedom
+	rec.MoralAlignment = faction.MoralAlignment{Freedom: 70, Order: 15, Chaos: 15}
+	if err := repo.Save(ctx, rec); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	const executionTurn = 7   // 执行期事件落此 tick
+	const boundaryTurn = 8    // 边界恒在 Advance 之后跑，state.TurnState.Turn = N+1
+	// 执行期战斗杀伤主信号（→Chaos），落 tick=执行回合 N。
+	seedActorEvent(t, db, "s-tick", rec.ID, events.ReasonCombatDown, executionTurn)
+
+	// 反例守护：若按部署回合 N+1 查（修前 bug），查不到任何信号（差一漏判）。
+	if sigs := service.moralSignalsThisTurn(ctx, rec.ID, boundaryTurn); len(sigs) != 0 {
+		t.Fatalf("按部署回合 N+1 查应漏判（差一），却得到 %d 条信号——契约失效", len(sigs))
+	}
+
+	// 修后契约：边界传 executedTurn = boundaryTurn-1 = 执行回合 N，settleMoralDrift 按 N 查 → 命中战斗杀伤主信号、确有漂移。
+	changes, err := service.settleMoralDrift(ctx, "s-tick", &rec, boundaryTurn-1)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatalf("按执行回合查应命中战斗杀伤主信号并漂移，得 0 条变化（差一漏判未修）")
+	}
+	hitChaos := false
+	for _, c := range changes {
+		if c.Axis == string(moralAxisChaos) && c.Delta > 0 {
+			hitChaos = true
+		}
+	}
+	if !hitChaos {
+		t.Fatalf("战斗杀伤主信号应推 Chaos，得到 %+v", changes)
+	}
+	// 留痕 Tick 应落执行回合（审计与信号源同回合自洽）。
+	if tick := reasonEventTick(t, db, rec.ID, events.ReasonMoralDrift); tick != executionTurn {
+		t.Fatalf("MORAL_DRIFT 留痕 Tick 应 = 执行回合 %d，得 %d", executionTurn, tick)
+	}
+}
+
+// reasonEventTick 取某单位某 reason code 最新一条事件的 tick（验留痕 Tick 落对回合）。
+func reasonEventTick(t *testing.T, db *sql.DB, unitID string, code events.ReasonCode) int {
+	t.Helper()
+	var tick int
+	if err := db.QueryRow(
+		`SELECT tick FROM events WHERE actor_unit_id = ? AND reason_code = ? ORDER BY occurred_at DESC LIMIT 1`,
+		unitID, string(code),
+	).Scan(&tick); err != nil {
+		t.Fatalf("取 %s 事件 tick 失败: %v", code, err)
+	}
+	return tick
+}
+
 // seedActorEvent 往 events 表写一条「actor=unitID、tick=turn」的事件（喂 moralSignalsThisTurn 查询）。
 func seedActorEvent(t *testing.T, db *sql.DB, sessionID, unitID string, code events.ReasonCode, turn int) {
 	t.Helper()

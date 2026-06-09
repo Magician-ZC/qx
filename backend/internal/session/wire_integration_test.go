@@ -233,14 +233,15 @@ func TestActorItemPinned(t *testing.T) {
 
 func TestSettleAutonomyAtDeploymentBoundary_Safe(t *testing.T) {
 	service, ctx := newWireService(t)
-	// nil/空入参不应 panic。
-	service.settleAutonomyAtDeploymentBoundary(ctx, nil, nil)
-	service.settleAutonomyAtDeploymentBoundary(ctx, &State{ID: "s1"}, nil)
+	// nil/空入参不应 panic（末参 executedTurn 任意）。
+	service.settleAutonomyAtDeploymentBoundary(ctx, nil, nil, 0)
+	service.settleAutonomyAtDeploymentBoundary(ctx, &State{ID: "s1"}, nil, 0)
 	// 含一个活单位 + 一个已死单位：不 panic，已死单位被跳过。
 	alive := unit.BootstrapRecord(5, "s1", "player", "活")
 	dead := unit.BootstrapRecord(6, "s1", "player", "亡")
 	dead.Status.LifeState = unit.LifeStateDead
 	state := &State{ID: "s1"}
 	state.TurnState.Turn = 24 // 命中 goalReassessCadence 边界（无 LLM 时走确定性 fallback）。
-	service.settleAutonomyAtDeploymentBoundary(ctx, state, []unit.Record{alive, dead})
+	// executedTurn = 边界 turn-1 = 23（执行回合，喂道德漂移事件查询）。
+	service.settleAutonomyAtDeploymentBoundary(ctx, state, []unit.Record{alive, dead}, state.TurnState.Turn-1)
 }

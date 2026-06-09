@@ -891,38 +891,11 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		if err := service.refreshSessionMemoryDecay(ctx, &state, units); err != nil {
 			return Snapshot{}, err
 		}
-		// 自治长线结算（best-effort，绝不中断主链路）：在回合边界对每个单位
-		//   ① 周期目标重估 reassessGoalIfDue（goal_reassess.go，cadence=24，未到期内部 no-op；无 LLM 时走确定性 fallback 落高显著度记忆）；
-		//   ② 自然衰老人格漂移 ApplyPersonalityDrift(aging)（personality_drift.go，单次每维 ≤0.03、单日每维 ≤0.10，确定性 FNV，不直改受保护字段）。
-		// 失败只吞错、不污染回合推进；与 hunger/memory-decay 同批，确定性可复现。
-		service.settleAutonomyAtDeploymentBoundary(ctx, &state, units)
-		service.settleConsentsAtBoundary(ctx, &state)                                          // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
-		if n, err := service.degradeLayer3ConsentTimeoutsAtBoundary(ctx, &state); err != nil { // §6 层3 consent 超时降级：未应答→COMBAT_MAIMED 残废（绝不阵亡），best-effort
-			appendLog(&state, "consent", fmt.Sprintf("层3 consent 超时降级扫描失败：%v", err), "", "")
-		} else if n > 0 {
-			appendLog(&state, "consent", fmt.Sprintf("%d 名重伤者久未等到你的回应，活了下来，却落下了一辈子的残。", n), "", "")
-		}
-		service.refreshThreats(ctx, &state, units)                            // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
-		service.surfaceCrossEventsAtBoundary(ctx, &state, units)              // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
-		if n, err := service.ResolveDungeonTimeout(ctx, &state); err != nil { // 副本异步分段 charter 超时兜底（QUNXIANG_DUNGEON 默认关，best-effort；关时零行为）
-			appendLog(&state, "dungeon", fmt.Sprintf("副本超时兜底失败：%v", err), "", "")
-		} else if n > 0 {
-			appendLog(&state, "dungeon", fmt.Sprintf("%d 处副本因你久未归来，依先前叮嘱见好就收了。", n), "", "")
-		}
-		if _, err := service.ScanAndWorldizeInbound(ctx, &state, units); err != nil { // 双向世界化入向探针扇出（QUNXIANG_WORLDIZE_INBOUND 默认关，best-effort；关时 no-op）
-			appendLog(&state, "world", fmt.Sprintf("入向世界化扇出失败：%v", err), "", "")
-		}
-		if state.WorldID != "" { // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
-			if err := service.maybeRefreshWorldBoss(ctx, state.WorldID); err != nil {
-				appendLog(&state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")
-			}
-		}
-		service.scanAndMatch(ctx, &state, units)                    // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
-		service.scanAndSocialize(ctx, &state, units)                // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
-		service.scanFactionConflicts(ctx, &state, units)            // 阵营冲突遭遇扫描（QUNXIANG_FACTION_PVE 默认关零行为，低频确定性，best-effort 吞错不阻断；触发的 EnemyUnitIDs append 由紧随的 Save 落库）
-		service.scanExclusiveContestsAtBoundary(ctx, &state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
-		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
-		appendSessionMetricsLog(&state)
+		// Execution→Deployment 整批边界结算（自治长线/consent/威胁/跨玩家/副本/世界化/撮合/社交/阵营冲突/零和等）。
+		// 抽成公共方法 settleExecutionToDeploymentBoundary，让同步分支与 advanceAfterAsyncExecution（生产恒走异步）共用
+		// 同一批钩子——根治此前异步路径全缺这批边界功能、致多波建的边界能力在生产默认全不运行（F4 H2）。
+		// executedTurn = state.TurnState.Turn-1（边界恒在 Advance 之后，故此即执行回合 N），供道德漂移按执行回合查信号（F4 H1）。
+		service.settleExecutionToDeploymentBoundary(ctx, &state, units, state.TurnState.Turn-1)
 		units = nil
 	}
 
@@ -942,13 +915,69 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 	return service.GetSnapshot(ctx, sessionID)
 }
 
+// settleExecutionToDeploymentBoundary 是 Execution→Deployment 回合边界的整批 best-effort 结算（F4 H2：根治同步/异步两路分叉）。
+//
+// 此前这批钩子只内联在同步 AdvancePhase 的 PhaseExecution 分支里；生产恒走异步（router.go SetAsyncExecution(true)），
+// 而异步完成路径 advanceAfterAsyncExecution **全缺**这批钩子——致前面多波建的边界功能（道德漂移/阵营切换/目标重估/
+// 人格漂移/consent 兜底/层3 超时降级/威胁刷新/跨玩家事件/副本超时/世界化入向/世界 Boss/撮合/社交/阵营冲突/零和裁决）
+// 在生产默认**全不运行**。抽成本公共方法后，同步分支与 advanceAfterAsyncExecution 都调它，两路一致。
+//
+// 调用约定（两路对齐）：必须在 TurnState.Advance 之后调用（state.TurnState.Turn 已 = 部署回合 N+1）；executedTurn 传执行回合 N
+// （= 边界 turn-1），仅供道德漂移按执行回合查信号（F4 H1）。本方法**只读写既有钩子的库**、不负责 Save state——
+// 调用方（同步分支 / advanceAfterAsyncExecution）在其后各自按自身口径 Save（同步走 sessions.Save、异步走
+// saveSessionMergingExternalEvents），把本批钩子对 state（如 scanFactionConflicts 不再改 EnemyUnitIDs、consent 降级等）
+// 的就地变更随后落库。
+//
+// 全程 best-effort：每个钩子内部各自吞错（best-effort），单点失败绝不阻断其余钩子与回合推进。
+// flag 默认关的钩子（如 scanFactionConflicts 受 QUNXIANG_FACTION_PVE、ResolveDungeonTimeout 受 QUNXIANG_DUNGEON 等）关时零行为。
+func (service *Service) settleExecutionToDeploymentBoundary(ctx context.Context, state *State, units []unit.Record, executedTurn int) {
+	if service == nil || state == nil {
+		return
+	}
+	// 自治长线结算（best-effort）：周期目标重估 + 自然衰老人格漂移 + 道德漂移（按执行回合查信号）+ 阵营切换。
+	service.settleAutonomyAtDeploymentBoundary(ctx, state, units, executedTurn)
+	service.settleConsentsAtBoundary(ctx, state)                                          // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
+	if n, err := service.degradeLayer3ConsentTimeoutsAtBoundary(ctx, state); err != nil { // §6 层3 consent 超时降级：未应答→COMBAT_MAIMED 残废（绝不阵亡），best-effort
+		appendLog(state, "consent", fmt.Sprintf("层3 consent 超时降级扫描失败：%v", err), "", "")
+	} else if n > 0 {
+		appendLog(state, "consent", fmt.Sprintf("%d 名重伤者久未等到你的回应，活了下来，却落下了一辈子的残。", n), "", "")
+	}
+	service.refreshThreats(ctx, state, units)                            // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort；异步执行中 IsExecutionRunning 抑制自动开打）
+	service.surfaceCrossEventsAtBoundary(ctx, state, units)              // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
+	if n, err := service.ResolveDungeonTimeout(ctx, state); err != nil { // 副本异步分段 charter 超时兜底（QUNXIANG_DUNGEON 默认关，best-effort；关时零行为）
+		appendLog(state, "dungeon", fmt.Sprintf("副本超时兜底失败：%v", err), "", "")
+	} else if n > 0 {
+		appendLog(state, "dungeon", fmt.Sprintf("%d 处副本因你久未归来，依先前叮嘱见好就收了。", n), "", "")
+	}
+	if _, err := service.ScanAndWorldizeInbound(ctx, state, units); err != nil { // 双向世界化入向探针扇出（QUNXIANG_WORLDIZE_INBOUND 默认关，best-effort；关时 no-op）
+		appendLog(state, "world", fmt.Sprintf("入向世界化扇出失败：%v", err), "", "")
+	}
+	if state.WorldID != "" { // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
+		if err := service.maybeRefreshWorldBoss(ctx, state.WorldID); err != nil {
+			appendLog(state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")
+		}
+	}
+	service.scanAndMatch(ctx, state, units)                    // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
+	service.scanAndSocialize(ctx, state, units)                // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
+	service.scanFactionConflicts(ctx, state, units)            // 阵营冲突遭遇扫描（QUNXIANG_FACTION_PVE 默认关零行为；F4 H3：不再 append EnemyUnitIDs 走离线自动战，只出可接管命运卡）
+	service.scanExclusiveContestsAtBoundary(ctx, state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
+	service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, state, units, "deployment_phase_started")
+	appendSessionMetricsLog(state)
+}
+
 // settleAutonomyAtDeploymentBoundary 在 Execution→Deployment 回合边界对每个单位做自治长线结算：
 //   - reassessGoalIfDue：周期目标重估（goal_reassess.go），cadence=24，未到期内部自动 no-op。
 //   - ApplyPersonalityDrift(aging)：自然衰老人格漂移（personality_drift.go），步长/单日额度封顶，确定性。
+//   - settleMoralDrift：阵营道德轴漂移（F2），据**执行回合**道德信号确定性漂移。
+//   - maybeSwitchFaction：涌现式阵营改换（flag 门控）。
+//
+// turn = state.TurnState.Turn（已 Advance = 部署回合 N+1）：reassessGoalIfDue/ApplyPersonalityDrift/maybeSwitchFaction
+// 的 cadence 与确定性派生沿用部署回合（既有契约不变）。executedTurn = Advance 前的执行回合 N：**只**喂给 settleMoralDrift
+// 的事件查询（F4 H1 修：道德信号源落 tick=N，边界恒在 Advance 后，故须按执行回合 N 查询，否则战斗杀伤主信号永不命中）。
 //
 // 全程 best-effort：单个单位失败只吞错、不影响其余单位与回合推进；与 hunger/memory-decay 同处边界批结算。
 // 仅对活着的单位结算（衰老/目标重估对已退场单位无意义）。
-func (service *Service) settleAutonomyAtDeploymentBoundary(ctx context.Context, state *State, units []unit.Record) {
+func (service *Service) settleAutonomyAtDeploymentBoundary(ctx context.Context, state *State, units []unit.Record, executedTurn int) {
 	if service == nil || state == nil || len(units) == 0 {
 		return
 	}
@@ -962,9 +991,9 @@ func (service *Service) settleAutonomyAtDeploymentBoundary(ctx context.Context, 
 		_ = service.reassessGoalIfDue(ctx, state, record, turn)
 		// 自然衰老人格漂移（确定性 FNV；步长 ≤0.03/维、单日 ≤0.10/维；经 PERSONALITY_DRIFT 流程事件留痕）。
 		_, _ = service.ApplyPersonalityDrift(ctx, state.ID, record.ID, DriftReasonAging, turn)
-		// 阵营道德轴漂移（F2：据本回合道德效价信号确定性漂移 MoralAlignment，best-effort）；
+		// 阵营道德轴漂移（F2：据**执行回合**道德效价信号确定性漂移 MoralAlignment，best-effort）；
 		// 漂移先把连击/道德轴算好，再判阵营切换（QUNXIANG_FACTION_SWITCH 默认关，满足隐藏条件才概率切→命运卡）。
-		_, _ = service.settleMoralDrift(ctx, state.ID, record, turn)
+		_, _ = service.settleMoralDrift(ctx, state.ID, record, executedTurn)
 		_ = service.maybeSwitchFaction(ctx, state.ID, record, turn)
 	}
 }
@@ -1627,8 +1656,10 @@ func (service *Service) advanceAfterAsyncExecution(ctx context.Context, state *S
 		if err := service.refreshSessionMemoryDecay(ctx, state, units); err != nil {
 			return err
 		}
-		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, state, units, "deployment_phase_started")
-		appendSessionMetricsLog(state)
+		// Execution→Deployment 整批边界结算（F4 H2）：与同步分支共用同一公共方法，让生产恒走的异步收尾也跑全这批
+		// 边界钩子（道德漂移/阵营切换/目标重估/人格漂移/consent/威胁/跨玩家/副本/世界化/世界 Boss/撮合/社交/阵营冲突/零和），
+		// 不再因异步路径缺钩子而使多波建的边界能力在生产默认全不运行。executedTurn = Advance 前的执行回合 N（= 当前部署 turn-1，F4 H1）。
+		service.settleExecutionToDeploymentBoundary(ctx, state, units, state.TurnState.Turn-1)
 	}
 	if err := service.syncCombatFlags(ctx, state, units); err != nil {
 		return err

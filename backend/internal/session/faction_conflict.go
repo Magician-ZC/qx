@@ -152,10 +152,12 @@ func (service *Service) triggerFactionConflict(ctx context.Context, state *State
 		return false // 造对手失败：best-effort 放弃本场（不入队、不留痕、不出卡）。
 	}
 
-	// 接入战斗源：append 进敌方队列——让 updateOutcome 的胜负判定恢复（敌方非空），且玩家可手动接管这场战。
-	state.EnemyUnitIDs = append(state.EnemyUnitIDs, opponent.ID)
-	// 把敌对阵营纳入外交战争关系（best-effort，确定性）：使 opposingIDs/视野判定把对手视为敌方。
-	ensureFactionRelations(state)
+	// F4 H3（断源，对齐命运 Takeover 语义）：**不再** append 进 state.EnemyUnitIDs 走离线自动战。
+	// 阵营冲突恒在部署边界扫描，而生产恒走异步执行（玩家可能离线）；若把对手接入 EnemyUnitIDs，下一次执行的 ATB 主循环
+	// 会让对手在玩家不在场时确定性掷骰、经 ApplyFatalDamage 把主角永久打死（lives--→Dead），绕过 threat.go 的异步致死防护。
+	// 改为：对手只进**可接管命运卡的 battle 上下文**（"刀已出鞘"），仅当玩家**亲自接管**后（resolveFactionConflictTakeover）
+	// 才把对手接入可致死的战斗——玩家在场，非离线掷骰打死。这与 W-A 的 FateBattleContext/关键战手动接管语义一致。
+	// 对手已落库（GetByID 可取），接管时才注入 EnemyUnitIDs。
 
 	hostileZH := hostileDef.NameZH
 	cardSummary := fmt.Sprintf("她在路上撞见了%s阵营的人，刀已出鞘……", hostileZH)
@@ -193,7 +195,7 @@ func (service *Service) triggerFactionConflict(ctx context.Context, state *State
 			ThreatID:   opponent.ID,
 			ThreatName: fmt.Sprintf("%s阵营·%s", hostileZH, opponent.DisplayName()),
 			Tier:       "faction_conflict",
-			Takeover:   true, // 可一键接管打战棋（对手已入 EnemyUnitIDs，战棋主循环可推进这场战）
+			Takeover:   true, // 可一键接管打战棋；对手此刻**未**入 EnemyUnitIDs，玩家亲自接管（ResolveFactionConflictTakeover）后才接入（F4 H3）
 		},
 	})
 
@@ -203,6 +205,49 @@ func (service *Service) triggerFactionConflict(ctx context.Context, state *State
 		"hostile_faction": hostileFactionID,
 	})
 	return true
+}
+
+// ResolveFactionConflictTakeover 在玩家**亲自接管**一场阵营冲突时，才把对手接入可致死的战斗源（F4 H3 的接管侧）。
+//
+// 与 triggerFactionConflict 的「断源」配对：扫描期对手只落库 + 出可接管命运卡，绝不入 EnemyUnitIDs（避免玩家离线时
+// 异步执行主循环让对手把主角离线打死）。本方法是「玩家在场、主动接管」的唯一入口——把命运卡里 battle.threat_id 指向的对手
+// 接入 state.EnemyUnitIDs（恢复 updateOutcome 胜负判定 + 让 ATB 主循环可推进这场战），并补外交战争关系，落库。
+//
+// 守卫：对手须已落库且确为本局阵营冲突对手（fconflict_ 前缀）；已在 EnemyUnitIDs 则幂等返回（重复接管无副作用）。
+// 不改受保护字段；确定性；best-effort 之外的硬失败（载会话/落库失败）如实返回错误，供 HTTP 层反馈玩家。
+func (service *Service) ResolveFactionConflictTakeover(ctx context.Context, sessionID, opponentID string) error {
+	if service == nil || service.sessions == nil || service.units == nil {
+		return fmt.Errorf("resolve faction conflict takeover: missing dependencies")
+	}
+	opponentID = strings.TrimSpace(opponentID)
+	if sessionID == "" || opponentID == "" {
+		return fmt.Errorf("resolve faction conflict takeover: empty session/opponent id")
+	}
+	if !strings.HasPrefix(opponentID, "fconflict_") {
+		return fmt.Errorf("resolve faction conflict takeover: %q 不是阵营冲突对手", opponentID)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state, _, err := service.loadSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	// 对手须已落库（扫描期 triggerFactionConflict 已 Save）。
+	if _, err := service.units.GetByID(ctx, opponentID); err != nil {
+		return fmt.Errorf("resolve faction conflict takeover: 对手未找到：%w", err)
+	}
+	// 幂等：已接入则无需重复（重复接管不叠加对手、不重复入战）。
+	for _, id := range state.EnemyUnitIDs {
+		if id == opponentID {
+			return nil
+		}
+	}
+	// 玩家在场接管：此刻才把对手接入可致死战斗源。
+	state.EnemyUnitIDs = append(state.EnemyUnitIDs, opponentID)
+	ensureFactionRelations(&state)
+	appendLog(&state, "faction_conflict", "你接管了这场遭遇，刀锋相向。", "", opponentID)
+	return service.saveSessionMergingExternalEvents(ctx, &state)
 }
 
 // buildFactionConflictOpponent 生成一名与角色战力相称的敌对阵营对手（battle-ready、带敌对阵营道德底色）。

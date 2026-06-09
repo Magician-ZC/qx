@@ -11,10 +11,13 @@ package session
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"qunxiang/backend/internal/faction"
 	"qunxiang/backend/internal/featureflags"
+	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -74,7 +77,12 @@ func TestScanFactionConflicts_FlagOffNoOp(t *testing.T) {
 	}
 }
 
-func TestScanFactionConflicts_FlagOnAppendsOpponentAndCard(t *testing.T) {
+// TestScanFactionConflicts_FlagOnNoAutoEnlistOnlyTakeoverCard 验证 F4 H3 断源契约：阵营冲突触发后
+//   - 对手**不**入 state.EnemyUnitIDs（绝不走离线自动战、不会在玩家离线的异步执行里把主角打死）；
+//   - 对手仍落库、属敌对阵营（chaos），供玩家亲自接管时接入；
+//   - 仍出可接管命运卡（takeover=true，battle.threat_id 指向对手 ID）；
+//   - 仍有 FACTION_CONFLICT 留痕；确定性同输入同结果。
+func TestScanFactionConflicts_FlagOnNoAutoEnlistOnlyTakeoverCard(t *testing.T) {
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 
@@ -90,17 +98,20 @@ func TestScanFactionConflicts_FlagOnAppendsOpponentAndCard(t *testing.T) {
 	}
 	state.TurnState.Turn = turn
 
-	before := len(state.EnemyUnitIDs)
 	service.scanFactionConflicts(ctx, state, []unit.Record{actor})
 
-	if len(state.EnemyUnitIDs) != before+1 {
-		t.Fatalf("触发后应 append 一名对手进 EnemyUnitIDs，得 %d（before %d）", len(state.EnemyUnitIDs), before)
+	// H3 核心：对手绝不自动入战——EnemyUnitIDs 仍空（否则异步执行可离线打死主角）。
+	if len(state.EnemyUnitIDs) != 0 {
+		t.Fatalf("F4 H3：阵营冲突不应自动 append 对手进 EnemyUnitIDs，得 %d 个", len(state.EnemyUnitIDs))
 	}
-	opponentID := state.EnemyUnitIDs[len(state.EnemyUnitIDs)-1]
-	// 对手已落库且属敌对阵营（chaos）。
+	// 但对手已落库、属敌对阵营 chaos（供玩家亲自接管时接入）——经命运卡 battle.threat_id 找回。
+	opponentID := takeoverOpponentFromInbox(ctx, t, service, actor.ID)
+	if opponentID == "" {
+		t.Fatalf("应出一张可接管命运卡（takeover=true）并带对手 threat_id")
+	}
 	opp, err := repo.GetByID(ctx, opponentID)
 	if err != nil {
-		t.Fatalf("对手应已落库: %v", err)
+		t.Fatalf("对手应已落库（供接管时接入）: %v", err)
 	}
 	if opp.Faction != faction.IDChaos {
 		t.Fatalf("对手应属敌对阵营 chaos，得 %q", opp.Faction)
@@ -113,14 +124,104 @@ func TestScanFactionConflicts_FlagOnAppendsOpponentAndCard(t *testing.T) {
 		t.Fatalf("触发后应有 events 留痕，得 0 条")
 	}
 
-	// 确定性：同输入再扫一遍（新 state，同 sessionID/turn/actor）应同样触发同样对手数。
+	// 确定性：同输入再扫一遍（新 state，同 sessionID/turn/actor）应同样触发、同样不自动入战。
 	state2 := &State{ID: state.ID, PlayerFactionID: "player", EnemyFactionID: "enemy"}
 	state2.TurnState.Turn = turn
 	state2.PlayerUnitIDs = []string{actor.ID}
 	service.scanFactionConflicts(ctx, state2, []unit.Record{actor})
-	if len(state2.EnemyUnitIDs) != 1 {
-		t.Fatalf("确定性：同输入应同样触发 1 名对手，得 %d", len(state2.EnemyUnitIDs))
+	if len(state2.EnemyUnitIDs) != 0 {
+		t.Fatalf("确定性：同输入应同样不自动入战（EnemyUnitIDs 空），得 %d", len(state2.EnemyUnitIDs))
 	}
+}
+
+// takeoverOpponentFromInbox 从某角色命运 inbox/feed 找一张阵营冲突可接管卡，返回其 battle.threat_id（对手 ID）；无则返回空。
+func takeoverOpponentFromInbox(ctx context.Context, t *testing.T, service *Service, unitID string) string {
+	t.Helper()
+	inbox, err := service.OpenFateInbox(ctx, unitID)
+	if err != nil {
+		t.Fatalf("OpenFateInbox 失败: %v", err)
+	}
+	for _, it := range inbox {
+		if it.Battle != nil && it.Battle.Takeover && it.Battle.Tier == "faction_conflict" {
+			return it.Battle.ThreatID
+		}
+	}
+	feed, err := service.OpenFateFeed(ctx, unitID, 30)
+	if err != nil {
+		t.Fatalf("OpenFateFeed 失败: %v", err)
+	}
+	for _, it := range feed {
+		if it.Battle != nil && it.Battle.Takeover && it.Battle.Tier == "faction_conflict" {
+			return it.Battle.ThreatID
+		}
+	}
+	return ""
+}
+
+// TestResolveFactionConflictTakeover 验证 F4 H3 接管侧：玩家亲自接管后，对手才接入 EnemyUnitIDs（玩家在场、可致死战）。
+func TestResolveFactionConflictTakeover(t *testing.T) {
+	db, repo, service := newFactionTakeoverService(t)
+	ctx := context.Background()
+	enableFactionPvEFlag(t)
+	_ = db
+
+	state := newPersistedConflictState(t, service, "s_takeover")
+	actor := seedConflictActor(t, service, state, "执法者")
+	if err := service.sessions.Save(ctx, state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	turn, hit := findTriggeringTurn(state.ID, actor.ID)
+	if !hit {
+		t.Skip("确定性掷骰未命中触发阈；跳过")
+	}
+	state.TurnState.Turn = turn
+	service.scanFactionConflicts(ctx, state, []unit.Record{actor})
+	if err := service.sessions.Save(ctx, state); err != nil {
+		t.Fatalf("save after scan: %v", err)
+	}
+	opponentID := takeoverOpponentFromInbox(ctx, t, service, actor.ID)
+	if opponentID == "" {
+		t.Fatalf("扫描应出可接管卡")
+	}
+
+	// 非阵营冲突对手 ID（前缀不符）应被拒。
+	if err := service.ResolveFactionConflictTakeover(ctx, state.ID, "not_fconflict_x"); err == nil {
+		t.Fatalf("非阵营冲突对手 ID 应被拒")
+	}
+
+	// 玩家亲自接管：对手此刻才接入 EnemyUnitIDs。
+	if err := service.ResolveFactionConflictTakeover(ctx, state.ID, opponentID); err != nil {
+		t.Fatalf("接管失败: %v", err)
+	}
+	reloaded, err := service.sessions.Get(ctx, state.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	found := false
+	for _, id := range reloaded.EnemyUnitIDs {
+		if id == opponentID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("接管后对手应已入 EnemyUnitIDs，得 %v", reloaded.EnemyUnitIDs)
+	}
+	// 幂等：再接管一次不叠加。
+	if err := service.ResolveFactionConflictTakeover(ctx, state.ID, opponentID); err != nil {
+		t.Fatalf("幂等接管失败: %v", err)
+	}
+	reloaded2, _ := service.sessions.Get(ctx, state.ID)
+	count := 0
+	for _, id := range reloaded2.EnemyUnitIDs {
+		if id == opponentID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("幂等接管不应叠加对手，得 %d 次", count)
+	}
+	_ = repo
 }
 
 func TestScanFactionConflicts_FreedomActorNeverTriggers(t *testing.T) {
@@ -219,6 +320,29 @@ func TestListFactionsDetail(t *testing.T) {
 }
 
 // ---- 测试辅助 ----
+
+// newFactionTakeoverService 起一个带 sessions 存储的全功能 Service（ResolveFactionConflictTakeover 走 loadSession/Save 需要）。
+func newFactionTakeoverService(t *testing.T) (*sql.DB, *unit.Repository, *Service) {
+	t.Helper()
+	db, err := sqlitestore.Open(filepath.Join(t.TempDir(), "faction_takeover.db"))
+	if err != nil {
+		t.Fatalf("打开 sqlite 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	service := NewServiceWithColdStore(db, nil, nil)
+	return db, service.units, service
+}
+
+// newPersistedConflictState 构造一个最小可落库的会话 state（供接管测试 loadSession 取回）。
+func newPersistedConflictState(t *testing.T, service *Service, id string) *State {
+	t.Helper()
+	state := &State{ID: id, PlayerFactionID: "player", EnemyFactionID: "enemy"}
+	state.TurnState.Turn = 1
+	if err := service.sessions.Save(context.Background(), state); err != nil {
+		t.Fatalf("save persisted state: %v", err)
+	}
+	return state
+}
 
 // resetFactionPvEFlag 清除 QUNXIANG_FACTION_PVE 的运行时 override 与环境（默认关态）。
 func resetFactionPvEFlag(t *testing.T) {

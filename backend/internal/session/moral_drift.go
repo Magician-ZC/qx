@@ -162,20 +162,28 @@ type moralAxisChangeEntry struct {
 	Delta  float64 `json:"delta"`
 }
 
-// settleMoralDrift 对一个单位施加一次道德漂移：读本回合该角色作为 actor 的事件 → 分类成道德信号 →
+// settleMoralDrift 对一个单位施加一次道德漂移：读**执行回合**该角色作为 actor 的事件 → 分类成道德信号 →
 // 确定性累加成三轴增量 → 写回 MoralAlignment（各维 clamp[0,100]）→ 更新阵营背离连击计数 → 经 MORAL_DRIFT 留痕。
 //
 // 在 Execution→Deployment 回合边界由 settleAutonomyAtDeploymentBoundary 逐单位调用（与人格漂移同址）。
+// **tick 契约（F4 H1 修）**：边界结算恒在 TurnState.Advance 之后跑（state.TurnState.Turn 已 = N+1=部署回合），
+// 但执行期事件（战斗杀伤/抗命等道德信号源）落 tick = N（执行回合）。故本方法接收显式 executedTurn（= Advance 前的回合 N），
+// **事件查询 + 哈希派生 + 留痕 Tick 一律用 executedTurn**——保证道德信号源、确定性步长与审计 Tick 三者同处执行回合、互相自洽，
+// 不再因「写事件 tick=N、查询 turn=N+1」差一而让战斗杀伤主信号永不命中（修前 settle 几乎恒查不到信号、漂移名存实亡）。
+//
 // best-effort：缺依赖 / 单位读不到 / 本回合无道德信号 → 优雅返回（不报错、不写库、不影响主循环）。
 //
 // 返回本次三轴明细（空切片=无漂移）与错误（仅写库失败时非 nil；调用方通常以 _ 忽略）。
-func (service *Service) settleMoralDrift(ctx context.Context, sessionID string, record *unit.Record, turn int) ([]moralAxisChangeEntry, error) {
+func (service *Service) settleMoralDrift(ctx context.Context, sessionID string, record *unit.Record, executedTurn int) ([]moralAxisChangeEntry, error) {
 	if service == nil || service.db == nil || record == nil || record.ID == "" {
 		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 首回合（部署 turn=1）执行回合 N=0 无历史事件，moralSignalsThisTurn 查 tick=0 返回空、安全无漂；
+	// 后续回合 executedTurn = 边界 turn-1 = 真正的执行回合，命中执行期落下的道德信号。
+	turn := executedTurn
 
 	signals := service.moralSignalsThisTurn(ctx, record.ID, turn)
 	delta := accumulateMoralDrift(sessionID, turn, record.ID, signals)
