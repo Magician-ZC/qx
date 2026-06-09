@@ -126,6 +126,11 @@ func Open(dsn string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Wave3 命运：M1 data-driven 翻译矩阵表。
+	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.TranslationTemplatesTableSQLite, dbmigrate.TranslationTemplatesTableMySQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 

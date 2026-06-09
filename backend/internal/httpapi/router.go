@@ -300,9 +300,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			reflexSkipRate = float64(reflexCouldSkip) / float64(reflexTotal)
 		}
 
-		// 合规/红线遥测：内容安全双向审核计数 + 突然戏剧性动作的硬前因门控计数。
+		// 合规/红线遥测：内容安全双向审核计数 + 突然戏剧性动作的硬前因门控计数 + 一致性收紧惊喜上限计数。
 		safetyChecked, safetyBlocked := session.ContentSafetyStats()
 		gateTotal, gateBlocked := session.SurpriseGateStats()
+		surpriseCapTotal, surpriseCapDeferred := session.SurpriseCapStats()
+		// §8 OOC 双口径交叉观测（玩家主观三键 OOC + 归因机器 OOC + 两旋钮态）。纯读、幂等（不驱动 latch）。
+		oocDual := newSessionService().FateOOCDualChannel(c.Request.Context())
 
 		status := gin.H{
 			"status":                     "ok",
@@ -341,6 +344,22 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			"surprise_gate": gin.H{
 				"total":   gateTotal,
 				"blocked": gateBlocked,
+			},
+			// §8 一致性收紧旋钮遥测：收紧态下命中惊喜上限（surprise_level ≥cap）总数 + 真被回退（deferred）数 + 当前上限。
+			"surprise_cap": gin.H{
+				"total":    surpriseCapTotal,
+				"deferred": surpriseCapDeferred,
+				"cap":      session.TightenedSurpriseCap(),
+			},
+			// §8 OOC 双口径交叉观测：玩家主观三键 OOC（窗口） + 归因机器 OOC（全量累计） + 两旋钮态（收紧/降级）。
+			"ooc_dual_channel": gin.H{
+				"player_ooc_rate":       oocDual.PlayerOOCRate,
+				"player_samples":        oocDual.PlayerSamples,
+				"machine_ooc_rate":      oocDual.MachineOOCRate,
+				"machine_total":         oocDual.MachineTotal,
+				"machine_ooc":           oocDual.MachineOOC,
+				"consistency_tightened": oocDual.ConsistencyTightened,
+				"attribution_degraded":  oocDual.AttributionDegraded,
 			},
 		}
 
@@ -1357,6 +1376,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		broadcastSessionSnapshot(reason, snapshot, nil)
 
+		// §8 一致性收紧闭环驱动（类比归因自动降级护栏）：阶段推进是低频自然触发点，借此读玩家主观三键 OOC 率，
+		// 超阈则 latch 收紧（抬高 GateSurprise/惊喜上限门槛）、回落则解除。best-effort：flag 默认关时整体 no-op，绝不影响推进。
+		if advanced {
+			service.RefreshConsistencyTightening(c.Request.Context())
+		}
+
 		// 防沉迷时长累计（best-effort，失败绝不影响推进）：仅在真正推进了阶段且玩家已登录时累计。
 		// 估算本回合约 60 秒（一个部署/执行回合的粗略时长）；compliance flag 关时 RecordPlaySeconds 内部 no-op。
 		if advanced {
@@ -1769,6 +1794,84 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"unit": rec})
+	})
+
+	// ---- 编年史读侧（chronicle）：传记时间线 + 「回到那一刻」（C5 写侧已真写击杀/死亡/继承/升级，本段补读侧 HTTP）----
+	// 低频读路径（传记面板 / 分享卡 / 命运 Copilot 取材），**绝不**塞进高频轮询的 GET /api/sessions/:id snapshot。
+	// 会话作用域 + 指挥阵营鉴权（同 feuds 端点范式）：拒绝跨会话越权读他局编年史。?limit=&offset= 分页（缺省由 ChronicleFeed 夹默认上限）。
+	//
+	// chronicleLimitOffset 从 query 解析 limit/offset（缺省/非法归零，交由 ChronicleFeed 夹默认上限）。
+	chronicleLimitOffset := func(c *gin.Context) (int, int) {
+		limit, offset := 0, 0
+		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				limit = v
+			}
+		}
+		if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				offset = v
+			}
+		}
+		return limit, offset
+	}
+	// chronicleAuth 解析并鉴权会话（指挥阵营 token），返回已校验的 sessionID。失败时已写好响应。
+	chronicleAuth := func(c *gin.Context) (string, bool) {
+		snapshot, err := newSessionService().GetSnapshot(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return "", false
+		}
+		if _, ok := resolveCommanderFaction(c, snapshot.ID, snapshot.PlayerFactionID); !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role token"})
+			return "", false
+		}
+		return snapshot.ID, true
+	}
+	// 单个单位的编年史时间线（传记 / 分享卡）：倒序分页，逐条带「回到那一刻」锚点。
+	router.GET("/api/sessions/:id/units/:unitId/chronicle", func(c *gin.Context) {
+		sessionID, ok := chronicleAuth(c)
+		if !ok {
+			return
+		}
+		limit, offset := chronicleLimitOffset(c)
+		feed, err := newSessionService().ChronicleFeed(c.Request.Context(), sessionID, strings.TrimSpace(c.Param("unitId")), limit, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"feed": feed})
+	})
+	// 整局编年史总览（unitID 空）：跨单位的命运总线（编年史总览 / 命运 Copilot 取材）。
+	router.GET("/api/sessions/:id/chronicle", func(c *gin.Context) {
+		sessionID, ok := chronicleAuth(c)
+		if !ok {
+			return
+		}
+		limit, offset := chronicleLimitOffset(c)
+		feed, err := newSessionService().ChronicleFeed(c.Request.Context(), sessionID, "", limit, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"feed": feed})
+	})
+	// 「回到那一刻」单条端点：按 chronicle_id 反查条目并定位锚点（前端点击某条编年史的「回到那一刻」时调）。
+	router.GET("/api/sessions/:id/chronicle/:chronicleId/moment", func(c *gin.Context) {
+		sessionID, ok := chronicleAuth(c)
+		if !ok {
+			return
+		}
+		view, found, err := newSessionService().ChronicleMomentByID(c.Request.Context(), sessionID, strings.TrimSpace(c.Param("chronicleId")))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{"error": "那一刻已无从追溯"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"moment": view})
 	})
 
 	// ---- 离线宪章（offline_charter）读写：玩家不在场时单位据此自治的三段长效授权 ----

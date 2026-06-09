@@ -338,6 +338,24 @@ func (service *Service) generateUnitDecision(
 		}
 	}
 
+	// §8 一致性收紧旋钮（玩家高主观 OOC → ConsistencyTightened latch）：收紧态下把「突然戏剧性动作」允许的最高
+	// SurpriseLevel 从 3 压到 TightenedSurpriseCap()（收紧时=2）——LLM 自评 surprise_level ≥cap 的大转折（突然恋爱/
+	// 卖传家宝/叛变之外的任意高惊喜动作）在玩家正觉得「太离谱」时优雅回退安全决策（继续待命），先稳住一致性。
+	// 与归因/门控同档：仅 enforcementActive 时才真正阻断，影子模式只计遥测不改行为；未收紧时 cap=3、choice 上限 3，恒不触发（零行为）。
+	// flag 默认关：QUNXIANG_CONSISTENCY_TIGHTEN 未开 → ConsistencyTightened 永假 → cap 恒 3 → 本块零行为。
+	if choice.Attribution != nil {
+		surpriseCap := TightenedSurpriseCap()
+		if surpriseCap < 3 && choice.Attribution.SurpriseLevel >= surpriseCap {
+			surpriseCapTotal.Add(1)
+			if service.enforcementActive() {
+				surpriseCapDeferred.Add(1)
+				fallback := oocFallbackDecision()
+				message := fmt.Sprintf("surprise_cap_defer:level=%d:cap=%d", choice.Attribution.SurpriseLevel, surpriseCap)
+				return fallback, result, buildLLMInteraction(state, actor.ID, "decision", summarizeDecision(byID, fallback), systemPrompt, userPrompt, result, message), nil
+			}
+		}
+	}
+
 	// 回响 Echo：若这次选择被归因到一条真实玩家动作，生成「因为你上次…，这一回…」回响卡进收件箱（best-effort）。
 	// SurfaceEcho 会再次核验 ref 真实存在，绝不编造前因（宪法 §6.2）。
 	if ref, narrative, has := echoRefFromAttribution(choice.Attribution); has {
@@ -3622,17 +3640,17 @@ func recommendedDecisionCandidate(
 	if remainingAP < decisionActionCost(DecisionActionGather) &&
 		(equipmentDirective || directivePrefersBuild(directive)) &&
 		hasCurrentTileEconomyOpportunity(state, byID, actor) {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionHold, DecisionActionDefend, DecisionActionObserve); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionHold, DecisionActionDefend, DecisionActionObserve); ok {
 			return candidate, true
 		}
 	}
 	if containsAny(directive, "恋爱", "生小孩", "生孩子", "生育", "孩子", "家庭", "亲密") {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionFamily, DecisionActionRomance, DecisionActionDialogue, DecisionActionSay); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionFamily, DecisionActionRomance, DecisionActionDialogue, DecisionActionSay); ok {
 			return candidate, true
 		}
 	}
 	if containsAny(directive, "交易", "贸易", "调拨", "赠送", "出售") {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionTrade, DecisionActionSay, DecisionActionDialogue); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionTrade, DecisionActionSay, DecisionActionDialogue); ok {
 			return candidate, true
 		}
 		if candidate, ok := bestMoveTowardNearestTarget(byID, actor, targetIDs, candidates); ok {
@@ -3640,7 +3658,7 @@ func recommendedDecisionCandidate(
 		}
 	}
 	if equipmentDirective {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionUpgrade, DecisionActionForge, DecisionActionEquip, DecisionActionBuild, DecisionActionGather); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionUpgrade, DecisionActionForge, DecisionActionEquip, DecisionActionBuild, DecisionActionGather); ok {
 			return candidate, true
 		}
 		if candidate, ok := bestMoveTowardProductionGoal(state, actor, candidates); ok {
@@ -3648,7 +3666,7 @@ func recommendedDecisionCandidate(
 		}
 	}
 	if directivePrefersBuild(directive) {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionBuild, DecisionActionGather); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionBuild, DecisionActionGather); ok {
 			return candidate, true
 		}
 		if candidate, ok := bestMoveTowardProductionGoal(state, actor, candidates); ok {
@@ -3672,14 +3690,14 @@ func recommendedDecisionCandidate(
 		}
 	}
 	if nearestThreatDistance(state, byID, actor) >= 8 {
-		if candidate, ok := firstCandidateByActions(candidates, DecisionActionBuild, DecisionActionGather); ok {
+		if candidate, ok := firstCandidateByActionsBiased(actor, candidates, DecisionActionBuild, DecisionActionGather); ok {
 			return candidate, true
 		}
 	}
 	if candidate, ok := bestMoveTowardNearestTarget(byID, actor, targetIDs, candidates); ok {
 		return candidate, true
 	}
-	return firstCandidateByActions(candidates, DecisionActionObserve, DecisionActionDefend, DecisionActionHold)
+	return firstCandidateByActionsBiased(actor, candidates, DecisionActionObserve, DecisionActionDefend, DecisionActionHold)
 }
 
 func firstCandidateByActions(candidates []decisionCandidate, actions ...DecisionAction) (decisionCandidate, bool) {
@@ -3691,6 +3709,28 @@ func firstCandidateByActions(candidates []decisionCandidate, actions ...Decision
 		}
 	}
 	return decisionCandidate{}, false
+}
+
+// firstCandidateByActionsBiased 是 firstCandidateByActions 的野心偏置版（③ 野心进在线规则 fallback）：
+// 在「一组同优先级可选动作」里，flag 关（默认）时与 firstCandidateByActions 逐位一致（取 actions 列表里第一个有
+// 匹配候选的动作的首个候选）；flag QUNXIANG_AMBITION_SCORING 开时，先取每个候选动作的首个匹配候选，再用
+// PickAmbitionBiasedCandidate 在它们之间按野心引力择优——野心契合的动作（如复仇心重→conquer 攻伐）weight 更高者优先，
+// 严格平手保留 actions 列表原优先序（稳定 tie-break，确定性）。actor 为 nil 退化为 firstCandidateByActions（失败安全）。
+func firstCandidateByActionsBiased(actor *unit.Record, candidates []decisionCandidate, actions ...DecisionAction) (decisionCandidate, bool) {
+	if actor == nil || !ambitionScoringEnabled() {
+		return firstCandidateByActions(candidates, actions...)
+	}
+	// 按 actions 优先序收集每个动作的首个匹配候选（保留优先序，作为 PickAmbitionBiasedCandidate 的稳定 tie-break 基底）。
+	pooled := make([]decisionCandidate, 0, len(actions))
+	for _, action := range actions {
+		for _, candidate := range candidates {
+			if candidate.Action == action {
+				pooled = append(pooled, candidate)
+				break
+			}
+		}
+	}
+	return PickAmbitionBiasedCandidate(actor, pooled)
 }
 
 func bestCombatCandidate(
@@ -4050,6 +4090,18 @@ var (
 // SurpriseGateStats 返回进程级累计：进入门控的戏剧性动作总数与被拦截数。
 func SurpriseGateStats() (total int64, blocked int64) {
 	return surpriseGateTotal.Load(), surpriseGateBlocked.Load()
+}
+
+// 进程级一致性收紧旋钮遥测（§8）：total=收紧态下命中惊喜上限（surprise_level ≥cap）的动作总数，
+// deferred=其中在 enforcementActive 下真被回退安全决策的数。影子模式下 total 计、deferred 不计。
+var (
+	surpriseCapTotal    atomic.Int64
+	surpriseCapDeferred atomic.Int64
+)
+
+// SurpriseCapStats 返回进程级累计：收紧态下命中惊喜上限的动作总数与真被回退（deferred）数（/healthz 暴露，与门控遥测并列）。
+func SurpriseCapStats() (total int64, deferred int64) {
+	return surpriseCapTotal.Load(), surpriseCapDeferred.Load()
 }
 
 // 内容安全拦截后的安全占位文案（AI 输出侧）。

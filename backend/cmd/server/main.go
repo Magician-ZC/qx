@@ -50,6 +50,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// M1 翻译矩阵启动 seed：把内置 (reason_code × anchor_kind) 命运 beat 模板幂等 upsert 进 translation_templates 表，
+	// 供 SurfaceFateEvent 的 translateFateBeatFromDB 消费。best-effort：失败只记日志、绝不阻断启动
+	//（loadTranslationTemplate 查库失败会优雅回退内置矩阵 / DefaultReasonText，命运路由仍可用）。
+	if err := session.SeedTranslationTemplates(context.Background(), db); err != nil {
+		logger.Error("seed translation templates", "error", err)
+	}
+
 	hub := ws.NewHub(logger)
 	aiService := ai.NewService(cfg, logger)
 

@@ -337,6 +337,33 @@ CREATE TABLE IF NOT EXISTS cross_event_echoes (
   INDEX idx_cross_echoes_event (cross_event_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// TranslationTemplatesTable* 是 M1 data-driven 翻译矩阵（事件耦合 §1.2「(reason_code × anchor_kind) → 命运 beat」）：
+// 把宏观世界事件按命中锚类翻译成对她的个人命运 narrative，data-driven 可运营态补全，覆盖全 reason_code×anchor_kind 矩阵。
+// force_pending=1 的组（如密友倒地 COMBAT_DOWN×relation）强制升级待决策；anchor_kind='' 为该 reason_code 的通用兜底模板。
+const TranslationTemplatesTableSQLite = `
+CREATE TABLE IF NOT EXISTS translation_templates (
+  id TEXT PRIMARY KEY,
+  reason_code TEXT NOT NULL,
+  anchor_kind TEXT NOT NULL DEFAULT '',
+  narrative_template TEXT NOT NULL,
+  force_pending INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (reason_code, anchor_kind)
+)`
+
+const TranslationTemplatesTableMySQL = `
+CREATE TABLE IF NOT EXISTS translation_templates (
+  id VARCHAR(191) PRIMARY KEY,
+  reason_code VARCHAR(64) NOT NULL,
+  anchor_kind VARCHAR(32) NOT NULL DEFAULT '',
+  narrative_template TEXT NOT NULL,
+  force_pending INT NOT NULL DEFAULT 0,
+  priority INT NOT NULL DEFAULT 0,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_translation_rc_ak (reason_code, anchor_kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // WorldBossActiveUniqueIndexSQLite 是「每世界至多一头 active boss」的 SQLite partial unique index
 // （评审 L4：给默认驱动一道硬兜底，NOT EXISTS 之外再加唯一冲突拦截）。best-effort 执行：
 // 存量库已有重复 active 行时建索引会失败——吞错即可（NOT EXISTS 仍是主护栏）。MySQL 无 partial index，

@@ -258,6 +258,8 @@ func (service *Service) applyBloodFeudGrief(ctx context.Context, state *State, m
 		ReasonCode: events.ReasonBloodFeudGrief,
 		ReasonText: deceased.DisplayName() + " 的死讯传来，她久久无法平静",
 		Actors:     []string{deceased.ID},
+		// §7.3 events 作用域双写：哀恸事件随会话世界三键留痕（mutationScopeFromState 对 nil state 安全返零值）。
+		Scope: mutationScopeFromState(state),
 	})
 	if err != nil {
 		return false

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"os"
 	"strings"
+	"time"
 
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
@@ -257,8 +259,14 @@ func directiveRejectProbability(
 	statusMod := statusRejectModifier(*actor)
 	memoryMod := memoryRejectModifier(state, byID, actor, decision)
 	loyaltyMod := loyaltyRejectModifier(*actor)
+	// 自治胆量曲线（沙盘 §5.2「越久越自主但越保守」）：离线越久，对高风险/不可逆动作越谨慎。
+	// 仅与既有人格/状态/记忆/忠诚信号**叠加**（乘进同一连乘式，不替代任一），flag 关时恒 1.0（中性、零行为）。
+	courageMod := offlineCourageRejectModifier(state, decision)
+	// 野心契合度（③ 野心进服从）：指令目标动作若契合该单位野心（复仇心重→攻伐、逐利→交易…），更乐意执行 → 降低抗命概率；
+	// 与胆量曲线同为**乘项叠加**（非替代），flag QUNXIANG_AMBITION_SCORING 关时恒 1.0（中性、零行为）。
+	ambitionMod := ambitionComplianceRejectModifier(actor, decision)
 
-	rejectProbability := clamp01(0.05 * personalityMod * statusMod * risk * memoryMod * loyaltyMod)
+	rejectProbability := clamp01(0.05 * personalityMod * statusMod * risk * memoryMod * loyaltyMod * courageMod * ambitionMod)
 	if rejectProbability > 0.85 {
 		rejectProbability = 0.85
 	}
@@ -494,6 +502,190 @@ func loyaltyRejectModifier(actor unit.Record) float64 {
 		return 1.4
 	default:
 		return 1.0
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 自治胆量曲线（沙盘 §5.2「风险/广度双曲线：越久越自主但越保守」）
+//
+// 设计宪法：离线越久 = ①风险偏好↓（对高风险/不可逆动作越谨慎，更可能抗命冒险指令）；
+// ②自治广度↑（短期只放行日常领域，长期才解锁更自主的领域；但高代价领域始终更保守）。
+// 两条曲线**独立可调**、确定性（log/分档纯函数，无随机、time 仅墙钟比较）、付费不进
+// （任何评分/门槛不含 wallet/billing）、与既有人格/记忆/红线/状态/忠诚信号**叠加不替代**。
+//
+// flag QUNXIANG_COURAGE_CURVE **默认关** → offlineCourageRejectModifier 恒返回 1.0
+// （中性，对既有抗命概率逐位一致、零行为变化），仅在显式置 flag 后才灰度启用。
+// ──────────────────────────────────────────────────────────────────────────
+
+// courageCurveFlagEnv 是自治胆量曲线的灰度开关环境变量名。默认关 → 抗命修正恒 1.0（中性）。
+const courageCurveFlagEnv = "QUNXIANG_COURAGE_CURVE"
+
+// courageCurveEnabled 读 QUNXIANG_COURAGE_CURVE（默认关）。开时离线时长才进抗命概率与广度门。
+// 自包含解析，对齐 ambition_scoring.go / auto_match.go 的 flag idiom。
+func courageCurveEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(courageCurveFlagEnv))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// autonomyDomain 表示一个「可自决领域」标签——广度曲线按离线时长分档解锁/限制的最小单位。
+type autonomyDomain string
+
+// 常量定义区：自治领域标签（与 §5.2 的 {move,gather,...}/{trade,build,...}/{ally,romance,migrate} 三档对应）。
+const (
+	autonomyDomainDaily    autonomyDomain = "daily"    // 日常：移动/采集/进食/对话/防御——0h 起即解锁
+	autonomyDomainCivic    autonomyDomain = "civic"    // 经营：交易/生产/建造/结交——离线 ≥6h 解锁
+	autonomyDomainHighRisk autonomyDomain = "highrisk" // 高代价：结盟/恋爱/家庭/迁徙/拆除——离线 >24h 才解锁，且始终更保守
+)
+
+// 自治广度的两个分档边界（小时）。直接落 §5.2：0–6h 仅日常；6–24h 解锁经营；>24h 解锁高代价。
+const (
+	autonomyCivicUnlockHours    = 6.0
+	autonomyHighRiskUnlockHours = 24.0
+)
+
+// decisionAutonomyDomain 把一个决策动作归类到自治领域标签。
+//
+// 纯函数、确定性：仅依赖 decision.Action（与 §5.3 冻结清单的「高代价不可逆动作」口径对齐）。
+// 未登记动作（攻击/重击/冲锋等战斗动作不在自治广度管辖——它们由风险曲线 directiveOrderRisk 直接处理）
+// 归 daily，避免广度门误伤战斗服从判定。
+func decisionAutonomyDomain(action DecisionAction) autonomyDomain {
+	switch action {
+	case DecisionActionRomance, DecisionActionFamily, DecisionActionDemolish:
+		// 恋爱/家庭/拆除：不可逆或高情感代价，属高代价领域（始终更保守）。
+		return autonomyDomainHighRisk
+	case DecisionActionTrade, DecisionActionBuild, DecisionActionForge, DecisionActionUpgrade:
+		// 交易/建造/锻造/升级：经营类领域，离线 ≥6h 才解锁自决。
+		return autonomyDomainCivic
+	default:
+		// move/gather/eat/dialogue/defend/observe/assist/pickup/equip/hold/say/skill/attack… → 日常（0h 即放行）。
+		return autonomyDomainDaily
+	}
+}
+
+// offlineCaution 实现 §5.2 风险曲线的核心标定：offlineCaution = 1 + 0.4·log2(1+offlineHours)，
+// 非线性饱和（log 增速递减），并夹一个保守上限避免极长离线把谨慎度推到失控。
+//
+// 纯函数、确定性：仅依赖 offlineHours（≥0）。offlineHours≤0 → 1.0（无离线惩罚，与在线一致）。
+// 该上限只夹「胆量曲线这一项」的乘数；最终抗命概率仍由 directiveRejectProbability 统一夹 0.85。
+func offlineCaution(offlineHours float64) float64 {
+	if offlineHours <= 0 {
+		return 1.0
+	}
+	caution := 1.0 + 0.4*math.Log2(1.0+offlineHours)
+	// offlineCautionCeiling：单项乘数上限，仅防御「极长离线（远超任何真实托管时长）把谨慎度推到失控」。
+	// 取 4.5：约在 offlineHours≈430h（≈18 天）才触顶，故真实离线区间（小时～两周量级）内「越久越谨慎」
+	// 保持严格单调；触顶后仍封住无界增长——长期托管学会「绝不拿命赌大的」而非把抗命乘数推到无穷。
+	// 该上限只夹「胆量曲线这一项」；最终抗命概率仍由 directiveRejectProbability 统一夹 0.85。
+	const offlineCautionCeiling = 4.5
+	if caution > offlineCautionCeiling {
+		caution = offlineCautionCeiling
+	}
+	return caution
+}
+
+// domainBreadthCaution 实现 §5.2 广度曲线：按离线时长分档「解锁/限制自治领域」。
+//
+// 语义：领域**未解锁**（离线不够久）→ 该领域的激进自决应更可能被判为不执行（额外谨慎乘数 >1）；
+// 已解锁 → 1.0（广度放行，风险偏好交回风险曲线处理）；高代价领域即使解锁也始终额外更保守（乘数恒 >1）。
+// 纯函数、确定性：仅依赖 domain + offlineHours，无随机。
+func domainBreadthCaution(domain autonomyDomain, offlineHours float64) float64 {
+	switch domain {
+	case autonomyDomainDaily:
+		// 日常领域 0h 起即完全自主，广度永不额外加谨慎。
+		return 1.0
+	case autonomyDomainCivic:
+		if offlineHours >= autonomyCivicUnlockHours {
+			return 1.0 // 已解锁经营自决，广度放行。
+		}
+		// 短期离线（<6h）尚不该自作主张做经营决策 → 更可能上交/不执行（额外谨慎）。
+		return 1.5
+	case autonomyDomainHighRisk:
+		if offlineHours >= autonomyHighRiskUnlockHours {
+			// 解锁后仍是高代价不可逆领域：始终更保守（恒 >1），呼应「绝不拿命赌大的」。
+			return 1.3
+		}
+		// 未解锁高代价领域：强谨慎，几乎一律不自作主张（与冻结清单 §5.3 同向，但此处只抬抗命概率不冻结）。
+		return 2.0
+	default:
+		return 1.0
+	}
+}
+
+// offlineCourageRejectModifier 是自治胆量曲线进 directiveRejectProbability 的统一乘权桥：
+// 把①风险曲线（offlineCaution）与②广度曲线（domainBreadthCaution）合成一个抗命概率乘数。
+//
+// flag QUNXIANG_COURAGE_CURVE 关（默认）→ 恒 1.0（中性，零行为）。开时：
+//
+//	modifier = offlineCaution(offlineHours) · domainBreadthCaution(domain, offlineHours)
+//
+// 离线越久 → offlineCaution 单调升 → 对高风险动作越谨慎；领域未解锁/高代价 → 广度项额外加谨慎。
+// 确定性：offlineHours 由 state 墙钟时间确定性派生（offlineHoursFromState），无随机。
+func offlineCourageRejectModifier(state State, decision unitDecisionPayload) float64 {
+	if !courageCurveEnabled() {
+		return 1.0
+	}
+	offlineHours := offlineHoursFromState(state, time.Now())
+	domain := decisionAutonomyDomain(decision.Action)
+	return offlineCaution(offlineHours) * domainBreadthCaution(domain, offlineHours)
+}
+
+// ambitionComplianceRejectModifier 把野心契合度接进服从（③）：指令目标动作越契合该单位的野心，越乐意执行 → 抗命概率乘数 <1.0。
+//
+// 语义：用 OnlineAmbitionActionWeight(record, tag) ∈ [1.0, 1.6]（1.0=中性，>1.0=契合，越契合越高）取其倒数当抗命乘数——
+//   - weight==1.0（中性/未登记动作/flag 关）→ 乘数 1.0（不调整，逐位一致、零行为）；
+//   - weight>1.0（野心契合，如复仇心重→conquer 攻伐、逐利→hoard 交易）→ 乘数 1/weight ∈ [0.625,1.0)，按比例降低抗命概率。
+//
+// 仅降不升（契合只让她更愿意听，不契合不额外加抗命——避免与既有人格/记忆/忠诚信号双重惩罚同一动作）；
+// 与胆量曲线**乘项叠加**（同一连乘式里各占一项，互不替代）。纯函数、确定性、付费不进；actor 为 nil 时退 1.0（失败安全）。
+// flag QUNXIANG_AMBITION_SCORING 关（默认）→ OnlineAmbitionActionWeight 恒 1.0 → 本乘数恒 1.0（零行为）。
+func ambitionComplianceRejectModifier(actor *unit.Record, decision unitDecisionPayload) float64 {
+	if actor == nil {
+		return 1.0
+	}
+	weight := OnlineAmbitionActionWeight(*actor, OnlineActionAmbitionTag(decision.Action))
+	if weight <= 1.0 {
+		return 1.0 // 中性/未登记/flag 关：不调整（逐位一致）。
+	}
+	return 1.0 / weight // 契合：按比例降低抗命概率（仅降不升）。
+}
+
+// offlineHoursFromState 从会话状态确定性派生「离线已持续多少小时」。
+//
+// 离线时长来源（§5.2「用 state/单位的 last_active 或离线起始 turn 推算」）：用 State.UpdatedAt
+// 作为「最近一次该局被结算/保存」的墙钟锚点，与传入的 now 做差（time 仅用于墙钟比较，符合不变量）。
+// UpdatedAt 为零值（旧存档/未落库）→ 返回 0（按在线处理，无离线惩罚，失败安全）。负差（时钟回拨）→ 0。
+//
+// 注入 now 而非内部直接 time.Now()，是为了让上层/测试可注入固定墙钟，curve 全链路可确定性复现。
+func offlineHoursFromState(state State, now time.Time) float64 {
+	if state.UpdatedAt.IsZero() {
+		return 0
+	}
+	delta := now.Sub(state.UpdatedAt)
+	if delta <= 0 {
+		return 0
+	}
+	return delta.Hours()
+}
+
+// DomainUnlockedAt 报告某自治领域在给定离线时长下是否已解锁（广度曲线的对外可读判定）。
+//
+// 供上层（如冻结清单 §5.3 / 决策前置过滤）按「当前广度」判断某领域决策是否应自决落地。
+// 纯函数、确定性：日常恒解锁；经营 ≥6h；高代价 >24h（取 ≥，边界含）。flag 不在此判定内——
+// 解锁判定是纯曲线定义，是否启用由调用方按 courageCurveEnabled 决定。
+func DomainUnlockedAt(domain autonomyDomain, offlineHours float64) bool {
+	switch domain {
+	case autonomyDomainDaily:
+		return true
+	case autonomyDomainCivic:
+		return offlineHours >= autonomyCivicUnlockHours
+	case autonomyDomainHighRisk:
+		return offlineHours >= autonomyHighRiskUnlockHours
+	default:
+		return true
 	}
 }
 

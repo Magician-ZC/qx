@@ -279,6 +279,21 @@ func (service *Service) applyActionHungerCost(ctx context.Context, state *State,
 }
 
 // applyStatusMutation 统一应用状态变更并记录 raw event 与日志。
+// mutationScopeFromState 从会话状态填 events 表的世界作用域三键（§7.3 events 作用域双写，修「全库无生产 populate，
+// world_id/region_id/tick 恒 NULL/0」）：WorldID 取本局所属世界（未接入多世界时为空 → SQL NULL，与旧路径一致）；
+// RegionID 取会话 ID（单人局以 session 自身为 region 作用域，与 threat_refresh.go 的 RegionID: state.ID 同口径）；
+// Tick 取当前回合数。全部纯内存读取（零额外 DB 往返、不破坏 ApplyBatch 的降本），确定性。state 为 nil 时返回零值（退回旧路径）。
+func mutationScopeFromState(state *State) status.ScopeContext {
+	if state == nil {
+		return status.ScopeContext{}
+	}
+	return status.ScopeContext{
+		WorldID:  state.WorldID,
+		RegionID: state.ID,
+		Tick:     state.TurnState.Turn,
+	}
+}
+
 func (service *Service) applyStatusMutation(
 	ctx context.Context,
 	state *State,
@@ -297,6 +312,7 @@ func (service *Service) applyStatusMutation(
 		ReasonText: reasonText,
 		Actors:     []string{record.ID},
 		Location:   fmt.Sprintf("hex_%d_%d", record.Status.PositionQ, record.Status.PositionR),
+		Scope:      mutationScopeFromState(state),
 	})
 	if err != nil {
 		return err
@@ -367,6 +383,7 @@ func (service *Service) applyStatusMutationsBatch(
 			ReasonText: pending[i].reasonText,
 			Actors:     []string{record.ID},
 			Location:   fmt.Sprintf("hex_%d_%d", record.Status.PositionQ, record.Status.PositionR),
+			Scope:      mutationScopeFromState(state),
 		}
 	}
 

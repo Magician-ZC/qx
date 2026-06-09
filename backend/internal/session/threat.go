@@ -509,6 +509,8 @@ func (service *Service) recordAllyDown(ctx context.Context, state *State, member
 			ReasonCode: events.ReasonThreatAllyDown,
 			ReasonText: fmt.Sprintf("并肩的人在与%s的搏斗中倒下，她心头一沉", threatName),
 			Actors:     []string{ms.rec.ID},
+			// §7.3 events 作用域双写：同伴倒下士气挫伤随会话世界三键留痕。
+			Scope: mutationScopeFromState(state),
 		})
 		if err != nil {
 			slog.Warn("record ally down morale hit failed (best-effort)", "unit", ms.rec.ID, "err", err)

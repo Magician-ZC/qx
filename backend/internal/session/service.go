@@ -3036,6 +3036,8 @@ func (service *Service) applyAttack(
 		ReasonText: reasonText,
 		Actors:     []string{attacker.ID},
 		Location:   fmt.Sprintf("hex_%d_%d", target.Status.PositionQ, target.Status.PositionR),
+		// §7.3 events 作用域双写：战斗伤害/倒地是 region 查询/离线 catch-up 最关键的事件源，填世界三键。
+		Scope: mutationScopeFromState(state),
 	})
 	if err != nil {
 		return fmt.Errorf("apply attack: %w", err)

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -236,14 +237,26 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		// 发生在别人身上 → 经她的锚（含离线宪章红线锚）翻译牵挂相关度，并记下命中里最重的锚类别（翻译矩阵用）。
 		rel, anchorKind = eventRelevanceWithAnchor(service.buildRelevanceAnchorsWithState(ctx, state, owner.ID), ev)
 	}
-	// §5「为什么会这样」对玩家可见：归因因果句缺省时，先走 §M1 data-driven 翻译层（按 事件语义类 × 锚类 生成贴合个人的命运 beat），
-	// 命中则用更像「命运 beat」的措辞；未命中严格回落 deriveFateProvenance（与原行为逐字节一致）。调用方显式给了 AttributionZH 则尊重之。
-	if strings.TrimSpace(ev.AttributionZH) == "" {
-		if beat, ok := translateFateBeat(ev, relevance.AnchorKind(anchorKind)); ok {
-			ev.AttributionZH = beat
-		} else {
-			ev.AttributionZH = deriveFateProvenance(ev, anchorKind)
+	// §5「为什么会这样」对玩家可见：归因因果句缺省时，先走 §M1 data-driven 翻译层（按 reason-code × 锚类 查 DB
+	// translation_templates 矩阵生成贴合个人的命运 beat，带内存缓存/三级回退）；命中则用更像「命运 beat」的措辞，
+	// 未命中严格回落 deriveFateProvenance（与原行为逐字节一致）。调用方显式给了 AttributionZH 则尊重之。
+	// forcePending 标志（密友倒地/密友被背叛/角色之死等「非看不可」组）由翻译矩阵携带，下方据此把路由硬抬到待决策。
+	//
+	// **仅在有命中锚（anchorKind != ""，即「别人身上经她的锚」）时查 DB 矩阵**——与原 translateFateBeat 的语义一致：
+	// 自身事件（anchorKind=""，发生在她身上、无外部锚）不强行翻译，交还 deriveFateProvenance（无源不可逆事件由此保持
+	// AttributionZH 为空，保住 §4.3「没有『为什么』时绝不悄悄落子」的归因强制不变量）。DB 矩阵的 anchor_kind='' 行是
+	// 「命中锚但精确组缺表」的兜底，由 resolveTranslationTemplate 内部回退处理，不在此对自身事件误用。
+	forcePending := false
+	if anchorKind != "" {
+		if beat, fp := translateFateBeatFromDB(ctx, service.db, ev, relevance.AnchorKind(anchorKind)); strings.TrimSpace(beat) != "" {
+			forcePending = fp
+			if strings.TrimSpace(ev.AttributionZH) == "" {
+				ev.AttributionZH = beat
+			}
 		}
+	}
+	if strings.TrimSpace(ev.AttributionZH) == "" {
+		ev.AttributionZH = deriveFateProvenance(ev, anchorKind)
 	}
 	// FateScore 三因子（设计宪法 §4.2）：不可逆度 × 牵挂相关度 × 情绪强度，三者 ∈ [0,1]。
 	// careRelevance=rel（上面算出的关系/重要度相关性）；irreversibility/emotion 是 [floor,1] 的阻尼系数，
@@ -256,12 +269,20 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	if route == relevance.RoutePending && service.pendingBudgetExhausted(ctx, owner.ID) {
 		route = relevance.RouteHighlight
 	}
+	// force_pending 硬抬（§1.2「force_pending 类必须停在玩家手里」）：翻译矩阵标了 force_pending 的组——密友倒地
+	// COMBAT_DOWN×relation / 密友被背叛 RELATION_BETRAYAL×relation / 角色之死 CHARACTER_DIED×relation / 她所在地被劫
+	// ECONOMY_LOOT×geo 等「非看不可」的命运节点——必须升到待决策，不能被自治悄悄吞掉或停在高光卡。
+	// 放在防轰炸预算降级**之后**：这类覆水难收的节点是少数应当无条件打断玩家的事件，故凌驾于每日待决策预算之上。
+	if forcePending && route != relevance.RoutePending {
+		route = relevance.RoutePending
+	}
 	// 破圈预算（§1.5「破圈」）：每个自然日强制让 ≤1 件「零锚来源」低权事件升一档进高光卡，作为新锚的种子——
 	// 让一处没去过的地方、一个素不相识的人有机会意外撞进她的命里，对冲「相关性闭环只反复触达老熟人/老地方」。
 	// 仅在该事件本会被自治丢弃（RouteAutonomous）、且确属零锚来源、且当天破圈配额未用尽时触发；升一档后标
 	// serendipity，落 ReasonSerendipityNewAnchor。flag 默认关（QUNXIANG_SERENDIPITY），关时零行为。
+	// §8 OOC 收紧：一致性收紧态下破圈升档暂缓（serendipityPausedByTightening）——玩家正觉得「太离谱」时先稳住一致性，别再塞陌生意外。
 	serendipity := false
-	if route == relevance.RouteAutonomous && serendipityEnabled() &&
+	if route == relevance.RouteAutonomous && serendipityEnabled() && !serendipityPausedByTightening() &&
 		isZeroAnchorEvent(ev, owner, anchorKind) && !service.serendipityBudgetExhausted(ctx, owner.ID) {
 		route = relevance.RouteHighlight
 		serendipity = true
@@ -725,12 +746,18 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	// （urge 越界代价随牵挂单调放大）；用基础后果类 resolveClass（情境 id 已折算）取后果。
 	attachment := service.attachmentForUnit(ctx, unitID)
 	consequences := fateConsequenceLayer(resolveClass, attachment)
-	// 4.5) D0-D3 真分级闸（与 threat.go:applyDefeatPenalty 一致）：把不可逆类的负向后果经 encounter.DegradePenalty
-	//      降级到该角色当前允许的最重层——萍水相逢/陪伴尚浅的角色被硬锁在「可恢复」，绝不一刀切毁玩家心血。
+	// 4.5) D0-D3 真分级闸（§4.3 M3 逐条门槛）：把不可逆类的负向后果经 fatePenaltyCapPrecise 降级到该角色当前允许的最重层。
+	//      不再用 encounter.DegradePenalty 的连续近似（care≥40||days≥3 笼统过层2、care≥70&&days≥7 即过层3），而是逐条判定：
+	//      层2 需 care≥40 或 在世≥3 天（离乡/失盟类需 care≥50）；层3 需 care≥70 且 在世≥7 天 且 已发生≥1 次层2（三条 AND），
+	//      且还须过 RequiresConsent（本地命运后果默认无跨玩家同意 → 层3 降层2）。萍水相逢/陪伴尚浅的角色被硬锁在「可恢复」。
 	//      可逆类后果（日常暖意/小幅波动）不进闸，照原样落地。
+	gateLandedLayer2 := false
 	if fateReasonIsIrreversibleClass(meta.ReasonCode) {
 		days := service.daysAliveForUnit(ctx, unitID)
-		consequences = gateFateConsequencesByPenalty(consequences, attachment, days)
+		// 「已发生≥1 次层2」的前提：查该角色历史是否落过至少一次层2 高代价后果（M3 层3 第三条 AND）。
+		priorLayer2 := service.fateHasPriorLayer2(ctx, unitID)
+		// 本地命运后果闸不经跨玩家 consent 流程 → consentSatisfied=false（层3 须由 §2.5 consent_gate 的 RequiresConsent 路径解锁）。
+		consequences, gateLandedLayer2 = gateFateConsequencesByPenaltyPrecise(consequences, meta.ReasonCode, attachment, days, priorLayer2, false)
 	}
 	var consequenceErr error
 	if service.mutator != nil {
@@ -749,6 +776,11 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 			}
 		}
 	}
+	// 4.6) 层2 留痕（M3 层3 第三条 AND 的累计来源）：本闸实际落地了一次层2 高代价负向后果 → 补一条 ReasonDefeatScarred 标记，
+	//      使「已发生≥1 次层2」可被后续 fateHasPriorLayer2 查到（层3 因此能在「先吃过一次高代价」后真正解锁）。best-effort、不阻断。
+	if gateLandedLayer2 && consequenceErr == nil {
+		service.recordFateLayer2Scar(ctx, sessionID, unitID, meta.ReasonCode)
+	}
 
 	// 5) 传家物升级闭环（§5 Clutch→Legacy）：本卡绑定了待升级装备 ID 且玩家选了「confirm（urge 类）」→ 把它刻成传家物
 	//    （upgradeItemToLegacy 落 IsLegacy+SoulBound+Pinned + ReasonLegacyBequeathed 留痕；此后 GateSurprise(sell_pinned)→Reject）。
@@ -763,9 +795,9 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 	return consequenceErr
 }
 
-// gateFateConsequencesByPenalty 把一组命运后果里的「负向」项经 D0-D3 后果分级闸（encounter.PenaltyCap/DegradePenalty）
-// 按 |delta| 量级映射到候选层，再降级到该角色当前允许的最重层，并按降级后的层重标 |delta|——绝不让萍水相逢的角色
-// 挨到不该挨的不可逆重击（与 threat.go 的 defeatMoraleHitForLayer 同一套层→幅度映射）。正向后果原样保留。
+// gateFateConsequencesByPenalty 是 §4.3 旧版「连续近似」后果闸（encounter.DegradePenalty 的 care≥40||days≥3 / care≥70&&days≥7 笼统门）。
+// 保留供既有测试与回退；生产路径已升级为 gateFateConsequencesByPenaltyPrecise（逐条硬门槛 + 层3 三条 AND + consent 守门）。
+// 把负向项按 |delta| 量级映射到候选层、降级到 PenaltyCap 允许的最重层，再按层重标 |delta|；正向后果原样保留。
 func gateFateConsequencesByPenalty(consequences []fateConsequence, care float64, daysAlive int) []fateConsequence {
 	out := make([]fateConsequence, len(consequences))
 	copy(out, consequences)
@@ -775,10 +807,120 @@ func gateFateConsequencesByPenalty(consequences []fateConsequence, care float64,
 		}
 		candidate := penaltyLayerForMagnitude(absFloat(out[i].Delta))
 		gated := encounter.DegradePenalty(candidate, care, daysAlive)
-		// 降级后按层重标负向幅度（层越低代价越轻）；同层则原样。
 		out[i].Delta = -fatePenaltyMagnitudeForLayer(gated)
 	}
 	return out
+}
+
+// gateFateConsequencesByPenaltyPrecise 把一组命运后果里的「负向」项经 §4.3 M3 **逐条硬门槛**（fatePenaltyCapPrecise）映射到候选层，
+// 再降级到该角色当前允许的最重层，并按降级后的层重标 |delta|——绝不让萍水相逢的角色挨到不该挨的不可逆重击
+// （与 threat.go 的 defeatMoraleHitForLayer 同一套层→幅度映射）。正向后果原样保留。
+// reasonCode 决定层2 是否走「离乡/失盟」更严门槛（care≥50）；priorLayer2/consentSatisfied 是层3 三条 AND + consent 守门的输入。
+// 第二返回值 landedLayer2=本次是否实际落地了一条层2 量级负向后果（供调用方补 ReasonDefeatScarred 层2 标记，喂养层3 第三条 AND）。
+func gateFateConsequencesByPenaltyPrecise(consequences []fateConsequence, reasonCode events.ReasonCode, care float64, daysAlive int, priorLayer2, consentSatisfied bool) ([]fateConsequence, bool) {
+	out := make([]fateConsequence, len(consequences))
+	copy(out, consequences)
+	cap := fatePenaltyCapPrecise(reasonCode, care, daysAlive, priorLayer2, consentSatisfied)
+	landedLayer2 := false
+	for i := range out {
+		if out[i].Delta >= 0 {
+			continue // 正向后果（暖意/打起精神）不进惩罚闸
+		}
+		candidate := penaltyLayerForMagnitude(absFloat(out[i].Delta))
+		gated := candidate
+		if gated > cap { // 降级到逐条门槛允许的最重层（min(候选, cap)）；满足条件的候选层原样保留。
+			gated = cap
+		}
+		if gated >= 2 {
+			landedLayer2 = true
+		}
+		// 降级后按层重标负向幅度（层越低代价越轻）；同层则原样。
+		out[i].Delta = -fatePenaltyMagnitudeForLayer(gated)
+	}
+	return out, landedLayer2
+}
+
+// fatePenaltyCapPrecise 是 §4.3 M3 后果分级闸的**逐条硬门槛**（取代 encounter.PenaltyCap 的连续近似）。确定性、纯函数、可测：
+//   - 层1 可恢复：始终可达（不满足层2/层3 即落层1）。
+//   - 层2 高代价：care≥40 或 在世≥3 天即解锁；但「离乡/失盟」类（背叛盟友/被迫离乡，fateReasonIsExileOrAllianceLoss）更严，需 care≥50。
+//   - 层3 不可逆：三条 AND——care≥70 且 在世≥7 天 且 已发生≥1 次层2（priorLayer2）；再 AND 过 RequiresConsent
+//     （consentSatisfied，本地命运后果默认 false → 层3 降层2，须由 §2.5 consent_gate 的 RequiresConsent 路径显式解锁）。
+//
+// 逐条（非整体 care 门）：层3 缺任一条即降层2；层2 不满足即降层1。无源/不满足绝不落不可逆（对齐宪法「不可逆需牵挂建立后才开放」）。
+func fatePenaltyCapPrecise(reasonCode events.ReasonCode, care float64, daysAlive int, priorLayer2, consentSatisfied bool) int {
+	// 层3：care≥70 ∧ 在世≥7 天 ∧ 已发生≥1 次层2 ∧ 过 RequiresConsent（四条全过才到层3）。
+	if care >= fateLayer3CareGate && daysAlive >= fateLayer3DaysGate && priorLayer2 && consentSatisfied {
+		return 3
+	}
+	// 层2：默认 care≥40 或 在世≥3 天；「离乡/失盟」类抬高 care 门槛到 ≥50（在世天数门不变）。
+	care2Gate := fateLayer2CareGate
+	if fateReasonIsExileOrAllianceLoss(reasonCode) {
+		care2Gate = fateLayer2ExileCareGate
+	}
+	if care >= care2Gate || daysAlive >= fateLayer2DaysGate {
+		return 2
+	}
+	return 1
+}
+
+const (
+	fateLayer2CareGate      = 40.0 // 层2 高代价默认牵挂门槛（§4.3）。
+	fateLayer2ExileCareGate = 50.0 // 离乡/失盟类层2 的更严牵挂门槛（§4.3：离乡/背叛盟友需 care≥50）。
+	fateLayer2DaysGate      = 3    // 层2 在世天数门槛（§4.3：在世≥3 天）。
+	fateLayer3CareGate      = 70.0 // 层3 不可逆牵挂门槛（§4.3）。
+	fateLayer3DaysGate      = 7    // 层3 不可逆在世天数门槛（§4.3：在世≥7 天）。
+)
+
+// fateReasonIsExileOrAllianceLoss 判断一条命运 reason-code 是否属于「离乡/失盟」类——§4.3 层2 里需要更严牵挂门槛（care≥50）的子集：
+// 背叛/被盟友背叛（失盟）、势力崩塌（被迫离乡的典型诱因）、跨玩家背刺/离队（被信任的人推开）。确定性、纯函数。
+func fateReasonIsExileOrAllianceLoss(code events.ReasonCode) bool {
+	switch code {
+	case events.ReasonRelationBetray, // 遭遇背叛/失盟
+		events.ReasonFactionCollapse, // 势力崩塌（被迫离乡）
+		events.ReasonCrossBetrayal,   // 跨玩家背刺（信任的人反咬）
+		events.ReasonCrossPartyLeave: // 离队（盟散）
+		return true
+	default:
+		return false
+	}
+}
+
+// fateHasPriorLayer2 判断某角色历史上是否已落过至少一次「层2 高代价」后果（M3 层3 第三条 AND「已发生≥1 次层2」）。
+// 口径：复用既有的层2 标记 reason-code ReasonDefeatScarred（PVE_DEFEAT_D2，threat.go 落层2 后果时即用），凡存在 ≥1 条即为真。
+// 本命运闸落地一次层2 负向后果时也补一条该标记（recordFateLayer2Scar）——「一败再败」与「命运重创」同源累计层2 历史。
+// 不新增 reason-code（spine 已登记）。best-effort：db 缺失/查询失败 → 返回 false（保守，绝不凭空让层3 解锁条件成立）。确定性、双驱动安全。
+func (service *Service) fateHasPriorLayer2(ctx context.Context, unitID string) bool {
+	if service == nil || service.db == nil || unitID == "" {
+		return false
+	}
+	var count int
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM events
+		 WHERE actor_unit_id = ? AND reason_code = ?`,
+		unitID, string(events.ReasonDefeatScarred),
+	).Scan(&count); err != nil {
+		return false // best-effort：查询失败不冒进让层3 条件成立（保守）
+	}
+	return count >= 1
+}
+
+// recordFateLayer2Scar 在命运闸实际落地一次「层2 高代价」负向后果时，补一条 ReasonDefeatScarred 层2 标记（流程事件，不改状态）。
+// 这让「已发生≥1 次层2」可被 fateHasPriorLayer2 后续查到——层3 三条 AND 的第三条因此能在「先吃过一次高代价」后真正解锁。
+// best-effort 旁路：失败只吞错、绝不阻断已落地的后果（与全文件 best-effort 纪律一致）。
+func (service *Service) recordFateLayer2Scar(ctx context.Context, sessionID, unitID string, reasonCode events.ReasonCode) {
+	if service == nil || service.db == nil || unitID == "" {
+		return
+	}
+	if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		SessionID:   sessionID,
+		OwnerUnitID: unitID,
+		Code:        events.ReasonDefeatScarred,
+		Category:    events.CategoryFate,
+		Payload:     map[string]any{"source": "fate_consequence_gate", "reason": string(reasonCode)},
+	}); err != nil {
+		slog.Warn("record fate layer2 scar failed (best-effort)", "unit", unitID, "err", err)
+	}
 }
 
 // penaltyLayerForMagnitude 把一个负向 |delta| 量级映射到 D0-D3 候选层（与 fatePenaltyMagnitudeForLayer 互逆，阈值同源）。
@@ -1308,6 +1450,7 @@ type payloadChoice struct {
 
 // buildFateChoices 按事件类型/命中锚类别生成情境化选项（§4.5）。每个情境选项都显式映射到一个基础后果类，
 // 既给玩家「贴合此刻」的措辞，又保证后果可复算、与旧三键同构。确定性、纯函数、无 LLM。
+//   - 跨玩家回应卡（ReasonCrossConsentPending，事件耦合 §2.5）：给字面「还手/求和/认账」三选（urge/let_her/acknowledge），后果对称。
 //   - 不可逆类（死亡/叛变/势力崩塌）：给「为TA复仇/送TA最后一程/由她去」三选，分别 urge/acknowledge/let_her。
 //   - 触红线类（红线锚命中或触线事件）：给「严令她止步/默许她的选择」两选（urge/let_her）。
 //   - 其余（日常牵挂）：给「叮嘱她/由她做主/只是知悉」三选（urge/let_her/acknowledge）。
@@ -1319,6 +1462,16 @@ func buildFateChoices(ev FateEvent, anchorKind string) []fateChoice {
 			{ID: "engrave", Label: "把它刻成传家之物", ResolveClass: "urge"},
 			{ID: "not_yet", Label: "暂且不必", ResolveClass: "let_her"},
 			{ID: "acknowledge", Label: "只是知悉", ResolveClass: "acknowledge"},
+		}
+	case ev.ReasonCode == events.ReasonCrossConsentPending:
+		// 跨玩家高后果交互回应卡（事件耦合 §2.5「被影响=她的命遇到另一缕命」）：另一缕命撞上了她的命，祖魂只能给「还手/求和/认账」三选——
+		// 后果对称（§2.4 层2 CONTESTED）。还手=驱动她回击（越界干预，倾向对抗，后果：关系更僵、可能升级冲突）→urge；
+		// 求和=放手让她自己缓和（倾向和解，后果：让一步、保住转圜余地）→let_her；认账=咽下这口气只是知悉（倾向隐忍，后果：暂避锋芒、心气受些挫）→acknowledge。
+		// 替代此前回落的通用三键（叮嘱/由她/知悉），用贴合「被撞上」此刻的字面措辞。
+		return []fateChoice{
+			{ID: "strike_back", Label: "还手——叫她讨回这口气", ResolveClass: "urge"},
+			{ID: "seek_peace", Label: "求和——由她自己去缓和", ResolveClass: "let_her"},
+			{ID: "swallow", Label: "认账——这口气先咽下", ResolveClass: "acknowledge"},
 		}
 	case fateReasonIsIrreversibleClass(ev.ReasonCode):
 		return []fateChoice{
@@ -1379,6 +1532,126 @@ func payloadChoicesToOut(in []payloadChoice) []FateChoiceOut {
 	out := make([]FateChoiceOut, 0, len(in))
 	for _, c := range in {
 		out = append(out, FateChoiceOut{ID: c.ID, Label: c.Label, ResolveClass: c.ResolveClass})
+	}
+	return out
+}
+
+// ===== §8 OOC 双口径闭环：玩家主观三键 OOC 与归因机器 OOC 交叉暴露，高玩家 OOC → 收紧一致性旋钮 =====
+//
+// 此前玩家三键反馈里的「太离谱(fate_react_ooc)」纯观测：落 product_events、surfaced 在北极星 ooc_rate，但**不驱动任何收紧**。
+// 本块把它接成闭环——读玩家主观三键 OOC 率（窗口聚合），超阈值即 latch 一个进程级「一致性收紧」态，使 GateSurprise/
+// 归因强制更严（突然戏剧性动作门槛抬高、破圈升档暂缓）；回落则解除。与归因机器 OOC（AttributionStats）两口径在遥测里交叉暴露。
+// flag 默认关：QUNXIANG_CONSISTENCY_TIGHTEN 未开 → RefreshConsistencyTightening 整体零行为（永不 latch），与全仓 flag 风格一致。
+
+const (
+	// playerOOCTightenThreshold 是玩家主观三键 OOC 率触发「一致性收紧」的阈值（>15% 即收紧，与归因机器降级阈同口径）。
+	playerOOCTightenThreshold = 0.15
+	// playerOOCMinSample 是触发收紧前要求的最小三键反馈总样本（防早期小样本抖动 latch）。
+	playerOOCMinSample = 20
+	// playerOOCWindowDays 是读玩家 OOC 率的滚动窗口（天）：只看近窗口的主观反馈，过往噪声不应永久压住一致性。
+	playerOOCWindowDays = 7
+)
+
+// consistencyTightened 是进程级「一致性收紧」闩（高玩家 OOC 触发）；与 attributionDegraded 平行，跨会话/请求共享。
+// 区别：attributionDegraded 是「机器 OOC 太高 → 暂停强制（放松）」的安全阀；本闩是「玩家主观 OOC 太高 → 收紧一致性」的旋钮。
+var consistencyTightened atomic.Bool
+
+// ConsistencyTightened 返回当前是否处于「一致性收紧」态（供 GateSurprise/归因强制消费方收紧门槛；/healthz 暴露）。
+func ConsistencyTightened() bool {
+	return consistencyTightened.Load()
+}
+
+// SetConsistencyTightened 直接设置收紧闩（供运维/测试）；生产由 RefreshConsistencyTightening 据玩家 OOC 率自动驱动。
+func SetConsistencyTightened(on bool) {
+	consistencyTightened.Store(on)
+}
+
+// consistencyTightenEnabled 读 QUNXIANG_CONSISTENCY_TIGHTEN（true/1/yes/on 视为开），默认关 → 收紧闭环零行为。
+func consistencyTightenEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_CONSISTENCY_TIGHTEN"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// TightenedSurpriseCap 是收紧态下「突然戏剧性动作」允许的最高 SurpriseLevel（消费方据此抬高门槛）：
+// 收紧时把破圈/突变的惊喜上限从 3 压到 2（≥3 的大转折一律降级/暂缓），未收紧时返回 3（不约束）。确定性、纯函数。
+// 导出供 llm.go 的 GateSurprise/归因强制路径调用（crossFileNeeds：消费在 llm.go，本函数只产出门槛）。
+func TightenedSurpriseCap() int {
+	if ConsistencyTightened() {
+		return 2
+	}
+	return 3
+}
+
+// serendipityPausedByTightening 报告破圈升档是否应因「一致性收紧」暂缓（高玩家 OOC 时先稳住一致性，别再塞陌生意外）。
+// 供 SurfaceFateEvent 的破圈分支与 llm.go 消费（本块在 SurfaceFateEvent 内已接入：见破圈门）。确定性、纯函数。
+func serendipityPausedByTightening() bool {
+	return ConsistencyTightened()
+}
+
+// RefreshConsistencyTightening 读玩家主观三键 OOC 率（近 playerOOCWindowDays 天 product_events 聚合），超阈即 latch 收紧、回落即解除。
+// best-effort、确定性、不阻断主结算：flag 关 / db 缺失 / 查询失败 / 样本不足 → 不改变现态（保守，绝不凭空 latch）。
+// 返回本次读到的玩家主观 OOC 率与样本数，供调用方（/healthz、运营）与机器 OOC 交叉暴露。
+func (service *Service) RefreshConsistencyTightening(ctx context.Context) (playerOOCRate float64, samples int) {
+	if !consistencyTightenEnabled() || service == nil || service.db == nil {
+		return 0, 0
+	}
+	report, err := analytics.NorthStar(ctx, service.db, playerOOCWindowDays)
+	if err != nil {
+		return 0, 0 // 查询失败：保守不改现态
+	}
+	samples = report.FateReactExpected + report.FateReactSurprise + report.FateReactOoc
+	playerOOCRate = report.OocRate
+	if samples < playerOOCMinSample {
+		return playerOOCRate, samples // 样本不足：不抖动 latch（保守保持现态）
+	}
+	if playerOOCRate > playerOOCTightenThreshold {
+		if consistencyTightened.CompareAndSwap(false, true) {
+			slog.Warn("consistency tightening engaged (high player OOC)",
+				"player_ooc_rate", playerOOCRate, "threshold", playerOOCTightenThreshold, "samples", samples)
+		}
+	} else if consistencyTightened.CompareAndSwap(true, false) {
+		slog.Info("consistency tightening released (player OOC fell back)",
+			"player_ooc_rate", playerOOCRate, "samples", samples)
+	}
+	return playerOOCRate, samples
+}
+
+// OOCDualChannel 是「玩家主观 OOC」与「归因机器 OOC」两口径的交叉暴露（§8 双口径闭环），供 /healthz / 运营观测。
+type OOCDualChannel struct {
+	// 玩家主观口径（三键「太离谱」反馈，近 playerOOCWindowDays 天窗口）。
+	PlayerOOCRate float64 `json:"player_ooc_rate"`
+	PlayerSamples int     `json:"player_samples"`
+	// 归因机器口径（ValidateAttribution 判 OOC 的进程级累计，全量）。
+	MachineOOCRate float64 `json:"machine_ooc_rate"`
+	MachineTotal   int64   `json:"machine_total"`
+	MachineOOC     int64   `json:"machine_ooc"`
+	// 两个旋钮的当前态：玩家高 OOC → 收紧；机器高 OOC → 降级（放松强制）。交叉暴露便于发现「主观/机器背离」。
+	ConsistencyTightened bool `json:"consistency_tightened"`
+	AttributionDegraded  bool `json:"attribution_degraded"`
+}
+
+// FateOOCDualChannel 读两口径 OOC 并打包交叉暴露：玩家主观（product_events 三键，窗口）+ 机器（AttributionStats，全量累计）。
+// best-effort：玩家口径查询失败仅置 0，机器口径恒可读（进程内存）。不修改任何 latch（纯读，幂等）；驱动收紧请用 RefreshConsistencyTightening。
+func (service *Service) FateOOCDualChannel(ctx context.Context) OOCDualChannel {
+	out := OOCDualChannel{
+		ConsistencyTightened: ConsistencyTightened(),
+		AttributionDegraded:  AttributionDegraded(),
+	}
+	machineTotal, machineOOC := AttributionStats()
+	out.MachineTotal = machineTotal
+	out.MachineOOC = machineOOC
+	if machineTotal > 0 {
+		out.MachineOOCRate = float64(machineOOC) / float64(machineTotal)
+	}
+	if service != nil && service.db != nil {
+		if report, err := analytics.NorthStar(ctx, service.db, playerOOCWindowDays); err == nil {
+			out.PlayerOOCRate = report.OocRate
+			out.PlayerSamples = report.FateReactExpected + report.FateReactSurprise + report.FateReactOoc
+		}
 	}
 	return out
 }

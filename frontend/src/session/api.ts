@@ -535,6 +535,64 @@ export async function getUnitStatus(unitID: string): Promise<Record<string, unkn
   return data.unit ?? null;
 }
 
+// ── 编年史读侧（chronicle）：对应后端 ChronicleFeed / ChronicleMomentByID，供 ChroniclePanel 依赖注入 ──
+// 与后端 json tag 一一对应；结构化类型，与 ChroniclePanel 自声明的 ChronicleFeed/ChronicleView 兼容。
+export type ChronicleEntryDTO = {
+  id: string;
+  session_id: string;
+  unit_id?: string;
+  turn: number;
+  kind: string;
+  text: string;
+  created_at?: string;
+};
+export type MomentAnchorDTO = {
+  chronicle_id: string;
+  unit_id?: string;
+  turn: number;
+  event_ids?: string[];
+};
+export type ChronicleViewDTO = { entry: ChronicleEntryDTO; anchor: MomentAnchorDTO };
+export type ChronicleFeedDTO = {
+  session_id: string;
+  unit_id?: string;
+  views: ChronicleViewDTO[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  next_offset?: number;
+};
+
+// getChronicleFeed 拉一页编年史（倒序，?limit=&offset= 分页）。unitID 空 → 整局总览；非空 → 该单位传记。
+// 会话作用域读，request 自动带会话角色 token（与 feuds/charter 读一致）。
+export async function getChronicleFeed(params: {
+  sessionID: string;
+  unitID?: string;
+  limit: number;
+  offset: number;
+}): Promise<ChronicleFeedDTO> {
+  const query = `?limit=${encodeURIComponent(String(params.limit))}&offset=${encodeURIComponent(String(params.offset))}`;
+  const base = `/api/sessions/${encodeURIComponent(params.sessionID)}`;
+  const path = params.unitID
+    ? `${base}/units/${encodeURIComponent(params.unitID)}/chronicle${query}`
+    : `${base}/chronicle${query}`;
+  const data = await request<{ feed?: ChronicleFeedDTO }>(path);
+  return (
+    data.feed ?? { session_id: params.sessionID, unit_id: params.unitID, views: [], limit: params.limit, offset: params.offset, has_more: false }
+  );
+}
+
+// getChronicleMoment 「回到那一刻」单条精确反查（GET …/chronicle/:chronicleId/moment）。找不到返回 null。
+export async function getChronicleMoment(params: {
+  sessionID: string;
+  chronicleID: string;
+}): Promise<ChronicleViewDTO | null> {
+  const data = await request<{ moment?: ChronicleViewDTO }>(
+    `/api/sessions/${encodeURIComponent(params.sessionID)}/chronicle/${encodeURIComponent(params.chronicleID)}/moment`,
+  );
+  return data.moment ?? null;
+}
+
 // bootstrapCharacter 快速创建一个角色（捏人 onboarding 用）。
 // withVillage=true 时附带 with_village=1，兑现「她身边已有二十个有名有姓的人」的 onboarding 承诺。
 export async function bootstrapCharacter(

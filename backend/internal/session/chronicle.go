@@ -195,3 +195,149 @@ func (service *Service) anchorMoment(ctx context.Context, entry ChronicleEntry) 
 	}
 	return anchor, rows.Err()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 读侧导出 API（供 HTTP 路由 / snapshot 消费）
+//
+// 写侧（recordChronicleEntry）已在实战路径真写（击杀/死亡/继承/升级），但 listChronicle/anchorMoment
+// 是包内未导出的低层原语——router 拿不到、snapshot 进不去 → 玩家看不到编年史。本段补「读侧装配层」：
+//   - ChronicleView：一条编年史条目 + 它的「回到那一刻」锚点（合并后即可直接渲染时间线 + 跳转链接）。
+//   - ChronicleFeed：装配好的一页编年史（条目视图 + 分页游标元信息），供 GET 端点 / 可选并进 snapshot。
+//   - Service.ChronicleFeed：导出读侧入口——倒序分页 + 逐条 best-effort 补锚点；这是 router/snapshot 唯一消费口。
+//   - Service.ChronicleMomentByID：「回到那一刻」单条端点——按 chronicle_id 反查条目并定位锚点。
+// 全部纯读、best-effort（锚点补不上不影响条目本身渲染），确定性（倒序口径与写侧定宽时间布局一致）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ChronicleView 是一条编年史条目的完整可渲染视图：条目本身 + 它的「回到那一刻」锚点。
+// 前端据 Entry 渲染时间线一行，据 Anchor.Turn / Anchor.EventIDs 渲染「回到那一刻」跳转链接 + 事件高亮。
+type ChronicleView struct {
+	Entry  ChronicleEntry `json:"entry"`
+	Anchor MomentAnchor   `json:"anchor"`
+}
+
+// ChronicleFeed 是装配好的一页编年史（倒序），带分页游标元信息供前端无限滚动 / 翻页。
+// HasMore 为本页是否填满 Limit（满即可能还有下一页）；NextOffset 为下一页起始 offset（HasMore 为假时无意义）。
+type ChronicleFeed struct {
+	SessionID  string          `json:"session_id"`
+	UnitID     string          `json:"unit_id,omitempty"`
+	Views      []ChronicleView `json:"views"`
+	Limit      int             `json:"limit"`
+	Offset     int             `json:"offset"`
+	HasMore    bool            `json:"has_more"`
+	NextOffset int             `json:"next_offset,omitempty"`
+}
+
+// listChroniclePaged 在 listChronicle 倒序口径上叠加 offset 分页（传记 / 分享卡无限滚动用）。
+// 多读一条用于判定 HasMore（fetch limit+1，丢弃溢出条），避免再发一次 COUNT 查询。
+// best-effort：读表失败返回空切片 + 错误（绝不中断主循环）。offset<0 归零、limit 归默认上限。
+func (service *Service) listChroniclePaged(ctx context.Context, sessionID, unitID string, limit, offset int) (entries []ChronicleEntry, hasMore bool, err error) {
+	if service == nil || service.db == nil {
+		return nil, false, fmt.Errorf("list chronicle paged: missing db")
+	}
+	if sessionID == "" {
+		return nil, false, fmt.Errorf("list chronicle paged: empty session id")
+	}
+	if limit <= 0 || limit > maxChronicleList {
+		limit = maxChronicleList
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	// 多取一条探测「是否还有下一页」，再裁回 limit；offset 在倒序游标上滑动。
+	probe := limit + 1
+	var rows *sql.Rows
+	if unitID == "" {
+		rows, err = service.db.QueryContext(ctx, `
+			SELECT id, session_id, unit_id, turn, kind, text, created_at
+			FROM chronicle_entries WHERE session_id = ?
+			ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, sessionID, probe, offset)
+	} else {
+		rows, err = service.db.QueryContext(ctx, `
+			SELECT id, session_id, unit_id, turn, kind, text, created_at
+			FROM chronicle_entries WHERE session_id = ? AND unit_id = ?
+			ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, sessionID, unitID, probe, offset)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("query chronicle paged: %w", err)
+	}
+	defer rows.Close()
+	all, scanErr := scanChronicleRows(rows)
+	if scanErr != nil {
+		return nil, false, scanErr
+	}
+	if len(all) > limit {
+		// 命中探测条：确有下一页，裁掉溢出的那一条。
+		return all[:limit], true, nil
+	}
+	return all, false, nil
+}
+
+// ChronicleFeed 是读侧导出入口（router / snapshot 唯一消费口）：倒序分页读回一页编年史，并逐条
+// best-effort 补「回到那一刻」锚点，装配成可直接渲染的 ChronicleView 列表 + 分页游标。
+// unitID 非空 → 只读该单位（传记 / 分享卡）；为空 → 读整局（编年史总览 / 命运 Copilot 取材）。
+// best-effort：条目读失败返回空 Feed + 错误（上层降级）；某条锚点补不上只是少了跳转增强，条目仍渲染。
+// 确定性：倒序口径与写侧定宽时间布局一致，同输入同输出（无随机、time 仅作墙钟比较）。
+func (service *Service) ChronicleFeed(ctx context.Context, sessionID, unitID string, limit, offset int) (ChronicleFeed, error) {
+	feed := ChronicleFeed{SessionID: sessionID, UnitID: unitID, Offset: offset}
+	if offset < 0 {
+		feed.Offset = 0
+		offset = 0
+	}
+	if limit <= 0 || limit > maxChronicleList {
+		limit = maxChronicleList
+	}
+	feed.Limit = limit
+	feed.Views = make([]ChronicleView, 0)
+	entries, hasMore, err := service.listChroniclePaged(ctx, sessionID, unitID, limit, offset)
+	if err != nil {
+		return feed, err
+	}
+	for _, entry := range entries {
+		view := ChronicleView{Entry: entry}
+		// best-effort 补锚点：失败也保留只含 turn 的降级锚点（anchorMoment 出错时返回的 anchor 已含 turn）。
+		anchor, anchorErr := service.anchorMoment(ctx, entry)
+		if anchorErr != nil {
+			anchor = MomentAnchor{ChronicleID: entry.ID, UnitID: entry.UnitID, Turn: entry.Turn}
+		}
+		view.Anchor = anchor
+		feed.Views = append(feed.Views, view)
+	}
+	feed.HasMore = hasMore
+	if hasMore {
+		feed.NextOffset = offset + limit
+	}
+	return feed, nil
+}
+
+// ChronicleMomentByID 实现「回到那一刻」单条端点：按 chronicle_id 在指定 session 内反查条目并定位锚点。
+// 供 GET …/chronicle/:chronicleId/moment 直接消费（前端点击某条编年史的「回到那一刻」时调）。
+// 找不到该条目 → 返回 found=false（不报错，前端提示「那一刻已无从追溯」）；DB 出错才返回错误。
+func (service *Service) ChronicleMomentByID(ctx context.Context, sessionID, chronicleID string) (view ChronicleView, found bool, err error) {
+	if service == nil || service.db == nil {
+		return ChronicleView{}, false, fmt.Errorf("chronicle moment: missing db")
+	}
+	if sessionID == "" || chronicleID == "" {
+		return ChronicleView{}, false, fmt.Errorf("chronicle moment: empty session or chronicle id")
+	}
+	row := service.db.QueryRowContext(ctx, `
+		SELECT id, session_id, unit_id, turn, kind, text, created_at
+		FROM chronicle_entries WHERE session_id = ? AND id = ?`, sessionID, chronicleID)
+	var (
+		entry  ChronicleEntry
+		unitID sql.NullString
+	)
+	switch scanErr := row.Scan(&entry.ID, &entry.SessionID, &unitID, &entry.Turn, &entry.Kind, &entry.Text, &entry.CreatedAt); {
+	case scanErr == sql.ErrNoRows:
+		return ChronicleView{}, false, nil // 条目不存在：not found，best-effort 不报错
+	case scanErr != nil:
+		return ChronicleView{}, false, fmt.Errorf("scan chronicle moment: %w", scanErr)
+	}
+	if unitID.Valid {
+		entry.UnitID = unitID.String
+	}
+	anchor, anchorErr := service.anchorMoment(ctx, entry)
+	if anchorErr != nil {
+		anchor = MomentAnchor{ChronicleID: entry.ID, UnitID: entry.UnitID, Turn: entry.Turn}
+	}
+	return ChronicleView{Entry: entry, Anchor: anchor}, true, nil
+}

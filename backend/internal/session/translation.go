@@ -15,6 +15,8 @@ package session
 //   - 任一维缺省（语义类未识别 / 锚类为空）都会优雅回退：先退到「通用兜底 × 锚类」，再退到「未命中」。
 
 import (
+	"context"
+	"database/sql"
 	"strings"
 
 	"qunxiang/backend/internal/engine/events"
@@ -45,28 +47,28 @@ type translationKey struct {
 // 未在表里的 (class, anchor) 组合由 translateFateBeat 的多级回退处理（见该函数）。
 var fateTranslationTable = map[translationKey]string{
 	// ===== 战争征召（conscription）：把「某地征召/某人被卷入战事」翻成贴个人的命运 beat =====
-	{classConscription, relevance.Relation}: "{target}被卷进了那场征召，刀兵将至——而她在乎的人，正站在风口上。",
-	{classConscription, relevance.Redline}:  "战火要征走{target}了。她曾立誓绝不让这样的事发生，如今红线就在眼前。",
-	{classConscription, relevance.Goal}:     "一纸征召打乱了一切：{target}被卷入战事，她一直想做成的事，悬了。",
+	{classConscription, relevance.Relation}:       "{target}被卷进了那场征召，刀兵将至——而她在乎的人，正站在风口上。",
+	{classConscription, relevance.Redline}:        "战火要征走{target}了。她曾立誓绝不让这样的事发生，如今红线就在眼前。",
+	{classConscription, relevance.Goal}:           "一纸征召打乱了一切：{target}被卷入战事，她一直想做成的事，悬了。",
 	{classConscription, relevance.DebtGrudgeLove}: "{target}被征召上了前线——这一去，她与{target}之间那桩未了的情债，再难有了结的时候。",
-	{classConscription, relevance.Legacy}:   "征召的号角响到了门前，{target}被卷入战事，她血脉里的牵系也被一并扯动。",
-	{classConscription, relevance.Geo}:      "她所在的地方落进了征召的版图，{target}被卷入战事——战线，离她只剩一步。",
+	{classConscription, relevance.Legacy}:         "征召的号角响到了门前，{target}被卷入战事，她血脉里的牵系也被一并扯动。",
+	{classConscription, relevance.Geo}:            "她所在的地方落进了征召的版图，{target}被卷入战事——战线，离她只剩一步。",
 
 	// ===== 贸易欠债（debt）：把「某人欠下/赊借/债务缠身」翻成贴个人的命运 beat =====
-	{classDebt, relevance.Relation}: "{target}欠下了一身还不清的债。她在乎的人陷在债里，她没法当作没看见。",
-	{classDebt, relevance.Redline}:  "{target}为了还债，正要越过她绝不容许的那条线。",
-	{classDebt, relevance.Goal}:     "{target}的这笔债像块石头压下来，她想做成的事，被它拖住了脚。",
+	{classDebt, relevance.Relation}:       "{target}欠下了一身还不清的债。她在乎的人陷在债里，她没法当作没看见。",
+	{classDebt, relevance.Redline}:        "{target}为了还债，正要越过她绝不容许的那条线。",
+	{classDebt, relevance.Goal}:           "{target}的这笔债像块石头压下来，她想做成的事，被它拖住了脚。",
 	{classDebt, relevance.DebtGrudgeLove}: "债又添了一笔：{target}欠下的，连同她与{target}旧日的债仇情，越缠越紧。",
-	{classDebt, relevance.Legacy}:   "为了{target}的债，连传家的东西都被摆上了台面——她血脉里的东西在隐隐作痛。",
-	{classDebt, relevance.Geo}:      "债务的风声传到她脚下的这片地方：{target}欠下的窟窿，迟早会烧到她身边。",
+	{classDebt, relevance.Legacy}:         "为了{target}的债，连传家的东西都被摆上了台面——她血脉里的东西在隐隐作痛。",
+	{classDebt, relevance.Geo}:            "债务的风声传到她脚下的这片地方：{target}欠下的窟窿，迟早会烧到她身边。",
 
 	// ===== 势力投靠/倒戈（defection）：把「改换门庭/归顺他方/背主」翻成贴个人的命运 beat =====
-	{classDefection, relevance.Relation}: "{target}改换了门庭，投到了别处。她在乎的人，从此站到了另一边。",
-	{classDefection, relevance.Redline}:  "{target}倒戈投了过去——背主，正是她立下死也不碰的那条红线。",
-	{classDefection, relevance.Goal}:     "{target}的临阵投靠，把她苦心经营的局搅了个底朝天，她想成的事悬于一线。",
+	{classDefection, relevance.Relation}:       "{target}改换了门庭，投到了别处。她在乎的人，从此站到了另一边。",
+	{classDefection, relevance.Redline}:        "{target}倒戈投了过去——背主，正是她立下死也不碰的那条红线。",
+	{classDefection, relevance.Goal}:           "{target}的临阵投靠，把她苦心经营的局搅了个底朝天，她想成的事悬于一线。",
 	{classDefection, relevance.DebtGrudgeLove}: "{target}转投他方，把她与{target}之间那笔债仇情，硬生生劈成了敌我两端。",
-	{classDefection, relevance.Legacy}:   "{target}背了旧主另投他处——连同她血脉所系的那一脉，也被这一投扯裂。",
-	{classDefection, relevance.Geo}:      "她脚下这片地方的人心倒向了别处：{target}的投靠，是变天的头一阵风。",
+	{classDefection, relevance.Legacy}:         "{target}背了旧主另投他处——连同她血脉所系的那一脉，也被这一投扯裂。",
+	{classDefection, relevance.Geo}:            "她脚下这片地方的人心倒向了别处：{target}的投靠，是变天的头一阵风。",
 }
 
 // fateGenericAnchorTemplate 是「通用兜底 × 锚类」的回退模板（class 未识别、或具体 (class,anchor) 缺表时用）。
@@ -155,9 +157,11 @@ var (
 	defectionKeywords    = []string{"投靠", "归顺", "倒戈", "改换门庭", "背主", "易主", "叛投", "转投", "改投"}
 )
 
-// renderFateTemplate 把模板里的 {target}/{event} 占位替换成事件的真实字段（确定性、纯函数）。
-//   - {target}：与她相关的另一方。优先 ActorID（事件发起方），若发起方就是她或缺省则用 TargetID；都空用「那个人」。
-//     注意：此处填的是稳定标识（ID 或缺省词），措辞层不展开为显示名（跨分片角色可能无显示名，与 crossSummary 一致克制）。
+// renderFateTemplate 把模板里的 {target}/{friend}/{region}/{event} 占位替换成事件的真实字段（确定性、纯函数、占位安全）。
+//   - {target}/{friend}：与她相关的另一方（DB 矩阵用 {friend}，原内存矩阵用 {target}，二者同义、同一来源）。优先 ActorID
+//     （事件发起方），缺省回落 TargetID；都空用「那个人」。注意：填的是稳定标识（ID 或缺省词），措辞层不展开为显示名
+//     （跨分片角色可能无显示名，与 crossSummary 一致克制）。
+//   - {region}：事件来源地 SourceRegionID，缺省用「她所在的地方」（绝不残留裸占位）。
 //   - {event}：事件一句话摘要 Summary，缺省时占位整段连同其前导措辞被裁掉（避免出现空尾巴）。
 func renderFateTemplate(tmpl string, ev FateEvent) string {
 	target := strings.TrimSpace(ev.ActorID)
@@ -168,6 +172,13 @@ func renderFateTemplate(tmpl string, ev FateEvent) string {
 		target = "那个人"
 	}
 	out := strings.ReplaceAll(tmpl, "{target}", target)
+	out = strings.ReplaceAll(out, "{friend}", target)
+
+	region := strings.TrimSpace(ev.SourceRegionID)
+	if region == "" {
+		region = "她所在的地方"
+	}
+	out = strings.ReplaceAll(out, "{region}", region)
 
 	summary := strings.TrimSpace(ev.Summary)
 	if summary != "" {
@@ -180,4 +191,21 @@ func renderFateTemplate(tmpl string, ev FateEvent) string {
 		out = strings.TrimSpace(out)
 	}
 	return out
+}
+
+// translateFateBeatFromDB 是 §M1 翻译矩阵的 **DB 版消费入口**（SurfaceFateEvent 用它替代纯内存 translateFateBeat）：
+// 按事件 reason-code × 命中锚类查 data-driven translation_templates 表（带内存缓存、三级回退），渲染成贴合个人的命运 beat。
+//
+//   - beat：填好占位（{friend}/{region}/{event}…）的命运 beat。命中精确组/通用兜底用专属模板；缺模板时回退 DefaultReasonText
+//     （仍是一句可用的保守 beat，并已在 loadTranslationTemplate 里计入遥测便于排期补全）。
+//   - forcePending：该 (reason_code × 锚类) 是否标了 force_pending（密友倒地/密友被背叛/她所在地被劫等）——调用方据此把路由
+//     从高光卡硬抬到待决策（§1.2「force_pending 类必须有专属模板」的机制落地）。
+//
+// best-effort、确定性、零 LLM、零副作用（除遥测/缓存）。db 为 nil 时退内置矩阵，绝不阻断命运路由。
+func translateFateBeatFromDB(ctx context.Context, db *sql.DB, ev FateEvent, anchorKind relevance.AnchorKind) (beat string, forcePending bool) {
+	t := loadTranslationTemplate(ctx, db, ev.ReasonCode, anchorKind)
+	if strings.TrimSpace(t.Narrative) == "" {
+		return "", false
+	}
+	return renderFateTemplate(t.Narrative, ev), t.ForcePending
 }

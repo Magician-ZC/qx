@@ -32,6 +32,8 @@ import {
   createSeason,
   finalizeSeason,
   fetchArbitrationAudit,
+  getChronicleFeed,
+  getChronicleMoment,
 } from "./session/api";
 import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
 import type { FieldBossResult } from "./session/types";
@@ -42,6 +44,7 @@ import ComplianceGatePanel, { ComplianceBlockedBanner } from "./components/Compl
 import ConsentInbox from "./components/ConsentInbox";
 import WorldBossPanel from "./components/WorldBossPanel";
 import { BloodFeudPanel } from "./components/BloodFeudPanel";
+import { ChroniclePanel } from "./components/ChroniclePanel";
 import { OpsDashboard } from "./components/OpsDashboard";
 import DungeonPanel from "./components/DungeonPanel";
 import DungeonSegmentPanel from "./components/DungeonSegmentPanel";
@@ -498,6 +501,8 @@ export function App() {
   const [consentInboxOpen, setConsentInboxOpen] = useState(false);
   // 血仇网络面板（针对当前选中角色，玩家可见——让 blood_feud 传播可感知）。
   const [bloodFeudOpen, setBloodFeudOpen] = useState(false);
+  // 编年史时间线面板（针对当前选中角色的传记 / 整局命运总线；读侧低频，独立浮层、不进高频快照轮询）。
+  const [chronicleOpen, setChronicleOpen] = useState(false);
   // 世界 Boss 协作面板（需本局已接入世界 world_id；developer 门控的进阶玩法）。
   const [worldBossOpen, setWorldBossOpen] = useState(false);
   // 运营看板（cost-dashboard + leads-funnel，developer 门控）。
@@ -3181,6 +3186,13 @@ export function App() {
                     血仇
                   </button>
                   <button
+                    className={`action-button inline-action ${chronicleOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setChronicleOpen((open) => !open)}
+                    title={selectedUnitID ? "编年史：这位角色的传记时间线（斩杀/陨落/承继/传家…），可回到那一刻" : "编年史：本局的命运总线时间线，可回到那一刻"}
+                  >
+                    编年史
+                  </button>
+                  <button
                     className={`action-button inline-action ${billingPanelOpen ? "action-button-primary" : ""}`}
                     onClick={() => {
                       setBillingPanelOpen((open) => !open);
@@ -3714,6 +3726,17 @@ export function App() {
               unitID={selectedUnitID}
               unitName={selectedUnit?.identity.name}
               onClose={() => setBloodFeudOpen(false)}
+            />
+          ) : null}
+          {/* 编年史时间线面板：选中角色 → 该角色传记；未选中 → 整局命运总线。读侧低频，依赖注入 api 的 getChronicleFeed/getChronicleMoment。*/}
+          {showHUD && chronicleOpen && session ? (
+            <ChroniclePanel
+              sessionID={session.id}
+              unitID={selectedUnitID ?? undefined}
+              unitName={selectedUnit?.identity.name}
+              fetchChronicle={getChronicleFeed}
+              resolveMoment={getChronicleMoment}
+              onClose={() => setChronicleOpen(false)}
             />
           ) : null}
           {/* 世界 Boss 协作 PvE（developer 门控；需本局已接入世界 world_id）。*/}
