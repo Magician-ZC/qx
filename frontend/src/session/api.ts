@@ -857,27 +857,43 @@ export async function getMe(): Promise<AccountUser | null> {
 }
 
 // getMyCharacter 读当前账号在主世界 world_default 的持久角色（需 Bearer）。无角色 → {has_character:false}。
+// 401（token 失效/被登出）→ 镜像 getMe：先清本地 Bearer 再 rethrow，避免持过期 token 反复打 401。
 export async function getMyCharacter(): Promise<MyCharacter> {
-  const data = await request<{ character?: MyCharacter }>(
-    `/api/me/character`,
-    { method: "GET" },
-    { bearer: "require" },
-  );
-  return data.character ?? { has_character: false };
+  try {
+    const data = await request<{ character?: MyCharacter }>(
+      `/api/me/character`,
+      { method: "GET" },
+      { bearer: "require" },
+    );
+    return data.character ?? { has_character: false };
+  } catch (error) {
+    if (error instanceof APIError && error.status === 401) {
+      setAccountToken("");
+    }
+    throw error;
+  }
 }
 
 // createMyCharacter 为当前账号在主世界降生一个角色（需 Bearer）。幂等：账号已有角色则返回既有的、绝不重复造人。
+// 401 同 getMyCharacter：先清本地 Bearer 再 rethrow（与 getMe 一致），让上层据失效态回登录。
 export async function createMyCharacter(input: MyCharacterInput): Promise<MyCharacter> {
-  const data = await request<{ character?: MyCharacter }>(
-    `/api/me/character`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    },
-    { bearer: "require" },
-  );
-  return data.character ?? { has_character: false };
+  try {
+    const data = await request<{ character?: MyCharacter }>(
+      `/api/me/character`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+      { bearer: "require" },
+    );
+    return data.character ?? { has_character: false };
+  } catch (error) {
+    if (error instanceof APIError && error.status === 401) {
+      setAccountToken("");
+    }
+    throw error;
+  }
 }
 
 export async function getCurrentAccount(token: string): Promise<AccountUser> {

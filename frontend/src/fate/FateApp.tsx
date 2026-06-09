@@ -1,9 +1,14 @@
 /* 文件说明：角色命运开盒的独立入口（与旧战棋客户端分离，Root.tsx 默认路由到此）。
-   流程（账号绑定主世界版）：登录/注册（账号鉴权）→ 拉取「我的主世界角色」→
+   鉴权前置由外层 AuthGate（Root.tsx 用 <AuthGate><FateApp/></AuthGate> 包住）独占：FateApp 必在已登录态下挂载，
+   故本文件**不再自管登录/注册**（曾经的 auth 相位会与 AuthGate 的登录态脱钩——FateApp 清 token 只 setPhase 自身，
+   AuthGate 的空依赖 useEffect 永不再核验，仍停在 authed，导致登出后双登录 UI 并存 + 残留前一用户名）。
+   流程（账号绑定主世界版）：进入即 gate → 拉取「我的主世界角色」→
      已有 → 直接进四槽主界面（resume 该账号在主世界的同一角色，多设备一致）；
      未有 → 捏人三步 + 离线宪章（onboarding，宪法 §5.1/GDD §4）→ 即时人格快照（O2 最高 ROI）→ 四槽主界面。
    权威态：账号 Bearer 令牌（api.ts 经 localStorage 持久化、自动随请求发送）。localStorage 另缓存
-   当前角色 (sessionId/unitId/name) 仅为减少请求的「乐观缓存」，与令牌取到的权威角色不一致时以后者为准。*/
+   当前角色 (sessionId/unitId/name) 仅为减少请求的「乐观缓存」，与令牌取到的权威角色不一致时以后者为准。
+   「换个账号登入」：清本地角色缓存 + 整页 reload —— reload 会重跑 AuthGate 的挂载核验（token 已被 logout 清掉→
+   AuthGate 落到 anon 干净登录表单），从根上消除双 UI 与用户名错配。*/
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -11,10 +16,8 @@ import {
   getAccountToken,
   getMyCharacter,
   getUnitStatus,
-  loginAccount,
   logoutAccount,
   recordPlayerIntervention,
-  registerAccount,
   trackFunnel,
 } from "../session/api";
 import { FateView } from "./FateView";
@@ -32,15 +35,15 @@ import "./fate.css";
 // crossFileNeeds（本波 W-B 三人分工，本文件只编辑 FateApp.tsx）：
 //   - api.ts（B1 拥有）已提供并被本文件调用：getMyCharacter() → MyCharacter{ has_character, session_id?,
 //     unit_id?, name? }；createMyCharacter(MyCharacterInput{name?,origin?,desire?,wound?,redline?}) → MyCharacter。
-//     账号鉴权三函数当前签名为 registerAccount({username,password})/loginAccount({username,password})（内部
-//     setAccountToken 持久化 Bearer，本文件不取返回值）与 logoutAccount(token)（传 getAccountToken()）——
-//     本文件已按现签名调用；若 B1 后续统一为 (username,password)→{token}/logoutAccount()，本文件三处调用需同步。
+//     登录/注册已上移到外层 AuthGate，本文件不再调 registerAccount/loginAccount；仅在「换个账号登入」时
+//     调 logoutAccount(getAccountToken()) 清后端会话+本地 Bearer，再 window.location.reload() 交还 AuthGate 重核验。
 //   - FateView（B3 拥有）当前 props 为 { sessionId, unitId }，已够用。若日后要在四槽内「接管关键战」，
 //     需 FateView 新增 onEnterBattle?(sessionId) 回调（点击后由本壳 window.location.hash = `#battle/${sessionId}`
 //     切到 App 战棋接管视图）——属 B3 改 FateView + B1 改 Root.tsx 的 #battle 路由，本文件届时只透传回调。
 //   - 即时人格快照仍为纯体验层、零持久化；若要把玩家微选择落库/反哺 persona，需 api.ts 新增回执函数。
 
-type Phase = "auth" | "gate" | "onboarding" | "preview" | "snapshot" | "play";
+// Phase 去掉了曾经的 "auth"：鉴权归 AuthGate 独占，FateApp 必在已登录态挂载，进入即 gate 拉角色。
+type Phase = "gate" | "onboarding" | "preview" | "snapshot" | "play";
 
 // STORE_KEY 缓存「当前角色」乐观态；账号令牌才是权威（多设备登录拿同一角色）。
 const STORE_KEY = "qunxiang.fate.character.v1";
@@ -74,8 +77,8 @@ function persistSaved(next: Saved | null): void {
 const ORIGINS = ["边境猎户", "铁匠之女", "落魄书生", "行脚商人", "庙祝巫医", "流亡贵族", "采药孤女"];
 
 export function FateApp() {
-  // 初始相位：已有账号令牌 → 进 gate 拉取我的角色；无令牌 → 先登录。
-  const [phase, setPhase] = useState<Phase>(() => (getAccountToken() ? "gate" : "auth"));
+  // 初始相位恒为 gate：AuthGate 已保证挂载即已登录，进入直接拉「我的主世界角色」。
+  const [phase, setPhase] = useState<Phase>("gate");
   // saved 仅作乐观缓存兜底；play 渲染前会被 gate 用权威角色覆盖。
   const [saved, setSaved] = useState<Saved | null>(() => loadSaved());
   const [busy, setBusy] = useState(false);
@@ -90,11 +93,6 @@ export function FateApp() {
   const [preview, setPreview] = useState<{ name: string; bio: string; traits: PersonaTraits } | null>(
     null,
   );
-
-  // 登录/注册表单态。
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
 
   // gate：账号令牌就绪后，向后端要「我的主世界角色」——有则 resume 进 play，无则进捏人。
   // 令牌是权威：即便 localStorage 缓存了某角色，也以后端返回为准（多设备一致）。
@@ -120,8 +118,9 @@ export function FateApp() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      // 拉取失败（如令牌过期）→ 回登录，让玩家重新鉴权。
-      setPhase("auth");
+      // 拉取失败（如令牌过期/401）→ 停在 gate 相位展示错误与「重新登入」按钮；点击走 signOut（清 token + reload），
+      // reload 后由外层 AuthGate 重新核验落到 anon 登录表单。不再切到已删除的自管 "auth" 相位。
+      setPhase("gate");
     } finally {
       setBusy(false);
     }
@@ -131,32 +130,6 @@ export function FateApp() {
   useEffect(() => {
     if (phase === "gate") void loadCharacter();
   }, [phase, loadCharacter]);
-
-  // 登录/注册：成功后 api.ts 已把 Bearer 令牌写入 localStorage，转 gate 拉角色。
-  const submitAuth = useCallback(async () => {
-    const u = username.trim();
-    const p = password;
-    if (!u || !p) {
-      setError("请填写账号与口令。");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      // 登录/注册成功后 api.ts 内部已 setAccountToken（Bearer 入 localStorage），故此处无需用返回值。
-      if (authMode === "register") {
-        await registerAccount({ username: u, password: p });
-      } else {
-        await loginAccount({ username: u, password: p });
-      }
-      setPassword("");
-      setPhase("gate");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }, [authMode, username, password]);
 
   // create：账号绑定的幂等降生（非匿名 bootstrap）。保留捏人四要素 + 离线宪章 + 即时人格快照体验，
   // 只把「创建」那步换成账号绑定端点 createMyCharacter。
@@ -232,20 +205,19 @@ export function FateApp() {
     }
   }, [name, origin, desire, wound, redline]);
 
-  // 登出：清账号令牌（api.ts 负责）+ 本地角色缓存，回登录页。
+  // 换个账号登入 / 登出：FateApp 不自管鉴权态，故登出后**不能**只切自身相位（那样会与外层 AuthGate 的
+  // authed 脱钩 → 双登录 UI 并存 + 残留前一用户名）。正确做法：清账号令牌（logoutAccount 内部无论成败都清本地
+  // Bearer）+ 清本地角色缓存，再整页 reload —— reload 重跑 AuthGate 挂载核验，token 已清→落到 anon 干净登录表单。
   const signOut = useCallback(async () => {
     try {
-      // logoutAccount 当前签名收 token；传当前 Bearer，内部无论成败都会清本地令牌。
+      // logoutAccount 当前签名收 token；传当前 Bearer，内部无论成败都会清本地令牌（localStorage + 模块级）。
       await logoutAccount(getAccountToken());
     } catch {
       /* 后端登出失败也无妨，本地令牌仍会被清 */
     }
     persistSaved(null);
-    setSaved(null);
-    setPreview(null);
-    setUsername("");
-    setPassword("");
-    setPhase("auth");
+    // 整页刷新让外层 AuthGate 重新核验登录态（无 token → anon 登录表单），从根上消除双 UI 与用户名错配。
+    window.location.reload();
   }, []);
 
   // ── play：四槽主界面（账号的主世界角色） ──
@@ -304,63 +276,7 @@ export function FateApp() {
     );
   }
 
-  // ── auth：登录 / 注册（账号鉴权，令牌存 localStorage 作 Bearer） ──
-  if (phase === "auth") {
-    return (
-      <div className="fate-shell fate-onboarding">
-        <div className="fate-create">
-          <h1>群像 · 命运</h1>
-          <p className="fate-create-lead">
-            登入你的家门。你牵挂的那个人，在世上某处，等你回来看她。
-          </p>
-
-          <label>
-            账号
-            <input
-              value={username}
-              placeholder="你的名号"
-              autoComplete="username"
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label>
-            口令
-            <input
-              type="password"
-              value={password}
-              placeholder="你的口令"
-              autoComplete={authMode === "register" ? "new-password" : "current-password"}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submitAuth();
-              }}
-            />
-          </label>
-
-          {error && <div className="fate-error">{error}</div>}
-          <button className="fate-create-btn" disabled={busy} onClick={() => void submitAuth()}>
-            {busy
-              ? authMode === "register"
-                ? "正在为你立户…"
-                : "正在唤你回门…"
-              : authMode === "register"
-                ? "立一道家门"
-                : "登入家门"}
-          </button>
-          <button
-            className="fate-restart"
-            disabled={busy}
-            onClick={() => {
-              setError("");
-              setAuthMode((m) => (m === "login" ? "register" : "login"));
-            }}
-          >
-            {authMode === "login" ? "还没有家门？立一个 →" : "已有家门？登入 →"}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // 鉴权（登录/注册）由外层 AuthGate 独占，FateApp 不再渲染自管的 auth 相位（已删除）。
 
   // ── onboarding：捏人（账号已登入、尚未降生角色） ──
   return (

@@ -113,6 +113,53 @@ func TestWorldRoutesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdminFlagsWriteFailClosed(t *testing.T) {
+	// 未配 QUNXIANG_OPS_TOKEN 时，GM 写端点 POST /api/admin/flags 必须 fail-closed 返 503，
+	// 而非默认放行——否则任何人可开关游戏 flag（反射关键开关）。守卫在请求时读 env，
+	// t.Setenv 设空即可覆盖全路由（即便 NewRouter 注册早于本测试）。
+	t.Setenv("QUNXIANG_OPS_TOKEN", "")
+	router := newTestRouter(t)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, jsonReq(http.MethodPost, "/api/admin/flags", `{"name":"x","value":"true"}`))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("未配 OPS_TOKEN 时写 flag 应 503 fail-closed，得到 %d (%s)", w.Code, w.Body.String())
+	}
+
+	// 只读 GET 端点仍走宽松守卫：未配 token 默认放行 200（原型语义不变）。
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/admin/flags", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("未配 OPS_TOKEN 时只读 GET flags 应仍 200（宽松守卫），得到 %d (%s)", w2.Code, w2.Body.String())
+	}
+}
+
+func TestAdminFlagsWritePassesWithToken(t *testing.T) {
+	// 配了 OPS_TOKEN 后，带正确 X-Ops-Token 才放行写端点（过守卫，进 handler）。
+	// 用未知 flag 名让 handler 返 400「unknown flag」——证明已过守卫进入业务逻辑（非 403/503）。
+	t.Setenv("QUNXIANG_OPS_TOKEN", "s3cret-token")
+	router := newTestRouter(t)
+
+	// 缺 token → 403（守卫拦截）。
+	wNoTok := httptest.NewRecorder()
+	router.ServeHTTP(wNoTok, jsonReq(http.MethodPost, "/api/admin/flags", `{"name":"x","value":"true"}`))
+	if wNoTok.Code != http.StatusForbidden {
+		t.Fatalf("配了 token 但缺 token 头写 flag 应 403，得到 %d (%s)", wNoTok.Code, wNoTok.Body.String())
+	}
+
+	// 带对 token → 过守卫；未知 flag 名 → handler 返 400（证明已穿过守卫）。
+	req := jsonReq(http.MethodPost, "/api/admin/flags", `{"name":"__nope_unknown_flag__","value":"true"}`)
+	req.Header.Set("X-Ops-Token", "s3cret-token")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("带对 token 写未知 flag 应过守卫并由 handler 返 400，得到 %d (%s)", w.Code, w.Body.String())
+	}
+	if !contains(w.Body.String(), "unknown flag") {
+		t.Fatalf("应返回 unknown flag 错误（证明已进入业务逻辑）：%s", w.Body.String())
+	}
+}
+
 func jsonReq(method, path, body string) *http.Request {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

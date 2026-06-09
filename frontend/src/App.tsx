@@ -54,7 +54,7 @@ import DungeonSegmentPanel from "./components/DungeonSegmentPanel";
 import LiveOpsPanel from "./components/LiveOpsPanel";
 import { CharterEditor } from "./components/CharterEditor";
 import { OnboardingTour } from "./components/OnboardingTour";
-import { usePanelStack } from "./hooks/usePanelStack";
+import { usePanelStack, type PanelID } from "./hooks/usePanelStack";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -1780,6 +1780,15 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
   useEffect(() => {
     writeDeveloperModeToStorage(developerMode);
   }, [developerMode]);
+
+  // 来意(consent)/血仇(bloodFeud) 两个面板的渲染条件含 selectedUnitID，且其工具栏按钮在未选中时 disabled。
+  // 若面板已打开后玩家取消选中（selectedUnitID→null），面板既不渲染、按钮也点不动 → 卡在「打不开也关不掉」的幽灵态。
+  // 这里在该情形下主动关闭面板，把互斥栈复位，避免再切别的面板时残留这条幽灵 openPanelId。判定抽到纯函数便于回归。
+  useEffect(() => {
+    if (shouldCloseUnitScopedPanel(openRightPanelId, selectedUnitID)) {
+      closeRightPanel();
+    }
+  }, [openRightPanelId, selectedUnitID, closeRightPanel]);
 
   function handleTileClick(q: number, r: number) {
     const now = Date.now();
@@ -4121,7 +4130,11 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
           ) : null}
           {showHUD && developerMode ? (
             <>
-              <div className={`floating-toolbar ${selectedUnit ? "floating-toolbar-with-unit-summary" : ""}`}>
+              <div
+                className={`floating-toolbar ${selectedUnit ? "floating-toolbar-with-unit-summary" : ""} ${
+                  openRightPanelId ? "floating-toolbar-panel-open" : ""
+                }`}
+              >
                 {floatingPanels.map((panel) => (
                   <button
                     key={panel.id}
@@ -8474,4 +8487,16 @@ function clearDuelResumeFromStorage(): void {
 // getErrorMessage 提取并标准化接口错误文案。
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+// shouldCloseUnitScopedPanel 判定「单位作用域」的右侧面板是否应被自动关闭：
+// 来意(consent)/血仇(bloodFeud) 的渲染条件含 selectedUnitID 且工具栏按钮在未选中时 disabled，
+// 故一旦面板已打开而玩家取消选中（selectedUnitID 为空），面板会卡成「打不开也关不掉」的幽灵态——此时应关闭复位。
+// 其它面板（fate/chronicle/charter/billing/...）不依赖选中单位，不受此约束。抽成纯函数便于回归测试。
+export function shouldCloseUnitScopedPanel(
+  openPanelId: PanelID | null,
+  selectedUnitID: string | null,
+): boolean {
+  const unitScoped = openPanelId === "consent" || openPanelId === "bloodFeud";
+  return unitScoped && !selectedUnitID;
 }

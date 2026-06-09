@@ -249,7 +249,19 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return MainWorldCharacter{}, err
 	}
+	// 并发降生 TOCTOU 硬兜底（H2）：query-first 幂等守卫（上方 FindMainWorldSessionID）与此处终写之间窗口很宽
+	// （夹 EnsureDefaultWorld / 4 单位 / 20 村民 / bind world 等数十秒）；两个并发请求可能各自越过守卫、各插一行
+	// 不同 uuid id 的 session，致同账号在 world_default 出现两个角色。spine 已加唯一索引
+	// uniq_single_player_sessions_account_world(account_id, world_id)，故并发竞态中的「输家」此处 Save 必触唯一冲突——
+	// 这等价于「另一个并发请求已为本账号降生」，回退查既有角色返回（与 world_boss dup-key、world.Join 撞唯一键再 Get
+	// 的兜底同模式）。输家先前 Save 的孤儿单位行（hero/enemy）因无对应 session 行、永不被 FindMainWorldSessionID 触达，
+	// 属无害残留（不进任何账本/不被 resume）。
 	if err := service.sessions.Save(ctx, &state); err != nil {
+		if isDupKeyErr(err) {
+			if existingID, found, findErr := service.sessions.FindMainWorldSessionID(ctx, accountID, worldID); findErr == nil && found {
+				return service.mainWorldCharacterView(ctx, existingID, worldID, false)
+			}
+		}
 		return MainWorldCharacter{}, err
 	}
 
@@ -271,8 +283,11 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 }
 
 // applyMainWorldPersona 把捏人的出身/夙愿/创伤覆写进角色身份与传记（决策 prompt 会读 Biography）。
-// 确定性、纯内存改写：出身写进 Lineage（也让村民/孩子指纹判定区分主角，见 village.go isSeededVillagerRecord——
-// 主角 Lineage 为出身原型属正常，村庄幂等守卫靠村民的中文 Gender 主指纹，不会把主角误判为村民）。
+// 确定性、纯内存改写：出身写进 Lineage。**注意**：这会让主角 Lineage 命中 village.go isSeededVillagerRecord 的
+// 村民 Lineage 指纹（如「边境猎户」），与村民无法靠指纹区分；因此村庄幂等守卫 sessionAlreadyHasVillage **必须靠
+// state.PlayerUnitIDs 显式剔除玩家主角**后再判，不能依赖「中文 Gender 主指纹会自动避开主角」（主角 Gender 是英文
+// male/female 确实不命中 Gender 指纹，但会命中 Lineage 指纹——曾因此把带出身的主角误判为村民，致 20 人村庄被整体跳过，
+// 即 H1）。
 func applyMainWorldPersona(record *unit.Record, in MainWorldCharacterInput) {
 	if record == nil {
 		return

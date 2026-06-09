@@ -2978,6 +2978,19 @@ body::before {
   padding: 2px 2px 6px 6px;
 }
 
+/* dev 浮动工具栏（z-toolbar=80）固定在右上角，会盖住右侧面板（z-right-panel=55）的右上角约一个按钮宽，
+   挡住面板的关闭按钮。右侧有面板打开时（.floating-toolbar-panel-open）把工具栏下移让出面板顶部，
+   并降不透明（hover 复原），让面板右上角的关闭/操作可点。非阻断小修，不改层级语义。 */
+.floating-toolbar.floating-toolbar-panel-open {
+  top: 132px;
+  opacity: 0.45;
+  transition: opacity 0.18s ease, top 0.18s ease;
+}
+.floating-toolbar.floating-toolbar-panel-open:hover,
+.floating-toolbar.floating-toolbar-panel-open:focus-within {
+  opacity: 1;
+}
+
 .floating-toolbar-button {
   width: 48px;
   height: 48px;

@@ -27,12 +27,42 @@ const opsTokenHeader = "X-Ops-Token"
 //	已设置                     → 要求请求头 X-Ops-Token 等于该值，否则 403 + Abort。
 //
 // 比较用 crypto/subtle.ConstantTimeCompare 防时序侧信道（避免按字节早退泄露前缀匹配长度）。
+// 注意：本宽松版仅适合**只读**端点（仪表盘/审计聚合）。对状态变更/反射关键 flag 开关等
+// 高危**写**端点，fail-open 危险（未配 token 时任何人可开关游戏 flag/凭空造人/置位威胁），
+// 必须改用 opsTokenGuardStrict（fail-closed）。
 func opsTokenGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		expected := os.Getenv(opsEnvVar)
 		if expected == "" {
 			// 未配置：原型默认开放。
 			c.Next()
+			return
+		}
+		provided := c.GetHeader(opsTokenHeader)
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+		c.Next()
+	}
+}
+
+// opsTokenGuardStrict 是 opsTokenGuard 的 **fail-closed** 变体，专供 GM 管理后台的写端点
+// （POST/DELETE /api/admin/flags、POST .../threat、POST .../seed-village 等状态变更 + 反射关键
+// flag 开关）。语义差异只在「未配置 token」一态：
+//
+//	未设置 QUNXIANG_OPS_TOKEN  → 返回 503（服务未配置鉴权，拒绝），而非放行。
+//	已设置                     → 与宽松版同样常量时间比对 X-Ops-Token，不符 403 + Abort。
+//
+// 取向：高危写端点宁可拒绝服务也不能默认放行——未配鉴权时若放行，任何人可开关游戏 flag、
+// 凭空造人、置位威胁，是不可接受的 fail-open。运营方配好 QUNXIANG_OPS_TOKEN 后即正常工作。
+// 比较同样用 crypto/subtle.ConstantTimeCompare 防时序侧信道。
+func opsTokenGuardStrict() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		expected := os.Getenv(opsEnvVar)
+		if expected == "" {
+			// 未配置：高危写端点 fail-closed，拒绝服务。
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "ops auth not configured"})
 			return
 		}
 		provided := c.GetHeader(opsTokenHeader)

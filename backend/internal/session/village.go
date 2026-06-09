@@ -231,7 +231,10 @@ func (service *Service) seedVillageForSession(ctx context.Context, state *State)
 		return
 	}
 	// 幂等守卫：若本局已织过村（已有村民单位），直接返回——避免重复建局/未来接入中局路径时重复造人。
-	if service.sessionAlreadyHasVillage(ctx, state.ID) {
+	// 必须排除玩家主角单位：大世界入口的主角带「出身」会把 Identity.Lineage 覆写为出身原型（如「边境猎户」），
+	// 与村民的 Lineage 指纹无法区分；若不排除，带出身的主角会被误判为「本局已织村」致整张 20 人关系网被跳过
+	// （H1：出身致 20 人村庄被整体跳过）。传 state.PlayerUnitIDs 让守卫精确剔除玩家单位后再做村民指纹判定。
+	if service.sessionAlreadyHasVillage(ctx, state.ID, state.PlayerUnitIDs) {
 		return
 	}
 	// worldID 传空：单人局当前无世界，只织本局关系网（不强行 world.Create）。
@@ -247,7 +250,10 @@ func (service *Service) seedVillageForSession(ctx context.Context, state *State)
 //     bootstrap 默认 Lineage 恒为 "wanderer"、生育孩子 Lineage 恒为 "child"（见 romance.go createChildUnit），故二者须显式排除，
 //     否则「只生过孩子、从未织村」的局会被误判为已织村而永久跳过织村（潜伏 bug）。
 //
-// 两条指纹冗余互保：即便上游某天改了其一，另一条仍能兜住，避免误把玩家/孩子单位当村民、或漏判村民致重复造人。
+// 重要：本指纹**无法区分大世界入口带「出身」的玩家主角**——applyMainWorldPersona 会把主角 Lineage 覆写为出身原型
+// （如「边境猎户」），命中上面第二条 Lineage 指纹。故调用方（sessionAlreadyHasVillage）**必须先剔除玩家单位**
+// 再做本判定，否则带出身的主角会被误判为村民、致整张 20 人关系网被跳过（H1）。本函数只管「像不像村民指纹」，
+// 「是不是玩家」由调用方负责排除。
 func isSeededVillagerRecord(rec *unit.Record) bool {
 	if rec == nil {
 		return false
@@ -261,10 +267,13 @@ func isSeededVillagerRecord(rec *unit.Record) bool {
 }
 
 // sessionAlreadyHasVillage 判定本局是否已织过 20 人出生关系网：本局是否已存在「村民」单位
-// （isSeededVillagerRecord 指纹命中；玩家主单位/普通单位不会误判）。
+// （isSeededVillagerRecord 指纹命中；玩家主单位先被 playerUnitIDs 剔除，不会误判）。
+// playerUnitIDs 传本局玩家主角单位 ID 集合（state.PlayerUnitIDs）——大世界入口带「出身」的主角 Lineage
+// 被覆写为出身原型，会命中村民 Lineage 指纹，故必须先排除玩家单位再判，否则带出身的主角会被误判为「本局已织村」
+// 致整张 20 人关系网被跳过（H1：出身致 20 人村庄被整体跳过）。
 // 确定性、零额外 LLM：仅一次 ListBySession + 内存比对。读 DB 失败时**保守返回 false**（宁可后续 best-effort
 // 重试播种、也不因瞬时读错而永久跳过织村——SeedVillageBestEffort 本身吞错，最坏只是一次无害的多写尝试）。
-func (service *Service) sessionAlreadyHasVillage(ctx context.Context, sessionID string) bool {
+func (service *Service) sessionAlreadyHasVillage(ctx context.Context, sessionID string, playerUnitIDs []string) bool {
 	if service == nil || service.units == nil {
 		return false
 	}
@@ -272,7 +281,15 @@ func (service *Service) sessionAlreadyHasVillage(ctx context.Context, sessionID 
 	if err != nil {
 		return false
 	}
+	playerSet := make(map[string]struct{}, len(playerUnitIDs))
+	for _, id := range playerUnitIDs {
+		playerSet[id] = struct{}{}
+	}
 	for i := range records {
+		// 先剔除玩家主角单位：带出身的主角 Lineage 命中村民指纹，不排除会致误判（H1）。
+		if _, isPlayer := playerSet[records[i].ID]; isPlayer {
+			continue
+		}
 		if isSeededVillagerRecord(&records[i]) {
 			return true
 		}

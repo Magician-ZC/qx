@@ -153,6 +153,29 @@ func (r *Registry) BumpThreatLevel(ctx context.Context, id string, delta int64) 
 	return level, nil
 }
 
+// SetThreatLevelAbsolute 把 region 威胁等级**绝对置位**到 level（GM 人工拉高/清零某地威胁度做活动/演练）。
+// 与 BumpThreatLevel 的「读当前+累加 delta」不同：本方法用单条原子 UPDATE 直写目标值，
+// 杜绝「Get 当前值 → Bump(target−current)」两步之间的 TOCTOU 竞态（并发两次绝对置位不会互相串扰成错误终值）。
+// level 入参前夹 MAX(0,level)（威胁度非负）。region 不存在时返回 ErrNotFound——调用方应先 UpsertRegion 建档。
+// 返回置位后的实际威胁值（即夹钳后的 level）。
+func (r *Registry) SetThreatLevelAbsolute(ctx context.Context, id string, level int64) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, fmt.Errorf("region set threat absolute: nil registry")
+	}
+	if level < 0 {
+		level = 0
+	}
+	res, err := r.db.ExecContext(ctx, `UPDATE regions SET threat_level = ?, updated_at = ? WHERE id = ?`,
+		level, nowTS(), id)
+	if err != nil {
+		return 0, fmt.Errorf("region set threat absolute: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, ErrNotFound
+	}
+	return level, nil
+}
+
 func (r *Registry) bumpThreatMySQL(ctx context.Context, id string, delta int64, now string) (int64, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

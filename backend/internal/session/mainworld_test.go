@@ -11,12 +11,14 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
+	"qunxiang/backend/internal/villageseed"
 )
 
 // newMainWorldTestService 起一个临时 SQLite 上的完整 Service（含 sessions 仓库），用于主世界入口集成测试。
@@ -200,6 +202,104 @@ func TestMainWorldCharacter_AccountIsolation(t *testing.T) {
 	}
 	if b.SessionID == a.SessionID || b.UnitID == a.UnitID {
 		t.Fatalf("A/B 应为不同角色，a=%+v b=%+v", a, b)
+	}
+}
+
+// TestCreateMainWorldCharacter_OriginStillSeedsVillage 是 H1 回归：带「出身」的主角降生后，身边仍应织满 20 人村庄。
+// bug：applyMainWorldPersona 把主角 Lineage 覆写为出身原型（如「边境猎户」），命中 isSeededVillagerRecord 的村民
+// Lineage 指纹；旧版 sessionAlreadyHasVillage 不剔除玩家单位，会把先于 seedVillage 落库的主角误判为「本局已织村」，
+// 致整张 20 人关系网被整体跳过（零村民），破「她身边已有二十个有名有姓的人」核心承诺。
+// 这里**显式校验村民人数恰为 20**（剔除玩家单位后命中村民指纹的记录数），正是旧测试漏掉的断言。
+func TestCreateMainWorldCharacter_OriginStillSeedsVillage(t *testing.T) {
+	_, service := newMainWorldTestService(t)
+	ctx := context.Background()
+
+	view, err := service.CreateMainWorldCharacter(ctx, "acc-origin", MainWorldCharacterInput{
+		Name:   "苏霜",
+		Origin: "边境猎户", // 触发 bug 的关键：出身覆写主角 Lineage，命中村民 Lineage 指纹
+	})
+	if err != nil {
+		t.Fatalf("带出身降生失败: %v", err)
+	}
+
+	records, err := service.units.ListBySession(ctx, view.SessionID)
+	if err != nil {
+		t.Fatalf("ListBySession 失败: %v", err)
+	}
+	// 玩家主角单位集合（须从村民计数中剔除——主角带出身会命中村民指纹）。
+	playerSet := map[string]struct{}{view.UnitID: {}}
+
+	villagers := 0
+	heroLineage := ""
+	heroCountedAsVillager := false
+	for i := range records {
+		if _, isPlayer := playerSet[records[i].ID]; isPlayer {
+			heroLineage = records[i].Identity.Lineage
+			// 确认主角确实命中了村民指纹（否则 bug 前提不成立、测试无意义）。
+			if isSeededVillagerRecord(&records[i]) {
+				heroCountedAsVillager = true
+			}
+			continue
+		}
+		if isSeededVillagerRecord(&records[i]) {
+			villagers++
+		}
+	}
+	if !heroCountedAsVillager {
+		t.Fatalf("前提失效：带出身的主角应命中村民 Lineage 指纹（lineage=%q），否则本回归无意义", heroLineage)
+	}
+	if villagers != villageseed.VillageSize {
+		t.Fatalf("带出身降生后村民应恰为 %d 人（H1：出身致整张村庄被跳过的回归），得到 %d", villageseed.VillageSize, villagers)
+	}
+}
+
+// TestCreateMainWorldCharacter_ConcurrentNoDoubleCharacter 是 H2 回归：同账号并发降生应恰得 1 个角色。
+// bug：query-first 幂等守卫（FindMainWorldSessionID）与终写 Save 之间窗口很宽，两个并发请求可能各越过守卫、
+// 各插一行不同 uuid id 的 session，致同账号在 world_default 出现两个角色。修复靠唯一索引
+// uniq_single_player_sessions_account_world + Save 撞唯一冲突时回退查既有角色返回。
+// 校验：并发后库中该 (account, world_default) 恰 1 条 session，且两次返回收敛到同一 session/unit。
+func TestCreateMainWorldCharacter_ConcurrentNoDoubleCharacter(t *testing.T) {
+	_, service := newMainWorldTestService(t)
+	ctx := context.Background()
+
+	const accountID = "acc-concurrent"
+	const parallel = 4
+
+	var wg sync.WaitGroup
+	results := make([]MainWorldCharacter, parallel)
+	errs := make([]error, parallel)
+	start := make(chan struct{})
+	for i := 0; i < parallel; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // 同时起跑，最大化 TOCTOU 竞态窗口重叠
+			results[idx], errs[idx] = service.CreateMainWorldCharacter(ctx, accountID, MainWorldCharacterInput{Name: "并发降生"})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// 所有并发调用都应成功（输家走 dup-key 回退查既有，不报错）。
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("并发降生第 %d 个失败（应优雅收敛而非报错）: %v", i, err)
+		}
+	}
+	// 落库层硬校验：同账号在 world_default 恰 1 条 session（唯一索引 + 回退兜住 TOCTOU）。
+	if cnt := countSessionsForAccountWorld(ctx, t, service.db, accountID, defaultWorldID); cnt != 1 {
+		t.Fatalf("并发降生后同账号在 world_default 应恰 1 局（H2：并发 TOCTOU 造双角色的回归），得到 %d", cnt)
+	}
+	// 所有返回应收敛到同一 session/unit（赢家的角色）。
+	winnerSession := results[0].SessionID
+	winnerUnit := results[0].UnitID
+	if winnerSession == "" || winnerUnit == "" {
+		t.Fatalf("并发降生返回视图缺 session/unit：%+v", results[0])
+	}
+	for i := 1; i < parallel; i++ {
+		if results[i].SessionID != winnerSession || results[i].UnitID != winnerUnit {
+			t.Fatalf("并发降生应全部收敛到同一角色，第 0 个=%+v 第 %d 个=%+v", results[0], i, results[i])
+		}
 	}
 }
 

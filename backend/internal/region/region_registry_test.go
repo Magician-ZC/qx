@@ -124,6 +124,44 @@ func TestRegionBumpThreatAccumulates(t *testing.T) {
 	}
 }
 
+func TestRegionSetThreatLevelAbsolute(t *testing.T) {
+	ctx, reg := newRegionRegistry(t)
+	if err := reg.UpsertRegion(ctx, "r", "w"); err != nil {
+		t.Fatalf("upsert 失败: %v", err)
+	}
+	// 先累积一些威胁，验证绝对置位是直写覆盖而非累加。
+	if _, err := reg.BumpThreatLevel(ctx, "r", 7); err != nil {
+		t.Fatalf("预置威胁失败: %v", err)
+	}
+	// 绝对置位到 3（不是 7+3）。
+	level, err := reg.SetThreatLevelAbsolute(ctx, "r", 3)
+	if err != nil || level != 3 {
+		t.Fatalf("绝对置位期望 3，得到 %d (err=%v)", level, err)
+	}
+	got, _ := reg.GetRegion(ctx, "r")
+	if got.ThreatLevel != 3 {
+		t.Fatalf("持久化威胁应为 3（直写覆盖），得到 %d", got.ThreatLevel)
+	}
+	// 拉高到 100：仍是直写而非叠加。
+	level, err = reg.SetThreatLevelAbsolute(ctx, "r", 100)
+	if err != nil || level != 100 {
+		t.Fatalf("绝对置位期望 100，得到 %d (err=%v)", level, err)
+	}
+	// 负值夹到 0。
+	level, err = reg.SetThreatLevelAbsolute(ctx, "r", -9)
+	if err != nil || level != 0 {
+		t.Fatalf("负值应夹到 0，得到 %d (err=%v)", level, err)
+	}
+	got, _ = reg.GetRegion(ctx, "r")
+	if got.ThreatLevel != 0 {
+		t.Fatalf("夹钳后持久化威胁应为 0，得到 %d", got.ThreatLevel)
+	}
+	// 不存在的 region 应返回 ErrNotFound（不静默建档）。
+	if _, err := reg.SetThreatLevelAbsolute(ctx, "ghost", 5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("对不存在 region 绝对置位应返回 ErrNotFound，得到 %v", err)
+	}
+}
+
 func TestRegionAdvanceTickMonotonicAndPerRegion(t *testing.T) {
 	ctx, reg := newRegionRegistry(t)
 	// 未登记 region 也能发号（world_ticks 自建档）；首发号为 1。

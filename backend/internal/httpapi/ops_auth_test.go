@@ -68,6 +68,62 @@ func TestOpsTokenGuard_EnvSet_RequiresMatchingToken(t *testing.T) {
 	}
 }
 
+// newStrictGuardedRouter 装一个挂了 opsTokenGuardStrict 的最小路由，命中即返回 200{ok}。
+func newStrictGuardedRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/strict-guarded", opsTokenGuardStrict(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	return r
+}
+
+// doStrictGuarded 发一个带可选 X-Ops-Token 头的请求到 strict 路由，返回状态码。
+func doStrictGuarded(r *gin.Engine, token string, withHeader bool) int {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/strict-guarded", nil)
+	if withHeader {
+		req.Header.Set("X-Ops-Token", token)
+	}
+	r.ServeHTTP(w, req)
+	return w.Code
+}
+
+func TestOpsTokenGuardStrict_EnvUnset_FailClosed(t *testing.T) {
+	// 不设 QUNXIANG_OPS_TOKEN：高危写端点 fail-closed，无论带不带头一律 503 拒绝（不放行）。
+	t.Setenv("QUNXIANG_OPS_TOKEN", "")
+	r := newStrictGuardedRouter()
+
+	if got := doStrictGuarded(r, "", false); got != http.StatusServiceUnavailable {
+		t.Fatalf("env unset, no header: want 503, got %d", got)
+	}
+	if got := doStrictGuarded(r, "whatever", true); got != http.StatusServiceUnavailable {
+		t.Fatalf("env unset, with header: want 503, got %d", got)
+	}
+}
+
+func TestOpsTokenGuardStrict_EnvSet_RequiresMatchingToken(t *testing.T) {
+	t.Setenv("QUNXIANG_OPS_TOKEN", "s3cret-token")
+	r := newStrictGuardedRouter()
+
+	// 缺 token → 403
+	if got := doStrictGuarded(r, "", false); got != http.StatusForbidden {
+		t.Fatalf("env set, missing header: want 403, got %d", got)
+	}
+	// 错 token → 403
+	if got := doStrictGuarded(r, "wrong-token", true); got != http.StatusForbidden {
+		t.Fatalf("env set, wrong token: want 403, got %d", got)
+	}
+	// 空字符串 token 头 → 403
+	if got := doStrictGuarded(r, "", true); got != http.StatusForbidden {
+		t.Fatalf("env set, empty token header: want 403, got %d", got)
+	}
+	// 对 token → 放行
+	if got := doStrictGuarded(r, "s3cret-token", true); got != http.StatusOK {
+		t.Fatalf("env set, correct token: want 200, got %d", got)
+	}
+}
+
 func TestOpsTokenGuard_Forbidden_BodyShape(t *testing.T) {
 	// 403 响应体形状必须是 {"error":"forbidden"}（调用方约定）。
 	t.Setenv("QUNXIANG_OPS_TOKEN", "tok")

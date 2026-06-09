@@ -120,6 +120,53 @@ func TestSeedWorldVillageDefaultsFaction(t *testing.T) {
 	}
 }
 
+func TestSeedWorldVillageIdempotent(t *testing.T) {
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+
+	// 首次播种：建满 20 人。
+	n1, err := service.SeedWorldVillage(ctx, "s_idem", "player", "", 7)
+	if err != nil {
+		t.Fatalf("首次 SeedWorldVillage 失败: %v", err)
+	}
+	if n1 != villageseed.VillageSize {
+		t.Fatalf("首次应织 %d 人，得 %d", villageseed.VillageSize, n1)
+	}
+
+	// 同一 session 二次 POST（甚至换 seed）：幂等守卫拦截，返回既有村民数、不翻倍造人。
+	n2, err := service.SeedWorldVillage(ctx, "s_idem", "player", "", 999)
+	if err != nil {
+		t.Fatalf("二次 SeedWorldVillage 失败: %v", err)
+	}
+	if n2 != villageseed.VillageSize {
+		t.Fatalf("二次应返回既有 %d 人（不新建），得 %d", villageseed.VillageSize, n2)
+	}
+
+	// 直查本局单位总数：应恰为一张村庄的人数，证明未翻倍。
+	records, err := service.units.ListBySession(ctx, "s_idem")
+	if err != nil {
+		t.Fatalf("ListBySession 失败: %v", err)
+	}
+	villagerCount := 0
+	for i := range records {
+		if isSeededVillagerRecord(&records[i]) {
+			villagerCount++
+		}
+	}
+	if villagerCount != villageseed.VillageSize {
+		t.Fatalf("二次播种后村民数应仍为 %d（未翻倍），实得 %d", villageseed.VillageSize, villagerCount)
+	}
+
+	// 另一 session 不受影响：仍可正常播种自己的村庄。
+	n3, err := service.SeedWorldVillage(ctx, "s_other", "player", "", 7)
+	if err != nil {
+		t.Fatalf("另一 session SeedWorldVillage 失败: %v", err)
+	}
+	if n3 != villageseed.VillageSize {
+		t.Fatalf("另一 session 应正常织 %d 人，得 %d", villageseed.VillageSize, n3)
+	}
+}
+
 func TestFeatureFlagStoreRoundTrip(t *testing.T) {
 	_, _, service := newThreatTestService(t)
 	ctx := context.Background()

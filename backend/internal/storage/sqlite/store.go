@@ -93,6 +93,10 @@ func Open(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 账号绑定持久角色并发降生 TOCTOU 硬兜底（评审 W-E，best-effort：存量重复行致建唯一索引失败时吞错，query-first 仍守）。
+	if err := dbmigrate.EnsureSinglePlayerAccountWorldUnique(ctx, db); err != nil {
+		log.Printf("ensure single_player account-world unique index best-effort failed: %v", err)
+	}
 
 	// 相关性锚持久表（存量旧库补建；fresh 库 schema.sql 已建）——否则持久锚 silently 永不落库/加载。
 	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.RelevanceAnchorsTableSQLite, dbmigrate.RelevanceAnchorsTableMySQL); err != nil {

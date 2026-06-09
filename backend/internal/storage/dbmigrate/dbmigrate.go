@@ -79,6 +79,32 @@ func EnsureIndex(ctx context.Context, db *sql.DB, table string, indexName string
 	return nil
 }
 
+// EnsureSinglePlayerAccountWorldUnique 给 single_player_sessions(account_id, world_id) 建唯一约束
+// （评审 W-E：账号绑定持久角色的并发降生 TOCTOU 硬兜底——第二个并发 INSERT 必触唯一冲突，由 mainworld.go best-effort 收敛）。
+// best-effort：存量库若有重复 (account_id, world_id) 行会建索引失败，吞错即可（query-first 仍是主护栏）。
+// SQLite 用 partial unique index（account_id/world_id 同非空才约束，避免匿名/旧局 NULL 误撞）；
+// MySQL 的 NULL 不参与唯一比对，故普通 UNIQUE 即可（多条 NULL 行合法共存）。返回是否成功建立（仅遥测/日志用）。
+func EnsureSinglePlayerAccountWorldUnique(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("ensure unique: nil db")
+	}
+	if dbdialect.IsMySQL(db) {
+		var count int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'single_player_sessions' AND index_name = 'uniq_single_player_sessions_account_world'`,
+		).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+		_, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX uniq_single_player_sessions_account_world ON single_player_sessions (account_id, world_id)`)
+		return err
+	}
+	_, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS uniq_single_player_sessions_account_world ON single_player_sessions(account_id, world_id) WHERE account_id IS NOT NULL AND world_id IS NOT NULL`)
+	return err
+}
+
 // existingColumns 返回某表已存在的列集合（双驱动）。
 func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	out := map[string]bool{}

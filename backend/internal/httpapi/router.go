@@ -610,7 +610,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"entries": entries})
 	})
 
-	// ---- GM 管理后台手柄（运行时 flag 开关层 + 世界配置），全部 opsTokenGuard ----
+	// ---- GM 管理后台手柄（运行时 flag 开关层 + 世界配置）----
+	// 只读端点（GET flags/worlds-detail）套宽松 opsTokenGuard（未配 token 默认开放，原型语义）；
+	// 写端点（POST/DELETE flags、POST threat、POST seed-village）套 fail-closed 的 opsTokenGuardStrict
+	//（未配 token 返 503 拒绝）——这些是状态变更 + 反射关键 flag 开关，绝不能 fail-open。
 	// flag override 经 featureflags 进程级状态（已注入双驱动 Store 持久化，main.go 启动回灌）；
 	// 世界配置经 session 的 admin_world 服务（每请求新建轻量 Service）。供独立 AdminApp 前端 5 面板驱动。
 
@@ -620,7 +623,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 设一个 flag 的运行时 override（不重启即灰度）。先校验是已知游戏 flag，再 best-effort 落库持久化。
-	router.POST("/api/admin/flags", opsTokenGuard(), func(c *gin.Context) {
+	// 写端点：反射关键 flag 开关，fail-closed（opsTokenGuardStrict）——未配 OPS_TOKEN 时返 503 拒绝。
+	router.POST("/api/admin/flags", opsTokenGuardStrict(), func(c *gin.Context) {
 		var body struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
@@ -654,8 +658,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"existed": existed})
 	}
-	router.DELETE("/api/admin/flags", opsTokenGuard(), adminClearFlag)       // AdminApp：?name=
-	router.DELETE("/api/admin/flags/:name", opsTokenGuard(), adminClearFlag) // 兼容 path 形
+	// 清 override 同属写端点，fail-closed（opsTokenGuardStrict）。
+	router.DELETE("/api/admin/flags", opsTokenGuardStrict(), adminClearFlag)       // AdminApp：?name=
+	router.DELETE("/api/admin/flags/:name", opsTokenGuardStrict(), adminClearFlag) // 兼容 path 形
 
 	// 世界总览：列出全部世界及其 region/人口概览（GM 总览页数据源）。limit=0 取缺省。
 	// 路径用 /worlds-detail 对齐 AdminApp WorldConfigPanel 的 listWorldsDetail（与已落地的基础列表 /api/worlds 区分）。
@@ -671,7 +676,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	router.GET("/api/admin/worlds", opsTokenGuard(), adminWorldsDetail) // 兼容别名
 
 	// 绝对置位某 region 的威胁等级（GM 人工拉高/清零某地威胁度做活动/演练）。返回置位后的实际威胁值。
-	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsTokenGuard(), func(c *gin.Context) {
+	// 写端点：状态变更，fail-closed（opsTokenGuardStrict）。
+	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsTokenGuardStrict(), func(c *gin.Context) {
 		var body struct {
 			Level int64 `json:"level"`
 		}
@@ -688,7 +694,8 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	})
 
 	// 手动为某局/世界确定性织一张 20 人出生关系网（GM 手动播种世界人口）。faction_id 缺省服务内取 session_id。
-	router.POST("/api/admin/worlds/:worldId/seed-village", opsTokenGuard(), func(c *gin.Context) {
+	// 写端点：凭空造人是状态变更，fail-closed（opsTokenGuardStrict）。
+	router.POST("/api/admin/worlds/:worldId/seed-village", opsTokenGuardStrict(), func(c *gin.Context) {
 		var body struct {
 			SessionID string `json:"session_id"`
 			FactionID string `json:"faction_id"`

@@ -103,9 +103,10 @@ func (service *Service) listRegionsForWorld(ctx context.Context, registry *regio
 }
 
 // SetRegionThreatLevel 把某 region 的威胁等级**绝对置位**到 level（GM 人工拉高/清零某地威胁度做活动/演练）。
-// region 不存在时先按 worldID 幂等登记（UpsertRegion，默认 cold/零威胁），再以「目标 − 当前」的 delta 累加到目标值。
-// 用 delta 累加而非直写：复用 region.BumpThreatLevel 的并发安全 SQL（threat_level=threat_level+? 在 SQL 内完成、防读改写竞态）。
-// 返回置位后的实际威胁值。level<0 视为 0（威胁度非负）。
+// region 不存在时先按 worldID 幂等登记（UpsertRegion，默认 cold/零威胁），再原子绝对置位到目标值。
+// 用单条原子 UPDATE 直写（region.SetThreatLevelAbsolute）而非「读当前值 + Bump(目标−当前)」：
+// 后者在 Get 与 Bump 两步之间存在 TOCTOU 竞态，并发两次绝对置位会互相串扰成错误终值，破坏「绝对置位」语义。
+// 返回置位后的实际威胁值。level<0 视为 0（威胁度非负，由 SetThreatLevelAbsolute 内部夹钳）。
 func (service *Service) SetRegionThreatLevel(ctx context.Context, worldID, regionID string, level int64) (int64, error) {
 	if service == nil || service.db == nil {
 		return 0, fmt.Errorf("set region threat: nil service or db")
@@ -114,25 +115,15 @@ func (service *Service) SetRegionThreatLevel(ctx context.Context, worldID, regio
 	if regionID == "" {
 		return 0, fmt.Errorf("set region threat: empty region id")
 	}
-	if level < 0 {
-		level = 0
-	}
 	registry := region.New(service.db)
 	// 幂等登记：region 不存在时建档（已存在则只刷 world_id/updated_at，不抹已积累威胁）。
 	if err := registry.UpsertRegion(ctx, regionID, strings.TrimSpace(worldID)); err != nil {
 		return 0, fmt.Errorf("set region threat (upsert): %w", err)
 	}
-	current, err := registry.GetRegion(ctx, regionID)
+	// 原子绝对置位：单条 UPDATE 直写目标值（内部夹 MAX(0,level)），无 read-then-delta 的 TOCTOU 窗口。
+	newLevel, err := registry.SetThreatLevelAbsolute(ctx, regionID, level)
 	if err != nil {
-		return 0, fmt.Errorf("set region threat (get current): %w", err)
-	}
-	delta := level - current.ThreatLevel
-	if delta == 0 {
-		return current.ThreatLevel, nil // 已是目标值，免一次写
-	}
-	newLevel, err := registry.BumpThreatLevel(ctx, regionID, delta)
-	if err != nil {
-		return 0, fmt.Errorf("set region threat (bump): %w", err)
+		return 0, fmt.Errorf("set region threat (set absolute): %w", err)
 	}
 	return newLevel, nil
 }
@@ -140,8 +131,11 @@ func (service *Service) SetRegionThreatLevel(ctx context.Context, worldID, regio
 // SeedWorldVillage 为某局（sessionID）确定性织一张 20 人出生关系网并接入 worldID（worldID 可空=不入世界）。
 // GM 手动播种世界人口的入口：复用既有 SeedVillage（建人/落库/入世界/织关系/写记忆全套）。
 // factionID 缺省取 sessionID（单人局阵营 ID 常与 sessionID 同源，调用方可显式覆盖）。
-// 返回实际落库的村民数。注意：同一 (worldID, seed) 重复调用人是确定性一致的，但会**新建行**——
-// GM 应对同一局只播种一次，避免重复造人（这与建局自动织村的幂等守卫是两条独立路径）。
+// 返回实际落库的村民数。
+//
+// 幂等守卫：起始处复用 service.sessionAlreadyHasVillage（与建局自动织村 seedVillageForSession 同一守卫），
+// 若本局已织过村则直接返回既有村民数、**不重复造人**——杜绝 GM 对同一局重复 POST 时每次凭空新建 20 单位的翻倍 bug。
+// admin 场景无玩家主角，村庄仅播种村民、不含主角（与 onboarding 的 with_village 同口径，village 本就不含主角）。
 func (service *Service) SeedWorldVillage(ctx context.Context, sessionID, factionID, worldID string, seed int64) (int, error) {
 	if service == nil || service.units == nil || service.db == nil {
 		return 0, fmt.Errorf("seed world village: missing dependencies")
@@ -153,11 +147,36 @@ func (service *Service) SeedWorldVillage(ctx context.Context, sessionID, faction
 	if strings.TrimSpace(factionID) == "" {
 		factionID = sessionID
 	}
+	// 幂等：本局已织过村则返回既有村民数、不新建（防 GM 同局重复 POST 翻倍造人）。
+	// 守卫与既有村民计数共用一次 ListBySession 内存比对，确定性、零额外 LLM。
+	if existing, ok := service.countSeededVillagers(ctx, sessionID); ok && existing > 0 {
+		return existing, nil
+	}
 	villagers, err := service.SeedVillage(ctx, sessionID, factionID, strings.TrimSpace(worldID), seed)
 	if err != nil {
 		return 0, fmt.Errorf("seed world village: %w", err)
 	}
 	return len(villagers), nil
+}
+
+// countSeededVillagers 数本局已落库的「村民」单位数（isSeededVillagerRecord 指纹命中）。
+// ok=false 表示读 DB 失败：保守按「未织村」处理（与 sessionAlreadyHasVillage 同口径，宁可重试播种也不永久跳过）。
+// 既作 SeedWorldVillage 的幂等守卫、又给已织村的局返回既有村民数（免再起一次 SeedVillage）。
+func (service *Service) countSeededVillagers(ctx context.Context, sessionID string) (int, bool) {
+	if service == nil || service.units == nil {
+		return 0, false
+	}
+	records, err := service.units.ListBySession(ctx, sessionID)
+	if err != nil {
+		return 0, false
+	}
+	count := 0
+	for i := range records {
+		if isSeededVillagerRecord(&records[i]) {
+			count++
+		}
+	}
+	return count, true
 }
 
 // ===== featureflags.Store 实现（运行时 flag override 的双驱动持久化后端） =====
