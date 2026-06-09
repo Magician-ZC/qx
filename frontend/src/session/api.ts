@@ -1608,6 +1608,70 @@ export async function fetchArbitrationAudit(
   );
 }
 
+// ============ 角色档案（MMORPG 式只读「角色档案」面板 + 账号设置，命运客户端 CharacterSheet/AccountSettings 消费） ============
+
+// UnitRelationView 对齐后端 session.RelationView（json tag 小写）：「她身边的人」的四轴关系。
+// 四轴 clamp[-10,10]：trust 信任 / fear 惧 / affection 亲 / rivalry 仇（正=亲/信、负=惧/仇）。
+export type UnitRelationView = {
+  target_unit_id: string;
+  target_name: string;
+  trust: number;
+  fear: number;
+  affection: number;
+  rivalry: number;
+};
+
+// getUnitRelations 拉某角色身边人的四轴关系（GET /api/units/:id/relations，按强度排序）。纯读、无副作用。
+// 后端出错时把 error 并进 200 体（relations 为空数组），这里吞掉只取 relations。失败回空数组（不打断观察）。
+export async function getUnitRelations(unitID: string): Promise<UnitRelationView[]> {
+  const data = await request<{ relations?: UnitRelationView[]; error?: string }>(
+    `/api/units/${encodeURIComponent(unitID)}/relations`,
+  );
+  return data.relations ?? [];
+}
+
+// changePassword 改账号密码（POST /api/accounts/change-password，Bearer 登录态）。
+// 成功 → {ok:true}；旧密码错 / 新密码 <6 位 → 后端返 400 {error}，由 request 抛 APIError（带 message）。
+// 改密成功后端会吊销全部会话令牌——调用方应据此触发登出（清本地 Bearer + 回登录）。
+export async function changePassword(oldPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  const data = await request<{ ok?: boolean }>(
+    `/api/accounts/change-password`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    },
+    { bearer: "require" },
+  );
+  return { ok: Boolean(data.ok) };
+}
+
+// ItemCatalogEntry 对齐后端 item.Definition（json tag 小写）：仅取角色档案译名/标注用到的少数字段，其余忽略。
+export type ItemCatalogEntry = {
+  id: string;
+  display_name: string;
+  category?: string;
+  slot?: string;
+};
+
+// getItemCatalog 拉物品目录（GET /api/items/catalog）并物化成 id→中文名 的 Map（把 item_id 译成中文名）。
+// 译不到的 id 由调用方退显原 id。纯读；失败回空 Map（调用方据此全退原 id，不打断渲染）。
+export async function getItemCatalog(): Promise<Map<string, string>> {
+  try {
+    const data = await request<{ items?: ItemCatalogEntry[] }>(`/api/items/catalog`);
+    const map = new Map<string, string>();
+    for (const it of data.items ?? []) {
+      if (it && typeof it.id === "string" && it.id !== "") {
+        map.set(it.id, typeof it.display_name === "string" && it.display_name.trim() !== "" ? it.display_name : it.id);
+      }
+    }
+    return map;
+  } catch {
+    // best-effort：目录拉取失败回空 Map，调用方全退原 id，不打断角色档案渲染。
+    return new Map<string, string>();
+  }
+}
+
 const visitorIDStorageKey = "qunxiang.visitor.id.v1";
 
 // anonymousVisitorID 读取（或惰性生成并持久化）匿名访客 ID，用于漏斗去重统计。

@@ -383,6 +383,37 @@ func (service *Service) loadTopOutgoingRelations(
 	return result
 }
 
+// RelationView 是某角色对外四轴关系的公共视图（命运客户端「她身边的人」关系面板用）。
+type RelationView struct {
+	TargetUnitID string  `json:"target_unit_id"`
+	TargetName   string  `json:"target_name"`
+	Trust        float64 `json:"trust"`
+	Fear         float64 `json:"fear"`
+	Affection    float64 `json:"affection"`
+	Rivalry      float64 `json:"rivalry"`
+}
+
+// ListRelations 列出某角色最强的对外四轴关系（按四轴绝对值和排序，**不带敌意过滤**——与只出世仇的 ListBloodFeuds 不同，
+// 这是「她身边在乎/在意/提防的人」的全谱）。命运客户端关系面板用。
+func (service *Service) ListRelations(ctx context.Context, unitID string, limit int) ([]RelationView, error) {
+	if service == nil || service.db == nil {
+		return nil, fmt.Errorf("list relations: nil service or db")
+	}
+	rows := service.loadTopOutgoingRelations(ctx, unitID, limit)
+	out := make([]RelationView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RelationView{
+			TargetUnitID: r.TargetUnitID,
+			TargetName:   r.TargetName,
+			Trust:        r.Trust,
+			Fear:         r.Fear,
+			Affection:    r.Affection,
+			Rivalry:      r.Rivalry,
+		})
+	}
+	return out, nil
+}
+
 // loadOutgoingRelationMap 把对外关系列表重排为按 targetID 索引的 map，便于快速查询。
 func (service *Service) loadOutgoingRelationMap(ctx context.Context, sourceUnitID string) map[string]relationPromptRow {
 	rows := service.loadTopOutgoingRelations(ctx, sourceUnitID, 64)

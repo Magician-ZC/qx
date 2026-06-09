@@ -25,6 +25,8 @@ import {
 } from "../session/api";
 import { FateView } from "./FateView";
 import { FateBoard } from "./FateBoard";
+import { CharacterSheet } from "./CharacterSheet";
+import { AccountSettings } from "./AccountSettings";
 import { OnboardingTour } from "../components/OnboardingTour";
 import { CharterEditor } from "../components/CharterEditor";
 import {
@@ -116,6 +118,10 @@ export function FateApp() {
   const [error, setError] = useState("");
   // charterOpen：降生后玩家点「立约/改约」按钮，浮层式打开 CharterEditor（读/改/撤她的离线宪章）。
   const [charterOpen, setCharterOpen] = useState(false);
+  // sheetOpen：MMORPG 式「角色档案」只读浮层（状态/技能/背包/关系/编年史），观察态、不操作角色。
+  const [sheetOpen, setSheetOpen] = useState(false);
+  // settingsOpen：账号设置浮层（改密码 + 预留绑定飞书）。改密成功复用 signOut 登出。
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // drawerOpen：命运 UI 浮层抽屉是否展开（默认开，让玩家同时看到全屏地图 + 命运卡；可收起独看地图）。
   const [drawerOpen, setDrawerOpen] = useState(true);
   // guidanceDraft：点地图格子/人生成的「指向型指引草稿」——FateBoard 写、FateView 读并预填进指引框（消费后清空）。
@@ -296,10 +302,21 @@ export function FateApp() {
 
         {/* 右侧浮层抽屉：命运卡旁白 + 指引 + 立约，叠在地图之上、可折叠。 */}
         <aside className={`fate-drawer ${drawerOpen ? "fate-drawer-open" : ""}`} aria-hidden={!drawerOpen}>
-          {/* 立约入口：降生后玩家可随时查看/改/撤她的结构化离线宪章（红线/长期目标/社交授权）。 */}
-          <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
-            ✦ 立约 · 看看你与她定下的约
-          </button>
+          {/* 抽屉顶部入口区：立约 / 角色档案 / 账号设置（仿 charterOpen 浮层范式，各自 setState 打开）。 */}
+          <div className="fate-drawer-entries">
+            {/* 立约入口：降生后玩家可随时查看/改/撤她的结构化离线宪章（红线/长期目标/社交授权）。 */}
+            <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
+              ✦ 立约 · 看看你与她定下的约
+            </button>
+            {/* 角色档案：MMORPG 式只读面板，把后端早已有的角色数据露给玩家（观察态）。 */}
+            <button style={charterToggleBtnStyle} onClick={() => setSheetOpen(true)}>
+              📜 角色档案
+            </button>
+            {/* 账号设置：改密码 + 预留绑定飞书。 */}
+            <button style={charterToggleBtnStyle} onClick={() => setSettingsOpen(true)}>
+              ⚙ 账号设置
+            </button>
+          </div>
           <FateView
             sessionId={saved.sessionId}
             unitId={saved.unitId}
@@ -320,6 +337,24 @@ export function FateApp() {
             saveCharter={(sessionID, unitID, charter) => putCharter(sessionID, unitID, charter)}
             deleteCharter={(sessionID, unitID) => deleteCharter(sessionID, unitID)}
             onClose={() => setCharterOpen(false)}
+          />
+        )}
+
+        {/* 角色档案浮层（只读观察态）：状态/技能/背包/关系/编年史 5 tab，挂载时拉 getUnitStatus。 */}
+        {sheetOpen && (
+          <CharacterSheet
+            sessionId={saved.sessionId}
+            unitId={saved.unitId}
+            fallbackName={saved.name}
+            onClose={() => setSheetOpen(false)}
+          />
+        )}
+
+        {/* 账号设置浮层：改密码 + 预留绑定飞书。改密成功复用 signOut 登出（清 Bearer + reload）。 */}
+        {settingsOpen && (
+          <AccountSettings
+            onSignOut={() => void signOut()}
+            onClose={() => setSettingsOpen(false)}
           />
         )}
 

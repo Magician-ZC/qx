@@ -706,3 +706,484 @@
     padding: 10px 6px;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   角色档案（CharacterSheet）+ 账号设置（AccountSettings）+ 抽屉入口区
+   MMORPG 式只读面板：tab 条 / 各 tab 内容（条·标签·列表）/ 关系四轴 / 设置表单。
+   贴合墨色宣纸调（与 .fate-drawer/.fate-card/.fate-status 同口径配色）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 抽屉顶部入口区：立约 / 角色档案 / 账号设置 三按钮纵向堆叠（charterToggleBtnStyle 各自有上下间距）。 */
+.fate-drawer-entries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.fate-drawer-entries > button {
+  margin-bottom: 0 !important;
+}
+
+/* ── tab 条 ── */
+.cs-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid rgba(120, 90, 50, 0.25);
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.cs-tab {
+  padding: 7px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #8a7556;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.cs-tab:hover {
+  color: #6b4a22;
+}
+.cs-tab-active {
+  color: #6b4a22;
+  border-bottom-color: #9a6a3a;
+  font-weight: 600;
+}
+
+.cs-body {
+  font-size: 13px;
+}
+.cs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cs-slot-title {
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: #8a6a3c;
+  margin: 12px 0 4px;
+}
+.cs-empty {
+  text-align: center;
+  color: #9a8a68;
+  padding: 22px 0;
+  font-size: 13px;
+}
+.cs-empty-inline {
+  color: #9a8a68;
+  font-size: 12px;
+  padding: 4px 0;
+}
+.cs-notice {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(180, 84, 58, 0.14);
+  border: 1px solid rgba(180, 84, 58, 0.4);
+  color: #a83a28;
+  font-size: 12px;
+}
+
+/* ── 生命徽章行 ── */
+.cs-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.cs-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(120, 90, 50, 0.3);
+  background: rgba(160, 110, 50, 0.1);
+  color: #6b4a22;
+}
+.cs-badge-life {
+  font-weight: 600;
+}
+.cs-life-dead,
+.cs-life-retired {
+  background: rgba(120, 90, 50, 0.1);
+  border-color: rgba(120, 90, 50, 0.25);
+  color: #8a7556;
+}
+.cs-life-wounded,
+.cs-life-downed {
+  background: rgba(180, 84, 58, 0.14);
+  border-color: rgba(180, 84, 58, 0.4);
+  color: #a83a28;
+}
+.cs-badge-combat {
+  background: rgba(180, 84, 58, 0.16);
+  border-color: rgba(180, 84, 58, 0.45);
+  color: #a83a28;
+}
+
+/* ── 气血/饥饿条 + 键值（钱袋）── */
+.cs-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.cs-bar {
+  display: grid;
+  grid-template-columns: 44px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.cs-bar-label {
+  color: #7a6038;
+}
+.cs-bar-track {
+  position: relative;
+  height: 8px;
+  background: rgba(120, 90, 50, 0.16);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cs-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.cs-bar-hp {
+  background: linear-gradient(90deg, #b4543a, #d98c5f);
+}
+.cs-bar-hunger {
+  background: linear-gradient(90deg, #8a7b3a, #c4b15a);
+}
+.cs-bar-num {
+  text-align: right;
+  color: #7a6038;
+}
+.cs-kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #7a6038;
+}
+.cs-kv-v {
+  color: #6b4a22;
+  font-weight: 600;
+}
+.cs-wallet-row {
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(120, 90, 50, 0.18);
+}
+.cs-wallet-v {
+  font-size: 15px;
+  color: #9a6a2a;
+}
+
+/* ── 属性/人格/技能行（带条与不带条两形态）── */
+.cs-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.cs-stat-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.cs-stat-plain {
+  grid-template-columns: 1fr auto;
+}
+.cs-stat-label {
+  color: #7a6038;
+}
+.cs-stat-track {
+  height: 7px;
+  background: rgba(120, 90, 50, 0.16);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cs-stat-fill {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.cs-fill-persona {
+  background: linear-gradient(90deg, #8a6a3c, #c4a05a);
+}
+.cs-fill-skill {
+  background: linear-gradient(90deg, #6a7b9a, #9ab0c8);
+}
+.cs-stat-num {
+  text-align: right;
+  color: #7a6038;
+}
+.cs-stat-num-strong {
+  color: #6b4a22;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cs-bio {
+  font-size: 13px;
+  line-height: 1.75;
+  color: #5a4628;
+  margin: 4px 0 0;
+}
+
+/* ── 标签（专长）── */
+.cs-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cs-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(196, 132, 58, 0.14);
+  border: 1px solid rgba(196, 132, 58, 0.4);
+  color: #9a6a2a;
+}
+
+/* ── 背包：装备槽网格 + 行囊列表 ── */
+.cs-equip-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.cs-equip-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 250, 240, 0.6);
+  border: 1px solid rgba(120, 90, 50, 0.18);
+}
+.cs-equip-slot {
+  flex: 0 0 auto;
+  min-width: 44px;
+  font-size: 11px;
+  color: #8a7556;
+}
+.cs-equip-name {
+  flex: 1 1 auto;
+  color: #4f3a1d;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.cs-equip-lvl {
+  color: #9a6a2a;
+  font-weight: 600;
+}
+.cs-backpack {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cs-backpack-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(255, 250, 240, 0.5);
+  border-left: 2px solid rgba(150, 110, 60, 0.4);
+}
+.cs-backpack-name {
+  color: #4f3a1d;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.cs-backpack-qty {
+  flex: 0 0 auto;
+  color: #8a7556;
+  font-size: 12px;
+}
+.cs-item-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.cs-badge-legacy {
+  background: rgba(201, 162, 39, 0.18);
+  border: 1px solid rgba(201, 162, 39, 0.5);
+  color: #9a7a18;
+}
+.cs-badge-soul {
+  background: rgba(138, 111, 181, 0.16);
+  border: 1px solid rgba(138, 111, 181, 0.5);
+  color: #7a5aa0;
+}
+.cs-badge-pinned {
+  background: rgba(160, 110, 50, 0.14);
+  border: 1px solid rgba(160, 110, 50, 0.4);
+  color: #8a6a3c;
+}
+
+/* ── 关系四轴（以中线为 0，正向右暖、负向左冷）── */
+.cs-rel-card {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 250, 240, 0.6);
+  border: 1px solid rgba(120, 90, 50, 0.18);
+}
+.cs-rel-name {
+  font-size: 14px;
+  color: #4a3417;
+  margin-bottom: 6px;
+}
+.cs-rel-axes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cs-rel-axis {
+  display: grid;
+  grid-template-columns: 44px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.cs-rel-axis-label {
+  color: #8a7556;
+}
+.cs-rel-axis-track {
+  position: relative;
+  height: 8px;
+  background: rgba(120, 90, 50, 0.12);
+  border-radius: 6px;
+}
+.cs-rel-axis-mid {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(120, 90, 50, 0.35);
+}
+.cs-rel-axis-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.cs-rel-pos {
+  background: linear-gradient(90deg, #c4843a, #d9a566);
+}
+.cs-rel-neg {
+  background: linear-gradient(90deg, #c47060, #a8463a);
+}
+.cs-rel-axis-num {
+  text-align: right;
+  color: #7a6038;
+}
+
+/* ── 编年史宿主：ChroniclePanel 本是 position:absolute 浮层，内嵌进 tab 时就地覆写为静态流内元素 ── */
+.cs-chronicle-host {
+  position: relative;
+}
+.cs-chronicle-host > aside {
+  position: static !important;
+  width: 100% !important;
+  max-height: none !important;
+  top: auto !important;
+  right: auto !important;
+  box-shadow: none !important;
+}
+
+/* ── 账号设置表单（AccountSettings）── */
+.as-slot-title {
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: #8a6a3c;
+  margin: 14px 0 6px;
+}
+.as-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #6a4e26;
+  margin-bottom: 12px;
+}
+.as-field input {
+  padding: 9px 11px;
+  border: 1px solid rgba(140, 100, 50, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.95);
+  font-family: inherit;
+  font-size: 14px;
+  color: #4a3417;
+}
+.as-error {
+  color: #b4543a;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.as-primary {
+  width: 100%;
+  padding: 11px;
+  border: none;
+  border-radius: 10px;
+  background: #7a5226;
+  color: #fdf6e8;
+  font-family: inherit;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.as-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.as-disabled {
+  width: 100%;
+  padding: 10px;
+  border: 1px dashed rgba(120, 90, 50, 0.4);
+  border-radius: 10px;
+  background: rgba(120, 90, 50, 0.06);
+  color: #9a8a68;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: not-allowed;
+}
+.as-done {
+  text-align: center;
+  padding: 18px 4px;
+}
+.as-done-title {
+  font-size: 18px;
+  color: #6b4a22;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+}
+.as-done-text {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #7a6038;
+  margin: 0 0 18px;
+}

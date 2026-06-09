@@ -339,6 +339,40 @@ func (service *Service) Logout(ctx context.Context, token string) error {
 	return nil
 }
 
+// ChangePassword 改密码：bcrypt 校验旧密码 → 校验新密码 → 写新 hash。校验不过返回错误，不改库。
+// 成功后吊销该账户全部既有会话（强制其它设备重登），与「改密=安全动作」语义一致。
+func (service *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+	if service == nil || service.db == nil {
+		return fmt.Errorf("account service is unavailable")
+	}
+	userID = strings.TrimSpace(userID)
+	oldPassword = strings.TrimSpace(oldPassword)
+	newPassword = strings.TrimSpace(newPassword)
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	if len(newPassword) < 6 {
+		return fmt.Errorf("新密码至少 6 位")
+	}
+	var currentHash string
+	if err := service.db.QueryRowContext(ctx, `SELECT password_hash FROM accounts_users WHERE id = ?`, userID).Scan(&currentHash); err != nil {
+		return fmt.Errorf("query account: %w", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(oldPassword)) != nil {
+		return fmt.Errorf("旧密码不正确")
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash new password: %w", err)
+	}
+	if _, err := service.db.ExecContext(ctx, `UPDATE accounts_users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(newHash), userID); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	// 吊销该账户全部既有会话（改密后其它设备需重登）。best-effort。
+	_, _ = service.db.ExecContext(ctx, `DELETE FROM accounts_sessions WHERE user_id = ?`, userID)
+	return nil
+}
+
 // normalizeRegistrationInput 规范化并校验注册输入。
 func normalizeRegistrationInput(username string, displayName string, password string) (string, string, error) {
 	username = strings.ToLower(strings.TrimSpace(username))

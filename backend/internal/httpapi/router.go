@@ -1519,6 +1519,27 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	// 改密码（账号配置）：登录态(Bearer token 解析出权威账户 id) + 旧密码校验 → 写新密码 + 吊销全部会话。
+	router.POST("/api/accounts/change-password", func(c *gin.Context) {
+		accountID, ok := authedAccountID(deps.Accounts, c)
+		if !ok {
+			return // authedAccountID 已写 401/503
+		}
+		var body struct {
+			OldPassword string `json:"old_password"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := deps.Accounts.ChangePassword(c.Request.Context(), accountID, body.OldPassword, body.NewPassword); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// 大世界页游入口（登录 → 捏人 → 降生主世界 world_default 的账号绑定持久角色）。
 	// 鉴权用 authedAccountID（权威账户，忽略请求体里的任何 account_id，杜绝越权为他人降生/查角色）。
 
@@ -2429,6 +2450,16 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"unit": rec})
+	})
+
+	// 某角色对外四轴关系（命运客户端「她身边的人」关系面板用，不带敌意过滤）。与 GET /api/units/:id 同级只读。
+	router.GET("/api/units/:id/relations", func(c *gin.Context) {
+		rels, err := newSessionService().ListRelations(c.Request.Context(), c.Param("id"), 32)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"relations": []session.RelationView{}, "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"relations": rels})
 	})
 
 	// ---- 编年史读侧（chronicle）：传记时间线 + 「回到那一刻」（C5 写侧已真写击杀/死亡/继承/升级，本段补读侧 HTTP）----
