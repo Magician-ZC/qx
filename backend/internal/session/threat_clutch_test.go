@@ -30,6 +30,12 @@ func resolveWithStartHP(t *testing.T, startHP int, eliteID string) EliteEncounte
 	ctx := context.Background()
 
 	actor := unit.BootstrapRecord(7, "s_clutch", "player", "孤勇")
+	// 确定性首击命中（消除历史 flaky）：BootstrapRecord 的 actor.ID 是随机 UUID，而 combatActionRoll 按
+	// (sessionID+attackerID+targetID+salt+turn) 哈希定掷骰——随机 ID 会让「玩家首击是否命中」每跑变一次：偶发
+	// 首击 miss → elite 反扑 → 后续回合 selfHPFraction 漂移、濒死带判定抖动。固定 actor.ID 为 clutch_hit_1_<eliteID>
+	// （已离线核验：该前缀对全部四个 eliteID 的 round-1 atk roll 均 ≥ eliteMissChance=0.08，首击必中、elite 当场毙、无反扑），
+	// 使掷骰完全可复现、贡献分恒定。
+	actor.ID = "clutch_hit_1_" + eliteID
 	actor.Status.HP = startHP
 	actor.Status.Attack = 50  // 远超 elite 1 血：命中即终结
 	actor.Status.Defense = 50 // 防高：万一 elite 反扑也不致命

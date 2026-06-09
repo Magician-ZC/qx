@@ -779,6 +779,10 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		return parsed, true
 	}
 
+	// [DEPRECATED — 大世界页游转向] 单机选秀建局入口：玩家入口已改为「登录 → 捏人 → 降生主世界」
+	// （GET/POST /api/me/character，见 session/mainworld.go）。本端点不再是默认入口，保留仅为向后兼容
+	// （旧客户端 / 对局演练 / 关键战战棋机制验证）。其 draft 选秀分支（ApplyOpeningDraft）代码全部保留——
+	// 战棋对局/战斗结算（battlefield/combat_roll/terrain_combat/executor_loop）是命运角色「手动接管关键战」的后端支撑，绝不删除。
 	router.POST("/api/sessions/single-player", complianceGate(), func(c *gin.Context) {
 		seed := time.Now().UTC().UnixNano()
 		if raw := c.Query("seed"); raw != "" {
@@ -1028,6 +1032,76 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// 大世界页游入口（登录 → 捏人 → 降生主世界 world_default 的账号绑定持久角色）。
+	// 鉴权用 authedAccountID（权威账户，忽略请求体里的任何 account_id，杜绝越权为他人降生/查角色）。
+
+	// GET /api/me/character：resume 该账号在主世界的角色。幂等持久：同账号任何设备登录拿到同一角色。
+	// 无角色 → {character:{has_character:false}}，前端据此进捏人。
+	router.GET("/api/me/character", complianceGate(), func(c *gin.Context) {
+		accountID, ok := authedAccountID(deps.Accounts, c)
+		if !ok {
+			return // authedAccountID 已写 401/503
+		}
+		character, err := newSessionService().ResumeMainWorldCharacter(c.Request.Context(), accountID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"character": character})
+	})
+
+	// POST /api/me/character：捏人降生（1 个玩家角色 + 20 人村庄 + 绑 world_default + 离线宪章落 desire/wound/redline）。
+	// 幂等：若该账号已有 world_default 角色，返回既有的、绝不重复降生（防多设备/重复点击重复造人）。
+	router.POST("/api/me/character", complianceGate(), func(c *gin.Context) {
+		accountID, ok := authedAccountID(deps.Accounts, c)
+		if !ok {
+			return // authedAccountID 已写 401/503
+		}
+		var request struct {
+			Name    string `json:"name"`
+			Origin  string `json:"origin"`
+			Desire  string `json:"desire"`
+			Wound   string `json:"wound"`
+			Redline string `json:"redline"`
+		}
+		// 解析失败不致命：全字段可空（降生会用占位名兜底），故仅尽力绑定。
+		_ = c.ShouldBindJSON(&request)
+		character, err := newSessionService().CreateMainWorldCharacter(c.Request.Context(), accountID, session.MainWorldCharacterInput{
+			Name:    request.Name,
+			Origin:  request.Origin,
+			Desire:  request.Desire,
+			Wound:   request.Wound,
+			Redline: request.Redline,
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		// 漏斗埋点（best-effort，失败绝不影响降生）：仅本次真新降生才埋点（幂等命中既有不重复计角色创建/契约完成）。
+		if character.Created {
+			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+				Stage:     analytics.StageActivation,
+				Name:      analytics.EventCharacterCreated,
+				SessionID: character.SessionID,
+				UnitID:    character.UnitID,
+				Props:     map[string]any{"account_id": accountID, "world_id": character.WorldID},
+			})
+			_ = analytics.Emit(c.Request.Context(), deps.Store, analytics.Event{
+				Stage:     analytics.StageActivation,
+				Name:      analytics.EventCharterCompleted,
+				SessionID: character.SessionID,
+				UnitID:    character.UnitID,
+			})
+		}
+
+		status := http.StatusCreated
+		if !character.Created {
+			status = http.StatusOK // 幂等命中既有角色：200 而非 201（语义上未新建资源）
+		}
+		c.JSON(status, gin.H{"character": character})
 	})
 
 	router.GET("/api/sessions/:id", func(c *gin.Context) {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"qunxiang/backend/internal/storage/dbdialect"
 )
@@ -41,6 +42,39 @@ func EnsureColumns(ctx context.Context, db *sql.DB, table string, cols []Column)
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, c.Name, typ)); err != nil {
 			return fmt.Errorf("add column %s.%s: %w", table, c.Name, err)
 		}
+	}
+	return nil
+}
+
+// EnsureIndex 幂等地确保某表上存在指定名字的索引：先查现有索引，缺则按方言建。
+// 双驱动安全：MySQL 的 CREATE INDEX 无 IF NOT EXISTS（旧版本会因索引已存在而报错），故先经 information_schema
+// 查重再建；SQLite 直接用 CREATE INDEX IF NOT EXISTS。cols 是索引列（顺序敏感，复合索引按序传）。可在每次 Open 安全重复执行。
+func EnsureIndex(ctx context.Context, db *sql.DB, table string, indexName string, cols ...string) error {
+	if db == nil {
+		return fmt.Errorf("ensure index: nil db")
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("ensure index: no columns for %s", indexName)
+	}
+	colList := strings.Join(cols, ", ")
+	if dbdialect.IsMySQL(db) {
+		var count int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
+			table, indexName,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("inspect index %s.%s: %w", table, indexName, err)
+		}
+		if count > 0 {
+			return nil
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE INDEX %s ON %s (%s)", indexName, table, colList)); err != nil {
+			return fmt.Errorf("create index %s on %s: %w", indexName, table, err)
+		}
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", indexName, table, colList)); err != nil {
+		return fmt.Errorf("create index %s on %s: %w", indexName, table, err)
 	}
 	return nil
 }
@@ -339,7 +373,7 @@ CREATE TABLE IF NOT EXISTS cross_event_echoes (
 
 // TranslationTemplatesTable* 是 M1 data-driven 翻译矩阵（事件耦合 §1.2「(reason_code × anchor_kind) → 命运 beat」）：
 // 把宏观世界事件按命中锚类翻译成对她的个人命运 narrative，data-driven 可运营态补全，覆盖全 reason_code×anchor_kind 矩阵。
-// force_pending=1 的组（如密友倒地 COMBAT_DOWN×relation）强制升级待决策；anchor_kind='' 为该 reason_code 的通用兜底模板。
+// force_pending=1 的组（如密友倒地 COMBAT_DOWN×relation）强制升级待决策；anchor_kind=” 为该 reason_code 的通用兜底模板。
 const TranslationTemplatesTableSQLite = `
 CREATE TABLE IF NOT EXISTS translation_templates (
   id TEXT PRIMARY KEY,
@@ -392,6 +426,15 @@ var EventScopeColumns = []Column{
 // nullable —— 兼容现网匿名旧局（建局前无账户的历史 session 留空），由迁移幂等补列、不改既有语义。
 var SessionAccountColumn = []Column{
 	{Name: "account_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+}
+
+// SessionWorldColumn 给 single_player_sessions 补 world_id 列（大世界页游入口去规范化索引）：
+// 「账号在主世界 world_default 的角色」= 该账号绑该世界的 session。State.WorldID 仅塞 state_json
+// 无法按 (account_id, world_id) 高效查询，故去规范化为可查询列，让 GET /api/me/character 的 resume
+// 不必扫描全部 session 的 JSON blob。nullable —— 兼容未接入多世界的匿名/单机旧局（world_id 留空），
+// 由迁移幂等补列、不改既有语义。Repository.Save 每次从 state.WorldID 同步写回该列（与 account_id 同口径）。
+var SessionWorldColumn = []Column{
+	{Name: "world_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
 }
 
 // AgentQueueSessionColumn 给 region-runner 调度队列补 session_id 列（M7.3-real-0）：保留期清理按 session_id 收敛

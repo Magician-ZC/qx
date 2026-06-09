@@ -70,19 +70,29 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("marshal session state: %w", err)
 	}
 
+	// account_id / world_id 去规范化为可查询列（与 state_json 同步写回）：
+	//   - account_id 支撑账户成本聚合/风控（成本闭环）。
+	//   - world_id 支撑「账号在主世界 world_default 的角色」的 (account_id, world_id) 索引查询（大世界页游入口 resume）。
+	// 二者空串时落 NULL（兼容匿名/未接入多世界的旧局；NULL 不进 (account_id, world_id) 索引匹配，天然不被 resume 误命中）。
+	accountIDCol := nullableString(state.AccountID)
+	worldIDCol := nullableString(state.WorldID)
 	query := `
-		INSERT INTO single_player_sessions (id, state_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO single_player_sessions (id, state_json, account_id, world_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			state_json = excluded.state_json,
+			account_id = excluded.account_id,
+			world_id = excluded.world_id,
 			updated_at = excluded.updated_at
 		`
 	if dbdialect.IsMySQL(repository.db) {
 		query = `
-		INSERT INTO single_player_sessions (id, state_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO single_player_sessions (id, state_json, account_id, world_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			state_json = VALUES(state_json),
+			account_id = VALUES(account_id),
+			world_id = VALUES(world_id),
 			updated_at = VALUES(updated_at)
 		`
 	}
@@ -91,6 +101,8 @@ func (repository *Repository) Save(ctx context.Context, state *State) error {
 		query,
 		state.ID,
 		string(encodedState),
+		accountIDCol,
+		worldIDCol,
 		state.CreatedAt.Format(time.RFC3339Nano),
 		state.UpdatedAt.Format(time.RFC3339Nano),
 	); err != nil {
@@ -222,6 +234,47 @@ func (repository *Repository) Get(ctx context.Context, sessionID string) (State,
 	ensureFactionRelations(&state)
 
 	return state, nil
+}
+
+// nullableString 把空白字符串映射为 SQL NULL，非空则原样落库。
+// 用于 account_id / world_id 去规范化列：匿名/未接入多世界的局留 NULL，既不污染 (account_id, world_id) 索引、
+// 也不会被 FindMainWorldSessionID 的「account_id=? AND world_id=?」精确匹配误命中。
+func nullableString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// FindMainWorldSessionID 查某账号在某世界绑定的角色 session ID（大世界页游入口 resume 的核心查询）。
+// 走 (account_id, world_id) 复合索引，绝不扫描 state_json blob。一个账号在一个世界至多一个持久角色（由
+// CreateMainWorldCharacter 的幂等守卫保证）；防御性地取 updated_at 最新一条，返回是否命中。
+// accountID/worldID 任一为空直接返回未命中（NULL 列不参与精确匹配，匿名/单机局天然不被 resume）。
+func (repository *Repository) FindMainWorldSessionID(ctx context.Context, accountID string, worldID string) (string, bool, error) {
+	accountID = strings.TrimSpace(accountID)
+	worldID = strings.TrimSpace(worldID)
+	if repository == nil || repository.db == nil || accountID == "" || worldID == "" {
+		return "", false, nil
+	}
+	var sessionID string
+	err := repository.db.QueryRowContext(
+		ctx,
+		`
+		SELECT id FROM single_player_sessions
+		WHERE account_id = ? AND world_id = ?
+		ORDER BY updated_at DESC
+		LIMIT 1
+		`,
+		accountID, worldID,
+	).Scan(&sessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("find main-world character (account=%s world=%s): %w", accountID, worldID, err)
+	}
+	return sessionID, true, nil
 }
 
 // parseTimestamp 兼容解析 RFC3339Nano/RFC3339 时间字符串。

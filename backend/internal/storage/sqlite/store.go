@@ -82,6 +82,18 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	// 大世界页游入口迁移：给 single_player_sessions 幂等补 world_id（nullable，兼容未接入多世界的旧局）。
+	// 用于「账号在主世界 world_default 的角色」的去规范化查询（GET /api/me/character 的 resume 走 (account_id, world_id) 索引）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "single_player_sessions", dbmigrate.SessionWorldColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// 复合查询索引：按 (account_id, world_id) 查「该账号在某世界的角色 session」。幂等、存量库补建（双驱动安全）。
+	if err := dbmigrate.EnsureIndex(ctx, db, "single_player_sessions", "idx_single_player_sessions_account_world", "account_id", "world_id"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	// 相关性锚持久表（存量旧库补建；fresh 库 schema.sql 已建）——否则持久锚 silently 永不落库/加载。
 	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.RelevanceAnchorsTableSQLite, dbmigrate.RelevanceAnchorsTableMySQL); err != nil {
 		_ = db.Close()

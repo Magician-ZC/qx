@@ -72,6 +72,21 @@ type FateEvent struct {
 	// 随 payload.legacy_item_id 落库；玩家在该卡 confirm（urge 类）→ ResolveFateDecision 调 upgradeItemToLegacy 落 IsLegacy+SoulBound+Pinned。
 	// 留空=非传家物升级卡（绝大多数命运事件）。
 	LegacyItemID string
+	// Battle 是「关键战接管」上下文（大世界页游：命运角色遇关键战 → 前端可手动接管打战棋 → 打完回命运）。
+	// 非空时随 payload.battle 落库、并 surfaced 进命运卡（FateInboxItem/FeedItem 的 Battle 字段），让前端知道
+	// 「她正卷入一场战斗、可接管」，并带上接管所需的 session/敌方信息。留空=非战斗卡（绝大多数命运事件）。
+	Battle *FateBattleContext
+}
+
+// FateBattleContext 是命运卡上「可接管的关键战」上下文：让前端从命运卡一键跳进战棋接管。
+// 战棋对局/战斗结算（battlefield/combat_roll/terrain_combat/executor_loop）全是现成机制——本结构只承载
+// 「这是哪一场战、对手是谁、用哪个 session 推进」的指针，不复制任何战斗逻辑。全字段 omitempty 后向兼容。
+type FateBattleContext struct {
+	SessionID  string `json:"session_id,omitempty"`  // 接管该战所用的对局 session（AdvancePhase 推进战棋）
+	ThreatID   string `json:"threat_id,omitempty"`   // 触发战斗的威胁/对手 ID（elite/field-boss 等）
+	ThreatName string `json:"threat_name,omitempty"` // 对手名（直接渲染到卡上）
+	Tier       string `json:"tier,omitempty"`        // 威胁档（elite/field_boss…），供前端区分接管入口
+	Takeover   bool   `json:"takeover,omitempty"`    // 是否允许玩家手动接管（true=可接管打战棋；false=仅旁观/自动结算）
 }
 
 // FateRouting 是一条世界事件对某角色的命运路由结果。
@@ -94,6 +109,8 @@ type FateInboxItem struct {
 	// 情境化 Copilot 选项（§4.5）：入箱时按事件类型/红线/关系生成的情境化 choice（id+文案+后果类）。
 	// 为空（旧存档/无情境）时前端回落旧三键（let_her/urge/acknowledge）。omitempty 保向后兼容。
 	Choices []FateChoiceOut `json:"choices,omitempty"`
+	// 关键战接管上下文（大世界页游）：非空表示这张卡是「她卷入一场可接管的关键战」，前端据此渲染接管入口。omitempty 保向后兼容。
+	Battle *FateBattleContext `json:"battle,omitempty"`
 }
 
 // FateChoiceOut 是回给前端的一个情境化选项：id 供 resolve、label 供渲染、resolve_class 标后果类（透明化）。
@@ -323,6 +340,10 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	if legacyItemID := strings.TrimSpace(ev.LegacyItemID); legacyItemID != "" {
 		payload["legacy_item_id"] = legacyItemID
 	}
+	// 关键战接管上下文（大世界页游）：非空才写，供命运卡 surfaced「她在战斗、可接管」+ 前端跳战棋接管所需指针。
+	if bc := fateBattleContextToPayload(ev.Battle); bc != nil {
+		payload["battle"] = bc
+	}
 	if route == relevance.RoutePending {
 		code = events.ReasonPendingDecision
 		out.DecisionID = "fd_" + uuid.NewString()
@@ -487,9 +508,10 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 			return nil, fmt.Errorf("scan fate inbox: %w", err)
 		}
 		var payload struct {
-			DecisionID string          `json:"decision_id"`
-			Narrative  string          `json:"narrative"`
-			Choices    []payloadChoice `json:"choices"`
+			DecisionID string             `json:"decision_id"`
+			Narrative  string             `json:"narrative"`
+			Choices    []payloadChoice    `json:"choices"`
+			Battle     *FateBattleContext `json:"battle"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
 		if payload.DecisionID == "" || resolved[payload.DecisionID] {
@@ -502,6 +524,7 @@ func (service *Service) OpenFateInbox(ctx context.Context, unitID string) ([]Fat
 			ExpiresAt:      fateExpiresAt(occurredAt),
 			CountdownHours: fateCountdownHours(occurredAt),
 			Choices:        payloadChoicesToOut(payload.Choices),
+			Battle:         payload.Battle,
 		})
 	}
 	return items, rows.Err()
@@ -518,6 +541,8 @@ type FateFeedItem struct {
 	CountdownHours int    `json:"countdown_hours,omitempty"`
 	// 仅 pending 卡有意义（§4.5）：情境化 Copilot 选项。空时前端回落旧三键。omitempty 保向后兼容。
 	Choices []FateChoiceOut `json:"choices,omitempty"`
+	// 关键战接管上下文（大世界页游）：非空表示这张卡可一键跳进战棋接管。omitempty 保向后兼容。
+	Battle *FateBattleContext `json:"battle,omitempty"`
 }
 
 // OpenFateFeed 返回某角色命运四槽的最近卡片（高光 + 未决待决策 + 回响），按时间倒序。供前端首屏渲染。
@@ -550,12 +575,13 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 			return nil, fmt.Errorf("scan fate feed: %w", err)
 		}
 		var payload struct {
-			DecisionID string          `json:"decision_id"`
-			Narrative  string          `json:"narrative"`
-			Choices    []payloadChoice `json:"choices"`
+			DecisionID string             `json:"decision_id"`
+			Narrative  string             `json:"narrative"`
+			Choices    []payloadChoice    `json:"choices"`
+			Battle     *FateBattleContext `json:"battle"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
-		item := FateFeedItem{Narrative: payload.Narrative, OccurredAt: occurredAt}
+		item := FateFeedItem{Narrative: payload.Narrative, OccurredAt: occurredAt, Battle: payload.Battle}
 		switch code {
 		case string(events.ReasonPendingDecision):
 			if payload.DecisionID == "" || resolved[payload.DecisionID] {
@@ -1511,6 +1537,38 @@ func fateChoicesToPayload(choices []fateChoice) []map[string]any {
 	out := make([]map[string]any, 0, len(choices))
 	for _, c := range choices {
 		out = append(out, map[string]any{"id": c.ID, "label": c.Label, "resolve_class": c.ResolveClass})
+	}
+	return out
+}
+
+// fateBattleContextToPayload 把关键战接管上下文转为可落 events.payload 的 map（nil/空 → nil，不写键）。
+// 全字段空（无 session/threat 信息）也返回 nil——避免空 battle 块污染卡。
+func fateBattleContextToPayload(bc *FateBattleContext) map[string]any {
+	if bc == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(bc.SessionID)
+	threatID := strings.TrimSpace(bc.ThreatID)
+	threatName := strings.TrimSpace(bc.ThreatName)
+	tier := strings.TrimSpace(bc.Tier)
+	if sessionID == "" && threatID == "" && threatName == "" && tier == "" && !bc.Takeover {
+		return nil
+	}
+	out := map[string]any{}
+	if sessionID != "" {
+		out["session_id"] = sessionID
+	}
+	if threatID != "" {
+		out["threat_id"] = threatID
+	}
+	if threatName != "" {
+		out["threat_name"] = threatName
+	}
+	if tier != "" {
+		out["tier"] = tier
+	}
+	if bc.Takeover {
+		out["takeover"] = true
 	}
 	return out
 }

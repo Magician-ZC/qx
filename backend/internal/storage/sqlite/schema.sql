@@ -140,11 +140,14 @@ CREATE TABLE IF NOT EXISTS single_player_sessions (
   id TEXT PRIMARY KEY,
   state_json TEXT NOT NULL DEFAULT '{}',
   account_id TEXT,
+  world_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_single_player_sessions_updated_at ON single_player_sessions(updated_at DESC);
+-- 大世界页游入口：按 (account_id, world_id) 查「该账号在某世界的角色 session」（GET /api/me/character resume）。
+CREATE INDEX IF NOT EXISTS idx_single_player_sessions_account_world ON single_player_sessions(account_id, world_id);
 
 CREATE TABLE IF NOT EXISTS session_phase_snapshots (
   id TEXT PRIMARY KEY,

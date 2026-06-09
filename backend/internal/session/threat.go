@@ -642,6 +642,8 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 	appendLog(state, "threat_encounter", result.InboxCard, actor.ID, elite.ID)
 
 	// 把遭遇结果按相关性路由进命运收件箱（她自己的事，相关性由重要度/情绪决定）。
+	// 带上关键战上下文（大世界页游接管桥）：让命运卡 surfaced「这是哪一场战、对手是谁、用哪个 session 接管」。
+	// 此处是「已自动结算的遭遇」回顾卡，takeover=false（战已结）；threat 信息供前端定位/复盘。
 	importance, emotion := eliteOutcomeWeight(result.Outcome)
 	if _, err := service.SurfaceFateEvent(ctx, state.ID, actor, FateEvent{
 		ActorID:       actor.ID,
@@ -650,6 +652,13 @@ func (service *Service) ResolveEliteEncounter(ctx context.Context, state *State,
 		Importance:    importance,
 		EmotionWeight: emotion,
 		Summary:       result.InboxCard,
+		Battle: &FateBattleContext{
+			SessionID:  state.ID,
+			ThreatID:   threat.ID,
+			ThreatName: threat.Name,
+			Tier:       string(threat.Tier),
+			Takeover:   false,
+		},
 	}); err != nil {
 		return result, err
 	}
