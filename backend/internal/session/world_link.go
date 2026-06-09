@@ -127,6 +127,21 @@ func (service *Service) AssignSessionToWorld(ctx context.Context, state *State, 
 			_ = world.Join(ctx, service.db, worldID, id, "inhabitant", dialect)
 		}
 	}
+	// geo 锚（设计 §1.1「她所在的地方」）：把每个玩家单位当前所在 region 落成一根 geo 锚（半衰 3 天——
+	// 离开后地理牵挂渐淡）。让「她所在的地方」成为相关性锚，使世界事件天然聚焦到她身上/脚下。
+	// region 取单位去规范化的 region_id 列（service.regionOf），缺/查错回落 worldID 兜底（至少锚在世界域上）。
+	// 全程 best-effort：UpsertGeoAnchor 内部失败不回滚、不阻断接入；仅玩家单位落锚（敌方 NPC 不进相关性锚池）。
+	for _, id := range state.PlayerUnitIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		regionID := service.regionOf(ctx, id)
+		if regionID == "" {
+			regionID = worldID
+		}
+		_ = service.UpsertGeoAnchor(ctx, state.ID, id, regionID, geoAnchorDefaultWeight, "所在·"+regionID)
+	}
 	return nil
 }
 

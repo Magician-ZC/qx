@@ -19,6 +19,11 @@ const anchorDefaultHalfLifeDays = 14.0
 // geoAnchorHalfLifeDays 是「所在地」geo 锚的半衰期（设计 §1.1：地理牵挂随离开而淡，3 天半衰）。
 const geoAnchorHalfLifeDays = 3.0
 
+// geoAnchorDefaultWeight 是「她所在的地方」geo 锚的默认权重（接入世界时落锚用）。geo 是相关性里最轻的一类
+// （relevance.RelativeImportance(Geo) 已大幅折扣），故 weight 取一个「确实身在此处」的中高值而非满值——
+// 让地理牵挂在世界事件聚焦里有分量但不压过关系/血脉/红线这些更重的锚。
+const geoAnchorDefaultWeight = 0.6
+
 // legacyAnchorHalfLife<=0 表示「血脉/传家物」legacy 锚永不衰减（与 relevance.Anchor 约定一致：传承是恒久的弦）。
 const legacyAnchorHalfLife = 0.0
 

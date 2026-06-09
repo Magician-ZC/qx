@@ -277,6 +277,66 @@ var GmEventsAuditTickColumn = []Column{
 	{Name: "world_tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "INT NOT NULL DEFAULT 0"},
 }
 
+// CrossEventColumns 给 cross_events 补「跨玩家唯一事实源」的设计列（事件耦合 §3，全可空，append-only 语义不变）：
+// prev_cross_event_id 复仇/证据链反指针；consent_state 同意档状态；interaction_type 七交互类型；
+// social_object_id 所属社会客体；terms_json 交互条款；initiator/target_session_id 双方会话；score_* 零和裁决投入分。
+var CrossEventColumns = []Column{
+	{Name: "prev_cross_event_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "consent_state", SQLiteType: "TEXT", MySQLType: "VARCHAR(32) NULL"},
+	{Name: "interaction_type", SQLiteType: "TEXT", MySQLType: "VARCHAR(32) NULL"},
+	{Name: "social_object_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "terms_json", SQLiteType: "TEXT", MySQLType: "TEXT NULL"},
+	{Name: "initiator_session_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "target_session_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "arbitration_key", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "score_initiator", SQLiteType: "REAL NOT NULL DEFAULT 0", MySQLType: "DOUBLE NOT NULL DEFAULT 0"},
+	{Name: "score_target", SQLiteType: "REAL NOT NULL DEFAULT 0", MySQLType: "DOUBLE NOT NULL DEFAULT 0"},
+}
+
+// SocialObjectColumns 给 social_objects 补撮合所需列（事件耦合 §2.2，全可空/有默认）：
+// region_id 地理就近择人；severity 严重度定 consent 档；expires_at 过期回收。
+var SocialObjectColumns = []Column{
+	{Name: "region_id", SQLiteType: "TEXT", MySQLType: "VARCHAR(191) NULL"},
+	{Name: "severity", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "INT NOT NULL DEFAULT 0"},
+	{Name: "expires_at", SQLiteType: "TEXT", MySQLType: "VARCHAR(64) NULL"},
+}
+
+// CrossEventEchoesTable* 跨玩家事件的视角化叙事层（事件耦合 §2.7「echo 仅视角叙事，事实唯一回退 cross_events」）：
+// 同一 cross_event_id 在多个 session 各有一条 echo（罗生门），但事实唯一——争议回退 cross_events 原表 occurred_at 仲裁。
+const CrossEventEchoesTableSQLite = `
+CREATE TABLE IF NOT EXISTS cross_event_echoes (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  owner_unit_id TEXT NOT NULL,
+  cross_event_id TEXT NOT NULL,
+  relevance REAL NOT NULL DEFAULT 0,
+  fate_score REAL NOT NULL DEFAULT 0,
+  route TEXT NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL DEFAULT '',
+  valence REAL NOT NULL DEFAULT 0,
+  hop INTEGER NOT NULL DEFAULT 0,
+  read_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const CrossEventEchoesTableMySQL = `
+CREATE TABLE IF NOT EXISTS cross_event_echoes (
+  id VARCHAR(191) PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL,
+  owner_unit_id VARCHAR(191) NOT NULL,
+  cross_event_id VARCHAR(191) NOT NULL,
+  relevance DOUBLE NOT NULL DEFAULT 0,
+  fate_score DOUBLE NOT NULL DEFAULT 0,
+  route VARCHAR(32) NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL,
+  valence DOUBLE NOT NULL DEFAULT 0,
+  hop INT NOT NULL DEFAULT 0,
+  read_at VARCHAR(64) NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_cross_echoes_owner (owner_unit_id, created_at),
+  INDEX idx_cross_echoes_event (cross_event_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // WorldBossActiveUniqueIndexSQLite 是「每世界至多一头 active boss」的 SQLite partial unique index
 // （评审 L4：给默认驱动一道硬兜底，NOT EXISTS 之外再加唯一冲突拦截）。best-effort 执行：
 // 存量库已有重复 active 行时建索引会失败——吞错即可（NOT EXISTS 仍是主护栏）。MySQL 无 partial index，

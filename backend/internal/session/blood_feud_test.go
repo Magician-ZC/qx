@@ -2,6 +2,7 @@ package session
 
 // 文件说明：blood_feud 世仇传播纯函数的单元测试（零 DB）：敌意继承的单调性/跳数衰减/不在乎者归零，
 // 以及 flag 开关语义。验证「直系哀悼者敌意 > 远系」「纯敌视者不继承」「flag 关 no-op」三条核心契约。
+// 另含黑吃黑 + 罗生门 echo + 衍生传播 + blood_feud 社会客体 的 DB 集成测试（对真实 SQLite）。
 
 import (
 	"context"
@@ -11,7 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/socialobject"
 	sqlitestore "qunxiang/backend/internal/storage/sqlite"
 	"qunxiang/backend/internal/unit"
 )
@@ -233,7 +236,7 @@ func seedRelation(t *testing.T, ctx context.Context, db *sql.DB, source, target 
 // TestLoadMournerBonds_MultiHop 验证多跳哀悼者发现：
 //
 //	关系图：m0→死者(直系 hop=0)；m1→m0(在乎直系哀悼者 hop=1)；m2→m1(在乎二跳者 hop=2)；m3→m2(三跳，超 MaxHop 不应被发现)。
-//	并验证全图去重（一个人只按最浅跳记一次）与凶手/死者排除。
+//	并验证全图去重（一个人只按最浅跳数记一次）与凶手/死者排除。
 func TestLoadMournerBonds_MultiHop(t *testing.T) {
 	ctx := context.Background()
 	db, repo, service := newBloodFeudTestService(t)
@@ -461,5 +464,277 @@ func TestBloodFeudMatchCandidates_CommonEnemy(t *testing.T) {
 	groups2 := service.BloodFeudMatchCandidates(ctx, "s1", pool)
 	if groups2[0].Candidates[0].HookFit != g.Candidates[0].HookFit {
 		t.Fatalf("HookFit 应确定性可复现")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 黑吃黑 + 罗生门 echo + 衍生传播 + blood_feud 社会客体 的集成测试
+// ════════════════════════════════════════════════════════════════════════════
+
+// seedFeudWorld 建一个标准黑吃黑场景：受害者 victim、背叛者 betrayer，及在乎 victim 的密友 f1(直系) / f2(二跳)。
+// 各单位均已落库，关系链已建（确保过衍生继承门）。
+func seedFeudWorld(t *testing.T, ctx context.Context, db *sql.DB, repo *unit.Repository) {
+	t.Helper()
+	for i, id := range []string{"victim", "betrayer", "f1", "f2"} {
+		seedUnit(t, ctx, repo, int64(i)+1, id)
+	}
+	seedRelation(t, ctx, db, "f1", "victim", 8, 1, 9, 0) // f1 直系密友（在乎 victim）
+	seedRelation(t, ctx, db, "f2", "f1", 7, 1, 8, 0)     // f2 在乎 f1（你信任的人的密友，hop=1）
+}
+
+// TestPropagateCrossDerived_HopDecayAndEcho 验证衍生传播：黑吃黑沿受害者关系图衍生到第三方（密友），
+// hop 越远 echo 的 relevance/fate_score 越弱（衰减）；且每个第三方各写一条 cross_event_echo（视角化叙事 narrative_zh）。
+func TestPropagateCrossDerived_HopDecayAndEcho(t *testing.T) {
+	orig := os.Getenv("QUNXIANG_BLOOD_FEUD")
+	defer os.Setenv("QUNXIANG_BLOOD_FEUD", orig)
+	os.Setenv("QUNXIANG_BLOOD_FEUD", "true")
+
+	ctx := context.Background()
+	db, repo, service := newBloodFeudTestService(t)
+	seedFeudWorld(t, ctx, db, repo)
+
+	victim := unit.Record{ID: "victim"}
+	victim.Identity.Name = "阿吴"
+	owners := service.propagateCrossDerived(ctx, "s1", "", "xevt1", victim, "betrayer")
+
+	// f1（直系）与 f2（二跳）都应被衍生到（在乎 victim / 在乎 f1）。
+	got := map[string]bool{}
+	for _, o := range owners {
+		got[o] = true
+	}
+	if !got["f1"] || !got["f2"] {
+		t.Fatalf("直系密友 f1 与二跳密友 f2 都应被衍生到，得 %v", owners)
+	}
+	if got["betrayer"] || got["victim"] {
+		t.Fatalf("背叛者/受害者本人不应作衍生第三方，得 %v", owners)
+	}
+
+	// 各第三方各一条 echo（同 cross_event_id=xevt1，罗生门）。
+	echoes, err := service.ListCrossEventEchoes(ctx, "xevt1")
+	if err != nil {
+		t.Fatalf("列 echo 失败: %v", err)
+	}
+	byOwner := map[string]CrossEventEcho{}
+	for _, e := range echoes {
+		byOwner[e.OwnerUnitID] = e
+		if e.CrossEventID != "xevt1" {
+			t.Fatalf("echo 应绑同一 cross_event_id=xevt1，得 %q", e.CrossEventID)
+		}
+		if e.NarrativeZH == "" {
+			t.Fatalf("echo 应有视角化叙事 narrative_zh，owner=%s 为空", e.OwnerUnitID)
+		}
+	}
+	if _, ok := byOwner["f1"]; !ok {
+		t.Fatalf("f1 应有一条 echo")
+	}
+	if _, ok := byOwner["f2"]; !ok {
+		t.Fatalf("f2 应有一条 echo")
+	}
+	// hop 衰减：直系 f1(hop=0) 的 relevance 应严格高于二跳 f2(hop=1)。
+	if !(byOwner["f1"].Hop == 0 && byOwner["f2"].Hop == 1) {
+		t.Fatalf("hop 应为 f1=0 / f2=1，得 f1=%d f2=%d", byOwner["f1"].Hop, byOwner["f2"].Hop)
+	}
+	if !(byOwner["f1"].Relevance > byOwner["f2"].Relevance) {
+		t.Fatalf("衍生相关度应随跳数衰减：f1=%.4f f2=%.4f", byOwner["f1"].Relevance, byOwner["f2"].Relevance)
+	}
+}
+
+// TestCrossEventEchoes_Rashomon 验证罗生门：同一 cross_event_id 在多个 owner/session 各有一条 echo（视角化叙事），
+// 事实唯一——echo 仅视角层。本测试直接写两条不同 owner、同 cross_event_id 的 echo，验证多视角同 id 可被一起列出，且幂等去重。
+func TestCrossEventEchoes_Rashomon(t *testing.T) {
+	ctx := context.Background()
+	_, _, service := newBloodFeudTestService(t)
+
+	// 同一 cross_event_id=evtX，两个不同 owner（来自不同 session）各一条视角化 echo。
+	service.writeCrossEventEcho(ctx, "sA", "ownerA", "evtX", 0.6, 0.6, "pending", "在 A 看来：是 B 背信弃义。", -0.7, 0)
+	service.writeCrossEventEcho(ctx, "sB", "ownerB", "evtX", 0.4, 0.4, "highlight", "在 B 看来：不过是各为其主。", -0.3, 1)
+	// 幂等：同一 (cross_event_id|session|owner) 重写应更新而非新增行。
+	service.writeCrossEventEcho(ctx, "sA", "ownerA", "evtX", 0.65, 0.65, "pending", "在 A 看来：是 B 背信弃义。", -0.7, 0)
+
+	echoes, err := service.ListCrossEventEchoes(ctx, "evtX")
+	if err != nil {
+		t.Fatalf("列 echo 失败: %v", err)
+	}
+	if len(echoes) != 2 {
+		t.Fatalf("同一 cross_event_id 应有 2 条不同视角 echo（罗生门，幂等去重后），得 %d", len(echoes))
+	}
+	// 排序 (hop 升序)：ownerA(hop0) 在前，ownerB(hop1) 在后。
+	if echoes[0].OwnerUnitID != "ownerA" || echoes[1].OwnerUnitID != "ownerB" {
+		t.Fatalf("echo 应按 hop 升序：ownerA(hop0),ownerB(hop1)，得 %q,%q", echoes[0].OwnerUnitID, echoes[1].OwnerUnitID)
+	}
+	// 事实唯一：两条 echo 叙事不同（罗生门），但 cross_event_id 恒同。
+	if echoes[0].NarrativeZH == echoes[1].NarrativeZH {
+		t.Fatalf("两视角叙事应不同（罗生门）")
+	}
+	if echoes[0].CrossEventID != echoes[1].CrossEventID {
+		t.Fatalf("两条 echo 必须绑同一 cross_event_id（事实唯一），得 %q vs %q", echoes[0].CrossEventID, echoes[1].CrossEventID)
+	}
+	// 幂等：ownerA 的 relevance 被更新为 0.65（最后一次写），非堆叠两行。
+	if math.Abs(echoes[0].Relevance-0.65) > 1e-9 {
+		t.Fatalf("幂等重写应更新 relevance 为 0.65，得 %.4f", echoes[0].Relevance)
+	}
+}
+
+// TestSurfaceBetrayalVictimCard_VictimSideOnly 验证黑吃黑受害者卡：
+//
+//	① 受害者本侧关系恶化（victim 对 betrayer trust- / rivalry+）；
+//	② 生成 debt_grudge_love 锚；
+//	③ 受害者命运收件箱进一张 CROSS_BETRAYAL 回应卡；
+//	④ **永不直写背叛者一侧**（betrayer→victim 无关系行被本路径写入）。
+func TestSurfaceBetrayalVictimCard_VictimSideOnly(t *testing.T) {
+	ctx := context.Background()
+	db, repo, service := newBloodFeudTestService(t)
+	for i, id := range []string{"victim", "betrayer"} {
+		seedUnit(t, ctx, repo, int64(i)+1, id)
+	}
+
+	victim, err := repo.GetByID(ctx, "victim")
+	if err != nil {
+		t.Fatalf("读受害者失败: %v", err)
+	}
+	service.surfaceBetrayalVictimCard(ctx, "s1", victim, "betrayer", "xevt1", "她信过的人，临头反咬了一口。")
+
+	// ① 受害者本侧关系恶化：victim→betrayer 应有 trust<0、rivalry>0 的关系行。
+	var trust, rivalry float64
+	if err := db.QueryRowContext(ctx,
+		`SELECT trust, rivalry FROM relations WHERE source_unit_id='victim' AND target_unit_id='betrayer'`).
+		Scan(&trust, &rivalry); err != nil {
+		t.Fatalf("受害者本侧关系行应存在: %v", err)
+	}
+	if !(trust < 0 && rivalry > 0) {
+		t.Fatalf("受害者对背叛者应 trust<0 且 rivalry>0，得 trust=%.2f rivalry=%.2f", trust, rivalry)
+	}
+
+	// ④ 永不直写背叛者一侧：betrayer→victim 关系行不应被本路径创建（跨玩家硬不变量）。
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM relations WHERE source_unit_id='betrayer' AND target_unit_id='victim'`).Scan(&n); err != nil {
+		t.Fatalf("查背叛者侧关系失败: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("绝不直写背叛者一侧关系（跨玩家硬不变量），却发现 %d 行", n)
+	}
+
+	// ② debt_grudge_love 锚：victim 对 betrayer 应落一根 debt_grudge_love 锚。
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM relevance_anchors WHERE character_unit_id='victim' AND anchor_kind='debt_grudge_love' AND anchor_ref='betrayer'`).Scan(&n); err != nil {
+		t.Fatalf("查 debt 锚失败: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("受害者应落 1 根 debt_grudge_love 锚，得 %d", n)
+	}
+
+	// ③ 受害者命运层进一张 CROSS_BETRAYAL 回应卡（高重要度 → 待决策入收件箱）。
+	inbox, err := service.OpenFateInbox(ctx, "victim")
+	if err != nil {
+		t.Fatalf("打开命运收件箱失败: %v", err)
+	}
+	if len(inbox) == 0 {
+		t.Fatalf("受害者应收到一张黑吃黑回应待决策卡")
+	}
+	if inbox[0].Narrative == "" {
+		t.Fatalf("回应卡应有叙事文案")
+	}
+}
+
+// TestBindBloodFeudAlliance_SocialObject 验证 blood_feud 社会客体生成：受害者 + 密友被绑成对抗背叛者的同盟
+// （social_objects kind=blood_feud），成员含 victim 与 friends，且确定性 id 幂等（重复绑定不新建客体）。
+func TestBindBloodFeudAlliance_SocialObject(t *testing.T) {
+	ctx := context.Background()
+	db, repo, service := newBloodFeudTestService(t)
+	seedFeudWorld(t, ctx, db, repo)
+
+	worldID := "w1"
+	service.bindBloodFeudAlliance(ctx, worldID, "xevt1", "victim", "betrayer", []string{"f1", "f2"})
+
+	// 应有一个 kind=blood_feud 的社会客体。
+	objs, err := socialobject.ListByWorld(ctx, db, worldID)
+	if err != nil {
+		t.Fatalf("列社会客体失败: %v", err)
+	}
+	var feudObj *socialobject.SocialObject
+	for i := range objs {
+		if objs[i].Kind == bloodFeudSocialObjectKind {
+			feudObj = &objs[i]
+			break
+		}
+	}
+	if feudObj == nil {
+		t.Fatalf("应生成一个 kind=blood_feud 的社会客体，得 %d 个客体（无 blood_feud）", len(objs))
+	}
+
+	// 成员应含 victim + f1 + f2，且不含 betrayer。
+	members, err := socialobject.ListMembers(ctx, db, feudObj.ID)
+	if err != nil {
+		t.Fatalf("列成员失败: %v", err)
+	}
+	memSet := map[string]bool{}
+	for _, m := range members {
+		memSet[m.UnitID] = true
+	}
+	if !(memSet["victim"] && memSet["f1"] && memSet["f2"]) {
+		t.Fatalf("同盟成员应含 victim/f1/f2，得 %v", memSet)
+	}
+	if memSet["betrayer"] {
+		t.Fatalf("背叛者不应入对抗自己的同盟")
+	}
+
+	// 幂等：同一 (worldID|crossEventID|betrayer) 重绑应复用同一客体 id（不新建第二个 blood_feud 客体）。
+	service.bindBloodFeudAlliance(ctx, worldID, "xevt1", "victim", "betrayer", []string{"f1", "f2"})
+	objs2, _ := socialobject.ListByWorld(ctx, db, worldID)
+	feudCount := 0
+	for i := range objs2 {
+		if objs2[i].Kind == bloodFeudSocialObjectKind {
+			feudCount++
+		}
+	}
+	if feudCount != 1 {
+		t.Fatalf("同一桩背叛应幂等复用单一 blood_feud 客体，得 %d 个", feudCount)
+	}
+
+	// 留痕：成员应有 SOCIAL_OBJECT_BIND 流程事件。
+	var bindN int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE reason_code=? AND actor_unit_id IN ('victim','f1','f2')`,
+		string(events.ReasonSocialObjectBind)).Scan(&bindN); err != nil {
+		t.Fatalf("查 bind 留痕失败: %v", err)
+	}
+	if bindN == 0 {
+		t.Fatalf("应有 SOCIAL_OBJECT_BIND 留痕事件")
+	}
+
+	// worldID 空时 no-op（无世界域不绑同盟）。
+	service.bindBloodFeudAlliance(ctx, "", "xevt2", "victim", "betrayer", []string{"f1", "f2"})
+	// 只受害者一人（无密友）时 no-op（不成同盟）。
+	service.bindBloodFeudAlliance(ctx, worldID, "xevt3", "victim", "betrayer", nil)
+	objs3, _ := socialobject.ListByWorld(ctx, db, worldID)
+	feudCount3 := 0
+	for i := range objs3 {
+		if objs3[i].Kind == bloodFeudSocialObjectKind {
+			feudCount3++
+		}
+	}
+	if feudCount3 != 1 {
+		t.Fatalf("worldID 空 / 无密友应 no-op，blood_feud 客体仍应只有 1 个，得 %d", feudCount3)
+	}
+}
+
+// TestPropagateCrossBetrayal_FlagOffNoOp 验证 flag 关时 PropagateCrossBetrayal 整段 no-op（返回 0，不触碰 DB）。
+func TestPropagateCrossBetrayal_FlagOffNoOp(t *testing.T) {
+	orig := os.Getenv("QUNXIANG_BLOOD_FEUD")
+	defer os.Setenv("QUNXIANG_BLOOD_FEUD", orig)
+
+	svc := &Service{} // db 为 nil
+	victim := unit.Record{ID: "victim"}
+	ctx := context.Background()
+
+	os.Setenv("QUNXIANG_BLOOD_FEUD", "false")
+	if n := svc.PropagateCrossBetrayal(ctx, "s1", "w1", "evt", victim, "betrayer", ""); n != 0 {
+		t.Fatalf("flag 关时应 no-op 返回 0，得 %d", n)
+	}
+	os.Setenv("QUNXIANG_BLOOD_FEUD", "true")
+	// flag 开但 db=nil：在守卫处安全返回 0，仍不 panic。
+	if n := svc.PropagateCrossBetrayal(ctx, "s1", "w1", "evt", victim, "betrayer", ""); n != 0 {
+		t.Fatalf("db=nil 时应安全返回 0，得 %d", n)
 	}
 }

@@ -8,12 +8,27 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"qunxiang/backend/internal/engine/decision"
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
+	"qunxiang/backend/internal/unit"
+)
+
+// consent_state 列（cross_events）的同意档状态机取值（事件耦合 §3：consent_state 记同意档状态）。
+// 全 best-effort 落库（旁路吞错，绝不阻断主结算）：层2 成立但等回应=contested_pending；层3 等 A 的命回应=consent_pending；
+// A 自治接受/隐忍=accepted/declined；超时按档失效=timeout。
+const (
+	consentStateContestedPending = "contested_pending" // 层2(CONTESTED)：单方成立但 A 上线得一张回应卡
+	consentStateConsentPending   = "consent_pending"   // 层3(REQUIRES_CONSENT)：A 同意前只挂 pending
+	consentStateAccepted         = "accepted"          // A 的命自治回应=接受（关系效果已应用）
+	consentStateDeclined         = "declined"          // A 的命自治回应=隐忍/保守拒绝（不应用）
+	consentStateTimeout          = "timeout"           // 超时按档失效（层3 给 B 回响卡 / 层2 宪章兜底）
 )
 
 // consentTTL 是 pending 同意请求的存活上限：超过即超时兜底置 expired（不应用关系效果，避免无限挂起）。
@@ -49,7 +64,85 @@ func (service *Service) createConsentRequest(ctx context.Context, worldID, actor
 		id, worldID, actorID, targetID, string(interaction), string(tier), eventID, nowConsentTS()); err != nil {
 		return "", fmt.Errorf("create consent request: %w", err)
 	}
+	// best-effort 旁路（§2.4/§2.5「知情权 + 被影响=她的命遇到另一缕命」）：交互成立的同一刻就给离线 A 投卡——
+	// 层2(CONTESTED)投一张待决策回应卡（还手/求和/认账）；层3(REQUIRES_CONSENT)投一张高光「等她的命来回应」。
+	// 同时把同意档状态记进 cross_events.consent_state，使「谁先动手 + 当前同意档」对争议可仲裁。任一步失败只吞错，
+	// 绝不让投卡/状态写回滚掉已成立的 consent_request（投卡是旁路，consent_request 才是主结算）。
+	req := ConsentRequest{ID: id, WorldID: worldID, ActorID: actorID, TargetID: targetID, Interaction: string(interaction), Tier: string(tier), Status: "pending", EventID: eventID}
+	consentState := consentStateContestedPending
+	if tier == relevance.RequiresConsent {
+		consentState = consentStateConsentPending
+	}
+	service.bestEffortUpdateConsentState(ctx, eventID, consentState)
+	service.surfaceConsentCardToTarget(ctx, req, tier)
 	return id, nil
+}
+
+// bestEffortUpdateConsentState 把某 cross_event 的同意档状态写进 cross_events.consent_state（事件耦合 §3）。
+// best-effort 旁路：eventID 空 / 列不存在 / 行不在本库（跨分片）→ 静默跳过，绝不阻断主结算（同意档只是可仲裁注记，
+// 不是事实源；事实唯一回退 cross_events.occurred_at）。绝不直写他人 units/relations——只在 append-only 的 cross_events 注记同意档。
+func (service *Service) bestEffortUpdateConsentState(ctx context.Context, eventID, state string) {
+	if service == nil || service.db == nil || strings.TrimSpace(eventID) == "" {
+		return
+	}
+	_, _ = service.db.ExecContext(ctx, `UPDATE cross_events SET consent_state = ? WHERE id = ?`, state, eventID)
+}
+
+// surfaceConsentCardToTarget 给离线 A（target）经 SurfaceFateEvent 投一张卡（§2.4/§2.5）：
+//   - 层2(CONTESTED)：一张「待决策」回应卡（ReasonCrossConsentPending），祖魂语气「她在桥头被信任的人推了一把——
+//     另一缕命撞上了她的命」，choices = 还手/求和/认账（后果对称）。SurfaceFateEvent 内已含每日待决策预算/三档路由，
+//     预算用尽会自动降级高光卡，不轰炸玩家。
+//   - 层3(REQUIRES_CONSENT)：一张高光卡「有人对她做了件大事，等她的命来回应」——A 的角色之后按归因自治回应，
+//     不是玩家点「同意」按钮（祖魂只能劝）。
+//
+// 全程 best-effort 旁路：A 不在本库（跨分片）/ sessions 未注入 / SurfaceFateEvent 失败 → 只吞错，绝不阻断已成立的 consent_request。
+// 关联单位（FateEvent.ActorID=B/TargetID=A）走 SurfaceFateEvent 的「直接发生在她身上」自相关路径，落库 target 是 A 本人（本库真实行）。
+func (service *Service) surfaceConsentCardToTarget(ctx context.Context, req ConsentRequest, tier relevance.ConsentTier) {
+	if service == nil || service.db == nil || service.units == nil {
+		return
+	}
+	target, err := service.units.GetByID(ctx, req.TargetID)
+	if err != nil || target.ID == "" {
+		return // A 跨分片/不在本库：投卡是 A 侧本地体验，远端 A 由其本库 surface（best-effort 跳过）
+	}
+	ev := consentCardFateEvent(req, tier)
+	if _, err := service.SurfaceFateEvent(ctx, target.SessionID, &target, ev); err != nil {
+		// 旁路吞错只 log（best-effort，绝不阻断主结算）。
+		slog.Warn("surface consent card to target failed (best-effort)", "target", req.TargetID, "tier", string(tier), "err", err)
+	}
+}
+
+// consentCardFateEvent 据档构造投给 A 的命运事件（祖魂语气，§2.5「被影响=她的命遇到另一缕命」）。
+// 层2→待决策档措辞（importance/emotion 偏高，配合 SurfaceFateEvent 路由进待决策）；层3→等回应的高光档。
+// 纯函数、确定性。ActorID=B（对手，仅入 payload/措辞）、TargetID=A（她本人，走自相关路径落本库真实行）。
+func consentCardFateEvent(req ConsentRequest, tier relevance.ConsentTier) FateEvent {
+	tmpl, ok := sevenTemplates[SevenInteraction(req.Interaction)]
+	deedZH := "一桩事"
+	if ok {
+		deedZH = tmpl.Reason
+	}
+	if tier == relevance.RequiresConsent {
+		// 层3：不可逆且双向（联姻/血脉）——只挂 pending，先投高光「等她的命来回应」。
+		return FateEvent{
+			ActorID:       req.ActorID,
+			TargetID:      req.TargetID,
+			ReasonCode:    events.ReasonCrossConsentPending,
+			Importance:    6,
+			EmotionWeight: 0.4,
+			Summary:       "有人对她做了件大事（" + deedZH + "），这事等她的命来回应。",
+			AttributionZH: "另一缕命，正等着撞上她的命。",
+		}
+	}
+	// 层2：高代价但可回应（结盟/复仇宣告/反目/偷袭背叛）——投待决策回应卡。
+	return FateEvent{
+		ActorID:       req.ActorID,
+		TargetID:      req.TargetID,
+		ReasonCode:    events.ReasonCrossConsentPending,
+		Importance:    8,
+		EmotionWeight: -0.6,
+		Summary:       "她在桥头被信任的人推了一把（" + deedZH + "）——另一缕命撞上了她的命。",
+		AttributionZH: "是另一缕命，撞上了她的命。",
+	}
 }
 
 func scanConsent(scan func(dest ...any) error) (ConsentRequest, error) {
@@ -146,8 +239,26 @@ func (service *Service) ResolveConsentRequest(ctx context.Context, reqID string,
 	return req, nil
 }
 
-// ExpireStaleConsents 把创建早于 cutoff 仍 pending 的请求置 expired（charter 兜底：不应用效果、避免无限挂起）。返回置 expired 数。
+// ExpireStaleConsents 把创建早于 cutoff 仍 pending 的请求置 expired，并在置 expired 前按档兜底回应（§2.5 超时分支）：
+//   - 层3(REQUIRES_CONSENT) 失效 → 给**发起方 B** 投一张回响卡「她的命没等到回应」（ReasonCrossConsentTimeout）；
+//   - 层2(CONTESTED) 失效 → 按 A 的离线宪章兜底自治回应（autonomousConsentAccepts：归因成立则接受应用效果，否则隐忍）。
+//
+// 先逐条读出将超时的 pending 行做按档兜底（best-effort 旁路，单条失败只吞错），再批量置 expired——兜底与置 expired 解耦，
+// 即便某条兜底失败也仍会被置 expired（避免无限挂起）。返回置 expired 数（与原语义一致，调用方不感知兜底细节）。
 func (service *Service) ExpireStaleConsents(ctx context.Context, cutoff string) (int64, error) {
+	if service == nil || service.db == nil {
+		return 0, fmt.Errorf("expire consents: missing db")
+	}
+	// ① 先读出将超时的 pending 行，逐条按档兜底回应（在置 expired 之前——层2 兜底接受需 status 仍 pending 才能 flip）。
+	stale, err := service.listStalePendingConsents(ctx, cutoff)
+	if err == nil {
+		for _, req := range stale {
+			service.fallbackOnConsentTimeout(ctx, req)
+		}
+	} else {
+		slog.Warn("list stale consents for timeout fallback failed (best-effort)", "err", err)
+	}
+	// ② 批量置 expired（剩余仍 pending 的——层2 已被兜底接受的此时不再 pending，自然不被覆盖）。
 	res, err := service.db.ExecContext(ctx,
 		`UPDATE consent_requests SET status = 'expired', resolved_at = ? WHERE status = 'pending' AND created_at < ?`,
 		nowConsentTS(), cutoff)
@@ -156,6 +267,92 @@ func (service *Service) ExpireStaleConsents(ctx context.Context, cutoff string) 
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// listStalePendingConsents 读出创建早于 cutoff 仍 pending 的同意请求（供超时按档兜底逐条处理）。双方言安全：参数化字典序比较。
+func (service *Service) listStalePendingConsents(ctx context.Context, cutoff string) ([]ConsentRequest, error) {
+	rows, err := service.db.QueryContext(ctx,
+		`SELECT `+consentCols+` FROM consent_requests WHERE status = 'pending' AND created_at < ? ORDER BY created_at ASC`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ConsentRequest, 0)
+	for rows.Next() {
+		r, err := scanConsent(rows.Scan)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// fallbackOnConsentTimeout 对一条即将超时失效的 pending 同意请求按档兜底（§2.5 超时分支）。best-effort 旁路：单条失败只吞错。
+//   - 层3(REQUIRES_CONSENT)：A 长期不上线 → 自动失效 + 给**发起方 B** 投回响卡「她的命没等到回应」；consent_state→timeout。
+//   - 层2(CONTESTED)：按 A 的离线宪章兜底自治回应——归因成立则接受应用效果（ResolveConsentRequest），否则隐忍；
+//     接受=consent_state accepted，隐忍=declined（仍由 ② 批量置 expired）。
+func (service *Service) fallbackOnConsentTimeout(ctx context.Context, req ConsentRequest) {
+	if service == nil {
+		return
+	}
+	switch relevance.ConsentTier(req.Tier) {
+	case relevance.RequiresConsent:
+		service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateTimeout)
+		service.surfaceConsentTimeoutEchoToInitiator(ctx, req)
+	case relevance.Contested:
+		// 层2 兜底自治回应：A 不在本库或归因不成立 → 隐忍（留待 ② 置 expired）。
+		if service.units == nil {
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
+			return
+		}
+		target, err := service.units.GetByID(ctx, req.TargetID)
+		if err != nil || target.ID == "" {
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
+			return
+		}
+		if !service.autonomousConsentAccepts(ctx, &target, req) {
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
+			return
+		}
+		if _, err := service.ResolveConsentRequest(ctx, req.ID, true); err != nil {
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
+			return
+		}
+		service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateAccepted)
+	default:
+		// 层1 不应进 consent_requests（直接成立），保守不处理。
+	}
+}
+
+// surfaceConsentTimeoutEchoToInitiator 给发起方 B（req.ActorID）投一张回响卡「她的命没等到回应」（ReasonCrossConsentTimeout，§2.5）。
+// 经 SurfaceFateEvent 走 B 的命运层（祖魂语气，克制）。best-effort 旁路：B 跨分片/不在本库/SurfaceFateEvent 失败→只吞错。
+// 关联单位 ActorID=A（对方，仅入 payload/措辞）、TargetID=B（她本人，走自相关路径落 B 本库真实行）。
+func (service *Service) surfaceConsentTimeoutEchoToInitiator(ctx context.Context, req ConsentRequest) {
+	if service == nil || service.db == nil || service.units == nil {
+		return
+	}
+	initiator, err := service.units.GetByID(ctx, req.ActorID)
+	if err != nil || initiator.ID == "" {
+		return // B 跨分片/不在本库：回响是 B 侧本地体验，best-effort 跳过
+	}
+	tmpl, ok := sevenTemplates[SevenInteraction(req.Interaction)]
+	deedZH := "一桩事"
+	if ok {
+		deedZH = tmpl.Reason
+	}
+	ev := FateEvent{
+		ActorID:       req.TargetID, // 对方=没回应的 A
+		TargetID:      req.ActorID,  // 她本人=发起方 B
+		ReasonCode:    events.ReasonCrossConsentTimeout,
+		Importance:    5,
+		EmotionWeight: -0.3,
+		Summary:       "他朝那人递出的那桩事（" + deedZH + "），终究没等到回应。",
+		AttributionZH: "她的命，没等到回应。",
+	}
+	if _, err := service.SurfaceFateEvent(ctx, initiator.SessionID, &initiator, ev); err != nil {
+		slog.Warn("surface consent timeout echo to initiator failed (best-effort)", "initiator", req.ActorID, "err", err)
+	}
 }
 
 // expireStaleConsents 是回合边界用的超时兜底入口：以 nowTS 为「现在」算出 cutoff = now - consentTTL，
@@ -174,25 +371,31 @@ func (service *Service) expireStaleConsents(ctx context.Context, nowTS string) (
 	return service.ExpireStaleConsents(ctx, cutoff)
 }
 
-// autoResolveConsentsByCharter 基于目标单位的离线宪章 SocialMandates 做「自治同意决定」：玩家不在场时，
-// 若目标单位被授权自行处理对应人际事（如宪章社交授权里含「结盟」「联姻」字样），则对该方向的 pending 同意请求
-// best-effort 自动 accept（经 ResolveConsentRequest 在单事务内 flip + 应用关系效果）；未授权的留待玩家/超时兜底。
+// autoResolveConsentsByCharter 让 A 的角色「上线/回合边界由她的命按归因自治回应」（§2.5 升级）：玩家不在场时，
+// 对每条 pending 同意请求经 **decision+attribution 管线** 自治决定是否接受——归因必须落到「对 B 的 relation 恶化/亲近」
+// 或现实 pressure（饥饿/威胁/债务/受伤/疲劳）这类真实前因，否则 OOC 回退保守隐忍（不接受、留待人工/超时）。
+// 这取代了原先「纯中文子串匹配宪章」的放行：substring 命中只作 fast-path 显式授权（玩家明写「可代我结盟」仍直接接受），
+// 但即便无显式 mandate，A 的角色也能在归因成立时自治回应——「B 改变的是处境，A 的角色仍有自己的命、自己的怕、自己的选」。
 //
-// **保守匹配**：只对 sevenTemplates 里登记的交互、且目标单位宪章 SocialMandates 文本「含该交互中文名」（tmpl.Reason，
-// 如结盟/联姻/交易/结识）时才自动同意——授权是「白名单放行」而非「默认放行」，对齐 D1「能听见不能强迫」：
-// 没写进授权的高后果交互（默认含复仇/开战，宪章一般不会写其名）继续走人工/超时。
-// 全程 best-effort：单条失败只吞错跳过、绝不中断；返回自动同意条数。state 缺单位宪章/为 nil 时安全返回 0。
+// 接受经 ResolveConsentRequest 在单事务内 flip + 应用本侧关系效果（绝不直写 B 的 units/relations）；隐忍把 consent_state
+// 记 declined（留 pending 待超时按档兜底）。全程 best-effort：单条失败只吞错跳过、绝不中断；返回自动「接受」的条数。
+// state 为 nil 或无该单位时安全返回 0（无 state 锚/宪章/记忆上下文，归因无从解析，一律保守隐忍）。
 func (service *Service) autoResolveConsentsByCharter(ctx context.Context, state *State, targetID string) (int, error) {
 	if service == nil || service.db == nil || state == nil || strings.TrimSpace(targetID) == "" {
 		return 0, nil
 	}
-	charter, ok := GetUnitCharter(state, targetID)
-	if !ok || len(charter.SocialMandates) == 0 {
-		return 0, nil // 无授权 → 一律留待玩家/超时，自治绝不替玩家越权同意。
-	}
 	pending, err := service.ListPendingConsents(ctx, targetID)
 	if err != nil {
 		return 0, err
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	charter, _ := GetUnitCharter(state, targetID) // 无宪章=空，mandate fast-path 自然不命中
+	// 载入 A 的角色记录构造归因快照（人格+压力+对 B 关系四轴）。不在本库（跨分片）→ 无从自治，全部保守隐忍。
+	target, err := service.units.GetByID(ctx, targetID)
+	if err != nil || target.ID == "" {
+		return 0, nil
 	}
 	accepted := 0
 	for _, req := range pending {
@@ -200,15 +403,105 @@ func (service *Service) autoResolveConsentsByCharter(ctx context.Context, state 
 		if !known {
 			continue
 		}
-		if !mandateAllowsInteraction(charter.SocialMandates, tmpl.Reason) {
-			continue // 该交互未被宪章社交授权点名 → 留待人工/超时兜底。
+		// fast-path：玩家显式授权过该交互（「可代我结盟」），尊重玩家意志直接接受（仍排除否定型禁令）。
+		if mandateAllowsInteraction(charter.SocialMandates, tmpl.Reason) {
+			if _, err := service.ResolveConsentRequest(ctx, req.ID, true); err != nil {
+				continue
+			}
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateAccepted)
+			accepted++
+			continue
+		}
+		// 无显式授权 → 过 decision+attribution 管线自治回应：归因成立才接受，否则保守隐忍。
+		if !service.autonomousConsentAccepts(ctx, &target, req) {
+			// 隐忍：留 pending（待超时按档兜底），把同意档记 declined（可仲裁注记，不应用任何效果）。
+			service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateDeclined)
+			continue
 		}
 		if _, err := service.ResolveConsentRequest(ctx, req.ID, true); err != nil {
 			continue // best-effort：并发已处理/关系写失败只跳过，不中断其余请求。
 		}
+		service.bestEffortUpdateConsentState(ctx, req.EventID, consentStateAccepted)
 		accepted++
 	}
 	return accepted, nil
+}
+
+// autonomousConsentAccepts 用 decision+attribution 管线判定 A 的角色是否自治接受一条 pending 同意请求（§2.5）。
+// 接受的前因必须真实可解析（与 attribution.ValidateAttribution 同口径）：要么对 B 有显著关系四轴（亲近/敌视都「有关」，
+// 牵动她回应），要么她正背负现实压力（pressure），否则判 OOC → 返回 false（保守隐忍，不替无源的她做不可逆决定）。
+// 纯逻辑 + 一次关系读：构造 A 的归因快照（人格/压力/对 B 关系），合成一条「她为何回应这缕命」的候选归因交给
+// decision.ValidateAttribution 硬校验。校验通过=有源回应=接受；不过=无源=隐忍。确定性、可测、best-effort（出错=隐忍）。
+func (service *Service) autonomousConsentAccepts(ctx context.Context, target *unit.Record, req ConsentRequest) bool {
+	if service == nil || target == nil || target.ID == "" {
+		return false
+	}
+	snap := buildAttributionSnapshot(target)
+	// 把 A 对发起方 B 的关系四轴填入快照（归一到 [-1,1]，与 withRelations 同口径），使 relation 类前因可解析。
+	snap = withRelations(ctx, service, target.ID, snap)
+	attr, ok := consentResponseAttribution(req.ActorID, snap)
+	if !ok {
+		return false // 既无显著关系、也无现实压力 → 无源 → 隐忍
+	}
+	verdict := decision.ValidateAttribution(attr, snap)
+	return verdict.OK
+}
+
+// consentResponseAttribution 为「A 自治回应 B 的跨玩家交互」合成一条候选归因（§2.5：归因落 relation 恶化或 pressure）。
+// 优先用 A 对 B 的显著关系四轴（relation 类前因，最贴合「另一缕命撞上她的命」）；无显著关系则退而用现实压力位（pressure 类）。
+// 两者皆无 → 返回 false（无源，调用方据此判隐忍）。SurpriseLevel 取 1（回应一桩落到自己头上的事并不算「无前因的戏剧性意外」，
+// 不触发 ValidateAttribution 规则3 的强支撑要求）。纯函数、确定性、可测。
+func consentResponseAttribution(initiatorID string, snap decision.Snapshot) (decision.Attribution, bool) {
+	if axes, ok := snap.Relations[initiatorID]; ok {
+		if absf64(axes.Trust) >= consentRelAxisMin || absf64(axes.Affection) >= consentRelAxisMin ||
+			absf64(axes.Fear) >= consentRelAxisMin || absf64(axes.Rivalry) >= consentRelAxisMin {
+			return decision.Attribution{
+				Primary:       decision.CauseRef{Kind: decision.CauseRelation, RefID: initiatorID, Weight: 0.7},
+				SurpriseLevel: 1,
+				NarrativeZH:   "她的命撞上了另一缕命，她照自己与那人的恩怨回应。",
+			}, true
+		}
+	}
+	// 关系不显著 → 看现实压力位（饥饿/威胁/债务/受伤/疲劳任一在线即可作为回应的前因）。
+	for _, name := range []string{"threat", "debt", "injury", "hunger", "fatigue"} {
+		if pressureFlagActive(name, snap.Pressure) {
+			return decision.Attribution{
+				Primary:       decision.CauseRef{Kind: decision.CausePressure, RefID: name, Weight: 0.6},
+				SurpriseLevel: 1,
+				NarrativeZH:   "她正背着自己的难处，这桩事她得照自己的处境回应。",
+			}, true
+		}
+	}
+	return decision.Attribution{}, false
+}
+
+// consentRelAxisMin 是「A 对 B 关系是否显著到足以作为回应前因」的门槛（与 attribution.relAxisMin 同口径 0.3，归一后量级）。
+const consentRelAxisMin = 0.3
+
+// pressureFlagActive 判某个压力位是否在线（与 attribution 包的 pressureActive 同义，本包内自包含一份，避免跨包导出）。
+func pressureFlagActive(name string, p decision.PressureFlags) bool {
+	switch name {
+	case "hunger":
+		return p.Hunger
+	case "threat":
+		return p.Threat
+	case "debt":
+		return p.Debt
+	case "injury":
+		return p.Injury
+	case "fatigue":
+		return p.Fatigue
+	default:
+		return false
+	}
+}
+
+// absf64 是本包内的浮点绝对值（避免与同包其它文件的 absFloat 撞名/跨包导出）。
+func absf64(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // mandateAllowsInteraction 判定一组社交授权文本里是否有任一条点名了该交互（按交互中文名子串匹配，去空白）。
@@ -243,26 +536,48 @@ func mandateHasNegation(mandate string) bool {
 }
 
 // settleConsentsAtBoundary 是部署边界用的 consent 统一结算入口（供 service.go 在 settleAutonomy 附近调用）。
-// 先做超时兜底 expireStaleConsents（必须：把超 TTL 的 pending 清成 expired，避免无限挂起），
-// 再对本局活着单位做宪章授权驱动的自治同意 autoResolveConsentsByCharter（增强：玩家授权过的人际事自动放行）。
+// 先做超时兜底 expireStaleConsents（必须：把超 TTL 的 pending 清成 expired，避免无限挂起 + 按档投回响/宪章兜底），
+// 再对每个有 pending 同意请求的离线 A「由她的角色按归因自治回应」（§2.5 升级：过 decision+attribution 管线，
+// 不再仅限有宪章 mandate 的单位——substring 命中只作显式授权 fast-path，无 mandate 的 A 也能在归因成立时自治回应）。
 // 全程 best-effort：任一步失败只记日志、绝不中断回合推进（对齐自治结算「吞错不阻塞」约定）。
 // nowTS 用注入的回合边界时刻（确定性可复现）；state 为 nil 时安全 no-op。
 func (service *Service) settleConsentsAtBoundary(ctx context.Context, state *State) {
 	if service == nil || service.db == nil || state == nil {
 		return
 	}
-	// ① 超时兜底（必须）：以回合边界时刻为「现在」清掉超 TTL 的 pending。
+	// ① 超时兜底（必须）：以回合边界时刻为「现在」清掉超 TTL 的 pending（内含层3 回响卡 / 层2 宪章兜底）。
 	if _, err := service.expireStaleConsents(ctx, nowConsentTS()); err != nil {
 		appendLog(state, "consent", fmt.Sprintf("同意请求超时兜底失败（best-effort，已跳过）：%v", err), "", "")
 	}
-	// ② 自治同意（增强）：对登记了离线宪章社交授权的单位，按授权自动放行对应方向的 pending。
-	//    仅遍历本局 UnitCharters 中有 SocialMandates 的单位（无授权单位本就不会自动同意，跳过省 DB）。
-	for unitID, charter := range state.UnitCharters {
-		if len(charter.SocialMandates) == 0 {
-			continue
-		}
-		if _, err := service.autoResolveConsentsByCharter(ctx, state, unitID); err != nil {
-			appendLog(state, "consent", fmt.Sprintf("单位 %s 自治同意结算失败（best-effort，已跳过）：%v", unitID, err), "", "")
+	// ② 自治回应（§2.5 升级）：遍历当前仍有 pending 的目标 A（不限有无宪章），逐个过归因管线自治回应——
+	//    归因成立（对 B 显著关系/现实压力）→ 接受应用本侧效果；无源 → 保守隐忍（留待人工/超时）。
+	for _, targetID := range service.listPendingConsentTargets(ctx) {
+		if _, err := service.autoResolveConsentsByCharter(ctx, state, targetID); err != nil {
+			appendLog(state, "consent", fmt.Sprintf("单位 %s 自治回应结算失败（best-effort，已跳过）：%v", targetID, err), "", "")
 		}
 	}
+}
+
+// listPendingConsentTargets 列出当前仍有 pending 同意请求的去重目标单位（A 方）。best-effort：出错返回空切片（不阻断边界结算）。
+func (service *Service) listPendingConsentTargets(ctx context.Context) []string {
+	if service == nil || service.db == nil {
+		return nil
+	}
+	rows, err := service.db.QueryContext(ctx,
+		`SELECT DISTINCT target_unit_id FROM consent_requests WHERE status = 'pending'`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return out
+		}
+		if strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }

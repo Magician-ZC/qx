@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"qunxiang/backend/internal/engine/turns"
+	"qunxiang/backend/internal/unit"
 )
 
 // normalizeFactionRelationState 把势力关系状态字符串标准化为受支持枚举。
@@ -199,6 +200,38 @@ func opposedUnitIDs(state State, factionID string) []string {
 	default:
 		return append([]string{}, state.WildUnitIDs...)
 	}
+}
+
+// frameAutonomousWar 把一桩自治「开战」交互落到势力级（设计 docs/事件耦合与跨玩家关联.md §2.3：
+// 「开战：faction 级 rivalry+fear；落到个人=她的盟友/家人被卷入」）。两名角色的私怨烈到开战时，
+// 把**本侧** state.FactionRelations 中二者所属势力置为 war——「她的盟友/家人被卷入」即由此势力级状态承载
+// （后续目标选取/敌对判定经 opposedUnitIDs 即会把对方势力视为敌方，把同盟/家人卷入这场对立）。
+//
+// **跨玩家硬不变量遵守**：只改本会话自己的 state.FactionRelations（这是本玩家自己的世界状态），
+// 绝不直写他人 session 的 units/relations/faction 表。同势力两人（canonicalFactionPair 拒同名/空）→ 安全 no-op
+// （自治社交扫描的候选恰是同一玩家势力的单位，故多数情况此处 no-op；保留按势力归属的通用正确性，供异势力场景复用）。
+// best-effort：state 为 nil / 势力缺失 / 同势力 → 静默返回 false（不阻断推进）。返回是否实际改了势力关系。
+func (service *Service) frameAutonomousWar(state *State, actor, target *unit.Record) bool {
+	if state == nil || actor == nil || target == nil {
+		return false
+	}
+	left, right, ok := canonicalFactionPair(actor.FactionID, target.FactionID)
+	if !ok {
+		return false // 同势力 / 势力为空 → 无势力级开战可言，安全 no-op
+	}
+	occurredAt := time.Now().UTC()
+	changed := setFactionRelation(state, left, right, FactionRelationWar,
+		"autonomous_war:"+string(crossReasonForInteraction(InteractionWar)), occurredAt)
+	if changed {
+		appendLog(
+			state,
+			"faction_relation",
+			fmt.Sprintf("私怨升级为势力开战：%s <-> %s（她的盟友/家人被卷入）", left, right),
+			actor.ID,
+			target.ID,
+		)
+	}
+	return changed
 }
 
 // SetFactionRelation 对外暴露势力关系修改入口。

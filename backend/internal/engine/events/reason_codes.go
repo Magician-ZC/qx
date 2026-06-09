@@ -173,6 +173,21 @@ const (
 	ReasonDungeonSegmentPause ReasonCode = "DUNGEON_SEGMENT_PAUSE"
 	// DUNGEON_CHARTER_TIMEOUT：玩家离线超时，副本按离线宪章兜底续命（自动见好就收/撤离），绝不致死。
 	ReasonDungeonCharterTimeout ReasonCode = "DUNGEON_CHARTER_TIMEOUT"
+
+	// 跨玩家/事件耦合补全（设计 事件耦合与跨玩家关联 §1.4/§1.6/§2.3-2.7）。均流程事件（EmitProcessEvent，不改保护字段）。
+	ReasonPropagationRelayed    ReasonCode = "PROPAGATION_RELAYED"     // 事件沿关系图向外多跳传播的一跳（0.6^hop 衰减失真，§1.4）
+	ReasonInboxEnqueued         ReasonCode = "INBOX_ENQUEUED"         // 一件事被收进某角色的命运收件箱（可溯源到具体锚命中，§1.6）
+	ReasonInboxExpiredFallback  ReasonCode = "INBOX_EXPIRED_FALLBACK" // 待决策超时未应答，过期兜底转回响卡
+	ReasonAnchorDecayed         ReasonCode = "ANCHOR_DECAYED"         // 一根相关性锚随时间衰减/失效
+	ReasonCrossEncounter        ReasonCode = "CROSS_ENCOUNTER"        // 跨玩家：结识（trust/affection 本侧增量）
+	ReasonCrossAlliance         ReasonCode = "CROSS_ALLIANCE"         // 跨玩家：结盟
+	ReasonCrossTrade            ReasonCode = "CROSS_TRADE"            // 跨玩家：交易
+	ReasonCrossMarriage         ReasonCode = "CROSS_MARRIAGE"         // 跨玩家：联姻（血脉绑定）
+	ReasonCrossVendetta         ReasonCode = "CROSS_VENDETTA"         // 跨玩家：复仇宣告
+	ReasonCrossWarDraw          ReasonCode = "CROSS_WAR_DRAW"         // 跨玩家：开战（势力级卷入）
+	ReasonCrossConsentPending   ReasonCode = "CROSS_CONSENT_PENDING"  // 跨玩家高后果交互挂起，等离线 A 的角色自治回应
+	ReasonCrossConsentTimeout   ReasonCode = "CROSS_CONSENT_TIMEOUT"  // 跨玩家同意超时（按档失效/宪章兜底回应）
+	ReasonCrossDerived          ReasonCode = "CROSS_DERIVED"          // 跨玩家事件沿关系图衍生到第三方（你信任的人被偷袭了）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -280,6 +295,21 @@ func Catalog() []ReasonCodeDefinition {
 		// —— 副本异步分段推进（PvE威胁系统 §3）——
 		{Code: ReasonDungeonSegmentPause, Category: CategoryLifecycle, DisplayName: "秘境暂歇", DefaultReasonText: "深处的岔口拦住了她的脚步，得拿个主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonDungeonCharterTimeout, Category: CategoryLifecycle, DisplayName: "依嘱收手", DefaultReasonText: "你没回来，她照着早先的叮嘱，见好就收了", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+
+		// —— 跨玩家/事件耦合补全（事件耦合与跨玩家关联 §1.4/§1.6/§2.3-2.7）——
+		{Code: ReasonPropagationRelayed, Category: CategoryFate, DisplayName: "辗转传闻", DefaultReasonText: "这事辗转传到她耳朵里，已经走了样", StatDomains: []string{}, ImportanceMin: 2, ImportanceMax: 5},
+		{Code: ReasonInboxEnqueued, Category: CategoryFate, DisplayName: "落入心头", DefaultReasonText: "一件事进了她的心事簿", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonInboxExpiredFallback, Category: CategoryFate, DisplayName: "无人应答", DefaultReasonText: "那桩待决的事没等到你的主意，自己有了着落", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonAnchorDecayed, Category: CategoryFate, DisplayName: "牵挂渐淡", DefaultReasonText: "曾经记挂的人或事，日子久了淡了下去", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 3},
+		{Code: ReasonCrossEncounter, Category: CategoryLifecycle, DisplayName: "异客结识", DefaultReasonText: "她与另一缕命途上的人，结识了", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonCrossAlliance, Category: CategoryLifecycle, DisplayName: "缔结同盟", DefaultReasonText: "她与另一方结成了同盟", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonCrossTrade, Category: CategoryLifecycle, DisplayName: "互通有无", DefaultReasonText: "她与另一方做成了一桩交易", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonCrossMarriage, Category: CategoryLifecycle, DisplayName: "联姻结亲", DefaultReasonText: "两缕命途因一桩亲事缠到了一处", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
+		{Code: ReasonCrossVendetta, Category: CategoryLifecycle, DisplayName: "宣告复仇", DefaultReasonText: "一桩血仇被摆到了明面上", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
+		{Code: ReasonCrossWarDraw, Category: CategoryLifecycle, DisplayName: "战火波及", DefaultReasonText: "两方的争斗，把她也卷了进去", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
+		{Code: ReasonCrossConsentPending, Category: CategoryLifecycle, DisplayName: "待她回应", DefaultReasonText: "有人对她做了件大事，等她的命来回应", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonCrossConsentTimeout, Category: CategoryLifecycle, DisplayName: "未及回应", DefaultReasonText: "她的命没来得及回应，那桩事自有了结", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
 	}
 }
 

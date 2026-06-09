@@ -112,6 +112,19 @@ func Open(path string) (*sql.DB, error) {
 	if _, err := db.ExecContext(ctx, dbmigrate.WorldBossActiveUniqueIndexSQLite); err != nil {
 		log.Printf("ensure world_boss active unique index best-effort failed: %v", err)
 	}
+	// Wave2 跨玩家：cross_events 设计列 + social_objects 撮合列 + cross_event_echoes 视角层表。
+	if err := dbmigrate.EnsureColumns(ctx, db, "cross_events", dbmigrate.CrossEventColumns); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := dbmigrate.EnsureColumns(ctx, db, "social_objects", dbmigrate.SocialObjectColumns); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.CrossEventEchoesTableSQLite, dbmigrate.CrossEventEchoesTableMySQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return db, nil
 }

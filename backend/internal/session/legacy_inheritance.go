@@ -86,6 +86,20 @@ func (service *Service) inheritLegacyItems(ctx context.Context, state *State, de
 	_ = service.recordChronicleEntry(ctx, state.ID, heirID, state.TurnState.Turn, "legacy_inherit", chronicleText)
 	_ = service.storeMemoryAndSyncHighlights(ctx, &heir, state.TurnState.Turn, chronicleText, "legacy_inherit", 2)
 
+	// legacy 锚（设计 §1.1「传家物/血脉，永不衰减」）：每件继承到手的遗物给继承人落一根永久相关性锚——
+	// 这些遗物连同死者的血脉自此是她心上恒久的弦（世界里关于它/她的事都牵动这位继承人）。
+	// ref 用每件物的 itemID（稳定）；weight 满（1.0）；halfLife=0 不衰减。best-effort：失败不回滚已落库的转移、不阻断。
+	for _, stack := range legacyItems {
+		if stack.ItemID == "" {
+			continue
+		}
+		label := strings.TrimSpace(stack.CustomName)
+		if label == "" {
+			label = displayItemName(stack.ItemID)
+		}
+		_ = service.UpsertLegacyAnchor(ctx, state.ID, heirID, stack.ItemID, 1.0, "传家·"+label)
+	}
+
 	appendLog(
 		state,
 		"legacy_inherit",
@@ -275,6 +289,10 @@ func (service *Service) upgradeItemToLegacy(ctx context.Context, state *State, o
 	_ = service.recordChronicleEntry(ctx, state.ID, ownerID, state.TurnState.Turn, "legacy_upgrade", chronicleText)
 	_ = service.storeMemoryAndSyncHighlights(ctx, &owner, state.TurnState.Turn, chronicleText, "legacy_upgrade", 3)
 	appendLog(state, "legacy_upgrade", fmt.Sprintf("%s 把 %s 刻成了传家之物。", owner.DisplayName(), itemName), ownerID, "")
+	// legacy 锚（设计 §1.1「传家物/血脉，永不衰减」）：把刚刻成的传家物落成持有者的一根永久相关性锚——
+	// 这件物自此是她心上恒久的一根弦，世界里关于它的事都会牵动她。ref 用 itemID（稳定）；weight 满（1.0）；halfLife=0 不衰减。
+	// best-effort：UpsertLegacyAnchor 内部失败不回滚已落库的标记、不阻断。
+	_ = service.UpsertLegacyAnchor(ctx, state.ID, ownerID, itemID, 1.0, "传家·"+itemName)
 	return true, nil
 }
 

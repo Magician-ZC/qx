@@ -22,6 +22,7 @@ import (
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/engine/status"
+	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/worldbus"
@@ -579,4 +580,351 @@ func sortStrings(s []string) {
 			s[j-1], s[j] = s[j], s[j-1]
 		}
 	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 黑吃黑（CROSS_BETRAYAL）+ 罗生门 echo + 衍生传播 + blood_feud 社会客体
+//   设计 docs/事件耦合与跨玩家关联.md §2.7（共享历史与可仲裁证据链）+ PvE §7（黑吃黑）。
+//
+// 缺口与落地：一条 cross_event（背叛/偷袭）发生后——
+//   ① 沿受害者两侧关系图传播（复用既有 relations BFS）→ 对第三方（她信任的人的密友）按关系强度收
+//      衰减后的 ReasonCrossDerived「你信任的人被人偷袭了」（不再用 VENGEANCE_FULFILLED 代偿）；
+//   ② 为每个收到的 owner 写一条 cross_event_echo（视角化叙事 narrative_zh + relevance + route + hop）——
+//      同一 cross_event_id 多 owner 各一条 echo（罗生门），但事实唯一：争议回退 cross_events.occurred_at 仲裁；
+//   ③ 黑吃黑给受害者经 SurfaceFateEvent 投回应卡（追讨/认栽记仇/求和），受害者侧 Mutator 只改本侧
+//      （A 对 B trust- / rivalry+ + 生成 debt_grudge_love 锚）——永不直写背叛者一侧；
+//   ④ 撮合系统据 ReasonCrossDerived 生成 blood_feud 社会客体，把受害者 + 其密友绑成对抗背叛者的同盟。
+//
+// 全程 flag-gated（复用 QUNXIANG_BLOOD_FEUD，默认开 → 仅 false/0/no/off 整段 no-op）+ best-effort
+// （任何子步失败吞错跳过，绝不阻断主结算）+ 确定性（FNV 派生，无随机）+ 反 P2W（无 wallet/billing 入裁决）。
+//
+// 跨玩家硬不变量：只产 append-only cross_event；echo 仅视角叙事层、事实唯一；各自 Mutator/applyRelationShift
+// 只改本侧 relations，**永不直写背叛者/第三方他人的 units/relations**（衍生侧只继承「对背叛者的敌意」，是本侧主动方向）。
+// ════════════════════════════════════════════════════════════════════════════
+
+const (
+	// crossDerivedHopLimit 黑吃黑衍生传播沿受害者关系图的最大跳数（对齐 relevance.MaxHops，防全图洪泛）。
+	crossDerivedHopLimit = relevance.MaxHops
+	// crossDerivedFanout 每个上游节点最多扇出的密友数（控指数爆炸）。
+	crossDerivedFanout = 8
+	// crossDerivedMournerLimit 一桩黑吃黑最多衍生到的第三方人数（按关系强度降序截断）。
+	crossDerivedMournerLimit = 24
+	// crossDerivedImportanceBase 衍生卡的基准重要度（hop=0 直系密友最高，按 HopFidelity 衰减）。
+	crossDerivedImportanceBase = 7
+	// crossDerivedValence 衍生事件的情绪效价（负向：你信任的人被偷袭，是坏消息）。
+	crossDerivedValence = -0.5
+	// bloodFeudSocialObjectKind 黑吃黑衍生社会客体类型（受害者+密友 vs 背叛者的对抗同盟）。
+	bloodFeudSocialObjectKind = "blood_feud"
+)
+
+// PropagateCrossBetrayal 是黑吃黑（CROSS_BETRAYAL）的完整落地编排：受害者回应卡 + 衍生传播 + 罗生门 echo + blood_feud 同盟。
+// crossEventID 是那条已写进世界总线、append-only、带权威 occurred_at 的背叛事件 id（事实唯一源）；victim/betrayer 是双方角色 id；
+// betrayalSummary 是这桩黑吃黑的一句话（用于受害者卡）。worldID 可空（无世界则跳过同盟绑定，仍投受害者卡/写本库 echo）。
+//
+// 全程 best-effort + flag-gated：flag 关 / 缺依赖 / id 空 / victim==betrayer → no-op。任一子步失败只吞错跳过，绝不阻断主结算。
+// 返回被实际衍生（写了 echo）的第三方人数，供调用方遥测/测试（错误从不上抛，跨玩家旁路不阻断主流程）。
+func (service *Service) PropagateCrossBetrayal(
+	ctx context.Context,
+	sessionID string,
+	worldID string,
+	crossEventID string,
+	victim unit.Record,
+	betrayerID string,
+	betrayalSummary string,
+) int {
+	if !bloodFeudEnabled() {
+		return 0 // flag 关：零行为变化
+	}
+	if service == nil || service.db == nil {
+		return 0
+	}
+	crossEventID = strings.TrimSpace(crossEventID)
+	betrayerID = strings.TrimSpace(betrayerID)
+	if crossEventID == "" || victim.ID == "" || betrayerID == "" || victim.ID == betrayerID {
+		return 0
+	}
+
+	// ③ 黑吃黑受害者回应卡（追讨/认栽记仇/求和）+ 受害者侧本侧关系增量 + debt_grudge_love 锚。
+	service.surfaceBetrayalVictimCard(ctx, sessionID, victim, betrayerID, crossEventID, betrayalSummary)
+
+	// ①② 沿受害者关系图衍生传播到「她信任的人的密友」，每人一条 ReasonCrossDerived + 一条罗生门 echo。
+	derivedOwners := service.propagateCrossDerived(ctx, sessionID, worldID, crossEventID, victim, betrayerID)
+
+	// ④ 撮合系统据 ReasonCrossDerived 生成 blood_feud 社会客体：受害者 + 衍生密友绑成对抗背叛者的同盟。
+	service.bindBloodFeudAlliance(ctx, worldID, crossEventID, victim.ID, betrayerID, derivedOwners)
+
+	return len(derivedOwners)
+}
+
+// surfaceBetrayalVictimCard 给黑吃黑受害者投一张回应卡（追讨/认栽记仇/求和，经 SurfaceFateEvent 走自相关待决策路径），
+// 并在受害者**本侧**落关系恶化（A 对 B trust- / rivalry+，经既有 applyRelationShift、clamp±10、留痕）+ 一根 debt_grudge_love 锚
+// （这桩血债结成了一根久驻心头的弦）。**只改受害者本侧**——永不直写背叛者一侧（跨玩家硬不变量）。
+// best-effort：任一步失败吞错，绝不影响衍生传播/同盟绑定。回应卡的三选项由 SurfaceFateEvent 的情境化 Copilot 按 reason-code 生成。
+func (service *Service) surfaceBetrayalVictimCard(ctx context.Context, sessionID string, victim unit.Record, betrayerID string, crossEventID string, betrayalSummary string) {
+	if service == nil || service.db == nil || victim.ID == "" {
+		return
+	}
+	// 1) 受害者本侧关系恶化：对背叛者 trust- / rivalry+（黑吃黑是实质的反目，比一般反目更重）。
+	//    state 传 nil（黑吃黑在跨玩家旁路触发、可能在回合循环外）；applyRelationShift 内部 clamp±10 + 写 notes 留痕。
+	betrayer := unit.Record{ID: betrayerID}
+	v := victim
+	_, _ = service.applyRelationShift(ctx, nil, &v, &betrayer, relationDelta{
+		Trust:   -4,
+		Rivalry: 4,
+		Fear:    1,
+	}, "黑吃黑·被信任的人反咬")
+
+	// 2) debt_grudge_love 锚：这笔血债从此是她心上久驻的一根弦（半衰走关系锚半衰，比泛泛关系更久）。best-effort。
+	_ = service.UpsertDebtAnchor(ctx, sessionID, victim.ID, betrayerID, bloodFeudHatredNorm(4), "血债·"+victim.DisplayName())
+
+	// 3) 受害者回应卡：经 SurfaceFateEvent 走自相关待决策路径（owner=受害者，TargetID=受害者本人 → FK 落本库存在的她；
+	//    ActorID=背叛者，仅入 payload 非 FK）。reason=ReasonCrossBetrayal 让情境化 Copilot 产出贴合的（追讨/认栽记仇/求和）选项。
+	summary := strings.TrimSpace(betrayalSummary)
+	if summary == "" {
+		summary = "本该与她共担的人，临头却反咬了她一口。这笔账，她要怎么算？"
+	}
+	owner := victim
+	_, _ = service.SurfaceFateEvent(ctx, sessionID, &owner, FateEvent{
+		ActorID:       betrayerID,
+		TargetID:      victim.ID,
+		ReasonCode:    events.ReasonCrossBetrayal,
+		Importance:    8,
+		EmotionWeight: -0.7,
+		Summary:       summary,
+	})
+	_ = crossEventID // crossEventID 是受害者侧事实锚，已由世界总线持有；此处自相关卡无需再绑（echo 才需）。
+}
+
+// propagateCrossDerived 把一桩黑吃黑沿受害者关系图衍生到「她信任的人的密友」（确定性 BFS，复用 loadCarersOf 的多跳发现）：
+//   - hop=0：直接在乎受害者的人（她信任的人）；hop=1：在乎「她信任的人」的密友（你信任的人的密友）；hop≤crossDerivedHopLimit。
+//
+// 对每个第三方 owner：① 经 SurfaceFateEvent 投一条 ReasonCrossDerived 牵挂卡（强度按 HopFidelity=0.6^hop 衰减——
+// 直系密友最强、远系递减）；② 写一条 cross_event_echo（视角化叙事 + relevance + route + hop，罗生门：同一 cross_event_id
+// 各 owner 一条）。返回成功衍生（写了 echo）的第三方 unitID 列表（供 blood_feud 同盟绑定）。
+//
+// best-effort：任一第三方失败只吞错跳过。确定性：仅靠关系强度排序 + FNV 派生 echo id，无随机。
+func (service *Service) propagateCrossDerived(ctx context.Context, sessionID string, worldID string, crossEventID string, victim unit.Record, betrayerID string) []string {
+	if service == nil || service.db == nil || victim.ID == "" {
+		return nil
+	}
+	// 复用既有多跳哀悼者发现：从受害者出发沿 relations 图找「在乎她的人」（及其密友），排除背叛者本人。
+	bonds := service.loadMournerBonds(ctx, victim.ID, betrayerID, crossDerivedMournerLimit)
+	if len(bonds) == 0 {
+		return nil
+	}
+	owners := make([]string, 0, len(bonds))
+	for _, b := range bonds {
+		if b.MournerID == "" || b.MournerID == victim.ID || b.MournerID == betrayerID {
+			continue
+		}
+		// 衍生强度：只有真正在乎受害者的人（净亲密度>0）才被「你信任的人被偷袭了」牵动；纯敌视者跳过。
+		rel := careRelevanceForDeceased(b) // [0,1]，已含 HopFidelity 跳数衰减
+		closeness := b.Affection*0.6 + b.Trust*0.4 - b.Rivalry*0.3 - b.Fear*0.2
+		if rel <= 0 || closeness <= 0 {
+			continue
+		}
+		// ① 衍生牵挂卡：ReasonCrossDerived「你信任的人被人偷袭了」。owner=第三方；TargetID=第三方本人（自相关、FK 落本库存在的她）；
+		//    ActorID=背叛者（牵动她的对象，仅入 payload）。重要度按 HopFidelity 衰减 → 直系密友更可能进前台、远系沉为背景噪声。
+		importance := crossDerivedImportance(b.Hop)
+		ownerRec := unit.Record{ID: b.MournerID}
+		routing, err := service.SurfaceFateEvent(ctx, sessionID, &ownerRec, FateEvent{
+			ActorID:       betrayerID,
+			TargetID:      b.MournerID,
+			ReasonCode:    events.ReasonCrossDerived,
+			Importance:    importance,
+			EmotionWeight: crossDerivedValence * relevance.HopFidelity(b.Hop),
+			Summary:       crossDerivedSummary(victim, b.Hop),
+		})
+		route := relevance.RouteAutonomous
+		fateScore := 0.0
+		if err == nil {
+			route = routing.Route
+			fateScore = routing.Relevance
+		}
+		// ② 罗生门 echo：同一 cross_event_id 各 owner 视角化一条，事实唯一（争议回退 cross_events.occurred_at）。
+		service.writeCrossEventEcho(ctx, sessionID, b.MournerID, crossEventID, fateScore, fateScore,
+			string(route), crossDerivedSummary(victim, b.Hop), crossDerivedValence*relevance.HopFidelity(b.Hop), b.Hop)
+
+		owners = append(owners, b.MournerID)
+		_ = worldID // worldID 衍生侧仅 blood_feud 绑定用，传播本身只写本库 echo（不再产新 cross_event，避免传播放大事实源）。
+	}
+	return owners
+}
+
+// crossDerivedImportance 把跳数映射成衍生牵挂卡的重要度：hop=0 取基准，按 HopFidelity 衰减（直系密友最强、远系递减）。
+// 纯函数、确定性、可测。下限 1（再远的传闻也至少留痕一档，但多半被 FateScore 路由为自治不打扰）。
+func crossDerivedImportance(hop int) int {
+	v := int(float64(crossDerivedImportanceBase)*relevance.HopFidelity(hop) + 0.5)
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+// crossDerivedSummary 从第三方视角措辞「你信任的人被人偷袭了」（hop 越远越像辗转传闻，对齐不可靠叙事）。
+func crossDerivedSummary(victim unit.Record, hop int) string {
+	name := victim.DisplayName()
+	if name == "" {
+		name = "她信任的一个人"
+	}
+	switch {
+	case hop <= 0:
+		return name + "被本该共担的人在背后捅了一刀——你信任的人，遭了暗算。"
+	case hop == 1:
+		return "听说" + name + "那边出了事，被信过的人反咬了一口。"
+	default:
+		return "辗转传来一桩走了样的旧事：" + name + "好像被人黑吃黑了。"
+	}
+}
+
+// writeCrossEventEcho 写一条 cross_event_echo（视角化叙事层，事件耦合 §2.7「echo 仅视角叙事，事实唯一回退 cross_events」）。
+// 同一 cross_event_id 在多个 owner/session 各有一条 echo（罗生门），但**事实唯一**——争议恒回退 cross_events 原表 occurred_at 仲裁。
+// 行 id 由 (cross_event_id|session|owner) 派生确定性（幂等去重：同一桩事对同一 owner 只一条 echo，重复编排不堆叠）。
+// best-effort：缺 db / owner 空 → 跳过；写失败吞错，绝不影响传播继续。双驱动（SQLite ON CONFLICT / MySQL ON DUPLICATE）。
+func (service *Service) writeCrossEventEcho(ctx context.Context, sessionID, ownerUnitID, crossEventID string, relevanceScore, fateScore float64, route, narrativeZH string, valence float64, hop int) {
+	if service == nil || service.db == nil || strings.TrimSpace(ownerUnitID) == "" || strings.TrimSpace(crossEventID) == "" {
+		return
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("cross_echo:" + crossEventID + ":" + sessionID + ":" + ownerUnitID))
+	rowID := fmt.Sprintf("ce_%016x", h.Sum64())
+	createdAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+	if dbdialect.IsMySQL(service.db) {
+		_, _ = service.db.ExecContext(ctx,
+			`INSERT INTO cross_event_echoes (id, session_id, owner_unit_id, cross_event_id, relevance, fate_score, route, narrative_zh, valence, hop, created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+			 ON DUPLICATE KEY UPDATE relevance=VALUES(relevance), fate_score=VALUES(fate_score), route=VALUES(route), narrative_zh=VALUES(narrative_zh), valence=VALUES(valence), hop=VALUES(hop)`,
+			rowID, sessionID, ownerUnitID, crossEventID, relevanceScore, fateScore, route, narrativeZH, valence, hop, createdAt)
+		return
+	}
+	_, _ = service.db.ExecContext(ctx,
+		`INSERT INTO cross_event_echoes (id, session_id, owner_unit_id, cross_event_id, relevance, fate_score, route, narrative_zh, valence, hop, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET relevance=excluded.relevance, fate_score=excluded.fate_score, route=excluded.route, narrative_zh=excluded.narrative_zh, valence=excluded.valence, hop=excluded.hop`,
+		rowID, sessionID, ownerUnitID, crossEventID, relevanceScore, fateScore, route, narrativeZH, valence, hop, createdAt)
+}
+
+// CrossEventEcho 是一条视角化 echo（供前端/测试读取罗生门视角集）。事实唯一性由 cross_event_id 串回 cross_events 保证。
+type CrossEventEcho struct {
+	OwnerUnitID  string  `json:"owner_unit_id"`
+	CrossEventID string  `json:"cross_event_id"`
+	Relevance    float64 `json:"relevance"`
+	FateScore    float64 `json:"fate_score"`
+	Route        string  `json:"route"`
+	NarrativeZH  string  `json:"narrative_zh"`
+	Valence      float64 `json:"valence"`
+	Hop          int     `json:"hop"`
+}
+
+// ListCrossEventEchoes 列出同一 cross_event_id 的全部视角化 echo（罗生门视角集），按 (hop 升序, owner 升序) 确定性排列。
+// 纯读、不 flag-gate（读历史无副作用）。供前端展示「三个玩家都记得的那次背叛」的各自视角，及测试验证多视角同 cross_event_id。
+func (service *Service) ListCrossEventEchoes(ctx context.Context, crossEventID string) ([]CrossEventEcho, error) {
+	if service == nil || service.db == nil {
+		return nil, nil
+	}
+	crossEventID = strings.TrimSpace(crossEventID)
+	if crossEventID == "" {
+		return nil, nil
+	}
+	rows, err := service.db.QueryContext(ctx,
+		`SELECT owner_unit_id, cross_event_id, relevance, fate_score, route, narrative_zh, valence, hop
+		 FROM cross_event_echoes WHERE cross_event_id = ?
+		 ORDER BY hop ASC, owner_unit_id ASC`,
+		crossEventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]CrossEventEcho, 0)
+	for rows.Next() {
+		var e CrossEventEcho
+		if scanErr := rows.Scan(&e.OwnerUnitID, &e.CrossEventID, &e.Relevance, &e.FateScore, &e.Route, &e.NarrativeZH, &e.Valence, &e.Hop); scanErr != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// bindBloodFeudAlliance 据黑吃黑的衍生网络生成一个 blood_feud 社会客体：把受害者 + 其密友绑成对抗背叛者的同盟
+// （设计 §2.7「撮合系统据 CROSS_DERIVED 生成 blood_feud 社会客体把 A、C 绑成对抗 B 的同盟」）。
+// 直接在本文件内经既有 socialobject helper 落客体 + 绑成员（受害者+密友），不走 arbitration（同盟是「共担血债」的天然结盟，
+// 非稀缺名额争夺，无需择人；反 P2W 不涉及——成员资格只由「是否被这桩血债牵动」决定，无 wallet/billing）。
+//
+// label 绑 (crossEventID|betrayer)：同一桩背叛幂等复用同一社会客体 id（衍生网络扩大时增量加成员、不重复建客体）。
+// worldID 空 / 无密友 → no-op（社会客体需世界域；只有受害者一人不成「同盟」）。best-effort：失败吞错，绝不阻断主结算。
+func (service *Service) bindBloodFeudAlliance(ctx context.Context, worldID string, crossEventID string, victimID string, betrayerID string, friends []string) {
+	if service == nil || service.db == nil {
+		return
+	}
+	worldID = strings.TrimSpace(worldID)
+	if worldID == "" || len(friends) == 0 || victimID == "" {
+		return // 无世界域 / 只受害者一人 → 不成同盟
+	}
+	// 成员集合 = 受害者 + 衍生密友（去重，排除背叛者本人——背叛者不会入对抗自己的同盟）。
+	members := make([]string, 0, len(friends)+1)
+	seen := map[string]bool{}
+	for _, id := range append([]string{victimID}, friends...) {
+		id = strings.TrimSpace(id)
+		if id == "" || id == betrayerID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		members = append(members, id)
+	}
+	if len(members) < bloodFeudMatchMinAllies {
+		return // 不足两人不成同盟
+	}
+	sortStrings(members) // 确定性成员顺序
+
+	// label 绑 (crossEventID|betrayer)：同一桩黑吃黑复用同一确定性社会客体 id（幂等：衍生网络扩大时增量加成员）。
+	label := "血仇·" + betrayerID + "·" + crossEventID
+	key := worldID + "|" + bloodFeudSocialObjectKind + "|" + label
+	objID, err := socialobject.Create(ctx, service.db, socialobject.SocialObject{
+		ID: socialObjectID(key), WorldID: worldID, Kind: bloodFeudSocialObjectKind, Label: label,
+	})
+	if err != nil {
+		return // best-effort：建客体失败即放弃同盟（衍生卡/echo 已落，主结算不受影响）
+	}
+	for _, uid := range members {
+		// Score=「被这桩血债牵动的强度」：受害者满分；密友按其对受害者的关系强度归一（恨得越深/爱得越切越铁）。
+		score := 1.0
+		if uid != victimID {
+			score = service.bloodFeudAllyScore(ctx, uid, victimID)
+		}
+		if err := socialobject.AddMember(ctx, service.db, socialobject.Member{ObjectID: objID, UnitID: uid, Score: score}); err != nil {
+			continue // best-effort：单个成员绑定失败只跳过，不影响其余成员
+		}
+		// 留痕（流程事件，非状态变更）：social_objects 非单位，RelatedUnitID 留空（回退 owner），object_id 入 payload。
+		_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+			SessionID: worldID, OwnerUnitID: uid,
+			Code: events.ReasonSocialObjectBind, Category: events.CategoryFate,
+			Payload: map[string]any{"object_id": objID, "kind": bloodFeudSocialObjectKind, "label": label, "score": score, "against": betrayerID},
+			WorldID: worldID,
+		})
+	}
+}
+
+// bloodFeudAllyScore 把一名密友对受害者的关系强度归一为 [0,1] 的「入伙血仇同盟意愿」（关系越强越铁）。
+// best-effort：读不到关系行返回保守 0.5（既然已被衍生发现，至少有基本牵动）。确定性、纯读。
+func (service *Service) bloodFeudAllyScore(ctx context.Context, allyID, victimID string) float64 {
+	if service == nil || service.db == nil {
+		return 0.5
+	}
+	var trust, fear, affection, rivalry float64
+	err := service.db.QueryRowContext(ctx,
+		`SELECT trust, fear, affection, rivalry FROM relations WHERE source_unit_id = ? AND target_unit_id = ?`,
+		allyID, victimID,
+	).Scan(&trust, &fear, &affection, &rivalry)
+	if err != nil {
+		return 0.5
+	}
+	v := relationIntensity(trust, fear, affection, rivalry) / relationIntensityNorm
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
