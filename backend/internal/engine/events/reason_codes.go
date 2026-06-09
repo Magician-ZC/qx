@@ -79,6 +79,10 @@ const (
 	ReasonPersonalityDrift   ReasonCode = "PERSONALITY_DRIFT"
 	ReasonLoyaltyGain        ReasonCode = "LOYALTY_GAIN"
 	ReasonLoyaltyStrain      ReasonCode = "LOYALTY_STRAIN"
+	// 阵营开放世界 F2：道德漂移（数值道德轴据近期道德效价小步迁移，流程留痕，非保护字段不走 Mutator）；
+	// 阵营改换（漂移满足全部隐藏条件后的概率性涌现切换，流程留痕 + 经命运卡 surface）。
+	ReasonMoralDrift    ReasonCode = "MORAL_DRIFT"
+	ReasonFactionSwitch ReasonCode = "FACTION_SWITCH"
 
 	// 治理处置（举报闭环 ResolveModerationReport，经 status.Mutator 改保护字段并留痕）。
 	// MODERATION_WARNING：警告——对被举报单位小幅下调士气示警；MODERATION_BAN：封禁——重罚士气与忠诚。
@@ -175,19 +179,19 @@ const (
 	ReasonDungeonCharterTimeout ReasonCode = "DUNGEON_CHARTER_TIMEOUT"
 
 	// 跨玩家/事件耦合补全（设计 事件耦合与跨玩家关联 §1.4/§1.6/§2.3-2.7）。均流程事件（EmitProcessEvent，不改保护字段）。
-	ReasonPropagationRelayed    ReasonCode = "PROPAGATION_RELAYED"     // 事件沿关系图向外多跳传播的一跳（0.6^hop 衰减失真，§1.4）
-	ReasonInboxEnqueued         ReasonCode = "INBOX_ENQUEUED"         // 一件事被收进某角色的命运收件箱（可溯源到具体锚命中，§1.6）
-	ReasonInboxExpiredFallback  ReasonCode = "INBOX_EXPIRED_FALLBACK" // 待决策超时未应答，过期兜底转回响卡
-	ReasonAnchorDecayed         ReasonCode = "ANCHOR_DECAYED"         // 一根相关性锚随时间衰减/失效
-	ReasonCrossEncounter        ReasonCode = "CROSS_ENCOUNTER"        // 跨玩家：结识（trust/affection 本侧增量）
-	ReasonCrossAlliance         ReasonCode = "CROSS_ALLIANCE"         // 跨玩家：结盟
-	ReasonCrossTrade            ReasonCode = "CROSS_TRADE"            // 跨玩家：交易
-	ReasonCrossMarriage         ReasonCode = "CROSS_MARRIAGE"         // 跨玩家：联姻（血脉绑定）
-	ReasonCrossVendetta         ReasonCode = "CROSS_VENDETTA"         // 跨玩家：复仇宣告
-	ReasonCrossWarDraw          ReasonCode = "CROSS_WAR_DRAW"         // 跨玩家：开战（势力级卷入）
-	ReasonCrossConsentPending   ReasonCode = "CROSS_CONSENT_PENDING"  // 跨玩家高后果交互挂起，等离线 A 的角色自治回应
-	ReasonCrossConsentTimeout   ReasonCode = "CROSS_CONSENT_TIMEOUT"  // 跨玩家同意超时（按档失效/宪章兜底回应）
-	ReasonCrossDerived          ReasonCode = "CROSS_DERIVED"          // 跨玩家事件沿关系图衍生到第三方（你信任的人被偷袭了）
+	ReasonPropagationRelayed   ReasonCode = "PROPAGATION_RELAYED"    // 事件沿关系图向外多跳传播的一跳（0.6^hop 衰减失真，§1.4）
+	ReasonInboxEnqueued        ReasonCode = "INBOX_ENQUEUED"         // 一件事被收进某角色的命运收件箱（可溯源到具体锚命中，§1.6）
+	ReasonInboxExpiredFallback ReasonCode = "INBOX_EXPIRED_FALLBACK" // 待决策超时未应答，过期兜底转回响卡
+	ReasonAnchorDecayed        ReasonCode = "ANCHOR_DECAYED"         // 一根相关性锚随时间衰减/失效
+	ReasonCrossEncounter       ReasonCode = "CROSS_ENCOUNTER"        // 跨玩家：结识（trust/affection 本侧增量）
+	ReasonCrossAlliance        ReasonCode = "CROSS_ALLIANCE"         // 跨玩家：结盟
+	ReasonCrossTrade           ReasonCode = "CROSS_TRADE"            // 跨玩家：交易
+	ReasonCrossMarriage        ReasonCode = "CROSS_MARRIAGE"         // 跨玩家：联姻（血脉绑定）
+	ReasonCrossVendetta        ReasonCode = "CROSS_VENDETTA"         // 跨玩家：复仇宣告
+	ReasonCrossWarDraw         ReasonCode = "CROSS_WAR_DRAW"         // 跨玩家：开战（势力级卷入）
+	ReasonCrossConsentPending  ReasonCode = "CROSS_CONSENT_PENDING"  // 跨玩家高后果交互挂起，等离线 A 的角色自治回应
+	ReasonCrossConsentTimeout  ReasonCode = "CROSS_CONSENT_TIMEOUT"  // 跨玩家同意超时（按档失效/宪章兜底回应）
+	ReasonCrossDerived         ReasonCode = "CROSS_DERIVED"          // 跨玩家事件沿关系图衍生到第三方（你信任的人被偷袭了）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -245,6 +249,8 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCharterActivated, Category: CategoryPlayer, DisplayName: "宪章生效", DefaultReasonText: "你不在的时候，她将依你立下的章程自行其是", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonCharterUpdated, Category: CategoryPlayer, DisplayName: "宪章变更", DefaultReasonText: "你重新拟定了她离场后的行事章程", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonAmbitionShift, Category: CategoryLifecycle, DisplayName: "野心流转", DefaultReasonText: "经历沉淀，她内心所求悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonMoralDrift, Category: CategoryLifecycle, DisplayName: "道德流转", DefaultReasonText: "经历沉淀，她的道德取向悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonFactionSwitch, Category: CategoryLifecycle, DisplayName: "改换门庭", DefaultReasonText: "她的心，渐渐偏离了旧阵营，认了新的归属", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
 		{Code: ReasonRedlineTrip, Category: CategoryLifecycle, DisplayName: "触碰红线", DefaultReasonText: "一桩行为越过了她（或你）立下的红线", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonOOCRejected, Category: CategoryLifecycle, DisplayName: "动机被拦", DefaultReasonText: "因无法解释的动机被拦下，回退到稳妥选择", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 

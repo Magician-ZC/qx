@@ -1870,6 +1870,10 @@ func buildDecisionPrompt(
 	if tag, _ := AmbitionBiasOf(*actor).Dominant(); tag != "" {
 		fmt.Fprintf(&builder, "你内心最强的渴望: %s\n", ambitionTagDisplay(tag))
 	}
+	// 阵营道德取向（F2：unit.Faction+MoralAlignment→阵营信条+当下道德偏向）：让自治决策偏向符合本阵营道德基准的行为。
+	if moralCtx := MoralDecisionContext(*actor); moralCtx != "" {
+		fmt.Fprintf(&builder, "你的道德取向: %s\n", moralCtx)
+	}
 	// 离线宪章上下文（长期图景 + 社交授权）：玩家不在场时单位据此长效自治。红线另经归因校验强制，不在此重复。
 	if charterCtx := charterContextForUnit(&state, actor.ID); charterCtx != "" {
 		fmt.Fprintf(&builder, "%s\n", charterCtx)

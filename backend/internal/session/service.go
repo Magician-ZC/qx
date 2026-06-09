@@ -961,6 +961,10 @@ func (service *Service) settleAutonomyAtDeploymentBoundary(ctx context.Context, 
 		_ = service.reassessGoalIfDue(ctx, state, record, turn)
 		// 自然衰老人格漂移（确定性 FNV；步长 ≤0.03/维、单日 ≤0.10/维；经 PERSONALITY_DRIFT 流程事件留痕）。
 		_, _ = service.ApplyPersonalityDrift(ctx, state.ID, record.ID, DriftReasonAging, turn)
+		// 阵营道德轴漂移（F2：据本回合道德效价信号确定性漂移 MoralAlignment，best-effort）；
+		// 漂移先把连击/道德轴算好，再判阵营切换（QUNXIANG_FACTION_SWITCH 默认关，满足隐藏条件才概率切→命运卡）。
+		_, _ = service.settleMoralDrift(ctx, state.ID, record, turn)
+		_ = service.maybeSwitchFaction(ctx, state.ID, record, turn)
 	}
 }
 

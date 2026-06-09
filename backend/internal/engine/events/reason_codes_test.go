@@ -35,6 +35,7 @@ func TestLifecycleReasonCodesRegistered(t *testing.T) {
 	want := []ReasonCode{
 		ReasonCharacterBorn, ReasonCharacterDied, ReasonVengeanceFulfilled,
 		ReasonFactionCollapse, ReasonPersonalityDrift, ReasonLoyaltyGain, ReasonLoyaltyStrain,
+		ReasonMoralDrift, ReasonFactionSwitch,
 	}
 	for _, code := range want {
 		def, ok := Lookup(code)

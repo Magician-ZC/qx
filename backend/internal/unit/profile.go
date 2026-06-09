@@ -164,16 +164,17 @@ type Inventory struct {
 
 // Profile 结构体用于承载该模块的核心数据。
 type Profile struct {
-	Identity       Identity               `json:"identity"`
-	Stats          Stats                  `json:"stats"`
-	Skills         SkillSet               `json:"skills"`
-	Personality    Personality            `json:"personality"`
-	Ambition       Ambition               `json:"ambition,omitempty"`        // 六维野心向量；可被人格漂移调节，供离线自治目标重估参考
-	Faction        string                 `json:"faction,omitempty"`         // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
-	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"` // 3 维数值道德轴；F2 阵营切换输入、自治偏置
-	Social         SocialState            `json:"social"`
-	Status         Status                 `json:"status"`
-	Memory         MemoryProfile          `json:"memory"`
+	Identity         Identity               `json:"identity"`
+	Stats            Stats                  `json:"stats"`
+	Skills           SkillSet               `json:"skills"`
+	Personality      Personality            `json:"personality"`
+	Ambition         Ambition               `json:"ambition,omitempty"`           // 六维野心向量；可被人格漂移调节，供离线自治目标重估参考
+	Faction          string                 `json:"faction,omitempty"`            // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
+	MoralAlignment   faction.MoralAlignment `json:"moral_alignment,omitempty"`    // 3 维数值道德轴；F2 阵营切换输入、自治偏置
+	MoralDriftStreak int                    `json:"moral_drift_streak,omitempty"` // F2 阵营切换隐藏条件②：主导阵营持续背离当前阵营的连击计数
+	Social           SocialState            `json:"social"`
+	Status           Status                 `json:"status"`
+	Memory           MemoryProfile          `json:"memory"`
 }
 
 // Record 结构体用于承载该模块的核心数据。
@@ -193,10 +194,15 @@ type Record struct {
 	// 非保护字段（仿 Ambition，直接读写、不走 StatusMutator），随 profile blob 持久化。
 	// omitempty + 内嵌零值省略：旧存档/既有单位无此字段反序列化为零值道德轴（无明显倾向），向后兼容、零影响。
 	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"`
-	Social         SocialState            `json:"social"`
-	Status         Status                 `json:"status"`
-	Memory         MemoryProfile          `json:"memory"`
-	Inventory      Inventory              `json:"inventory"`
+	// MoralDriftStreak 是「漂移后主导阵营持续背离当前阵营的连击计数」——F2 阵营切换隐藏条件②的持久化锚
+	// （需持续 ≥ switchStreak 回合背离才有资格切换）。每个回合边界结算：主导阵营 != 当前阵营则 +1，否则归 0。
+	// 非保护字段（仿 Ambition/MoralAlignment，直接读写、不走 StatusMutator），随 profile blob 持久化。
+	// omitempty：旧存档/既有单位无此字段反序列化为 0（无背离连击），向后兼容、零影响。
+	MoralDriftStreak int           `json:"moral_drift_streak,omitempty"`
+	Social           SocialState   `json:"social"`
+	Status           Status        `json:"status"`
+	Memory           MemoryProfile `json:"memory"`
+	Inventory        Inventory     `json:"inventory"`
 	// Pinned 标记「不可自动处置」的角色（如传家血脉/受保护单位）——离线自治逻辑绝不自动卖/弃/送走。
 	// omitempty：旧存档无此字段反序列化为 false，向后兼容。
 	Pinned bool `json:"pinned,omitempty"`
@@ -217,28 +223,30 @@ func (record Record) DisplayName() string {
 // Profile 导出单位可序列化的档案视图。
 func (record Record) Profile() Profile {
 	return Profile{
-		Identity:       record.Identity,
-		Stats:          record.Stats,
-		Skills:         record.Skills,
-		Personality:    record.Personality,
-		Ambition:       record.Ambition,
-		Faction:        record.Faction,
-		MoralAlignment: record.MoralAlignment,
-		Social:         record.Social,
-		Status:         record.Status,
-		Memory:         record.Memory,
+		Identity:         record.Identity,
+		Stats:            record.Stats,
+		Skills:           record.Skills,
+		Personality:      record.Personality,
+		Ambition:         record.Ambition,
+		Faction:          record.Faction,
+		MoralAlignment:   record.MoralAlignment,
+		MoralDriftStreak: record.MoralDriftStreak,
+		Social:           record.Social,
+		Status:           record.Status,
+		Memory:           record.Memory,
 	}
 }
 
 // profileDocument 结构体用于承载该模块的核心数据。
 type profileDocument struct {
-	Identity       Identity               `json:"identity"`
-	Stats          Stats                  `json:"stats"`
-	Skills         SkillSet               `json:"skills"`
-	Social         SocialState            `json:"social"`
-	Memory         MemoryProfile          `json:"memory"`
-	Ambition       Ambition               `json:"ambition,omitempty"`        // 六维野心向量（自发行为引力源），随 profile blob 持久化
-	Faction        string                 `json:"faction,omitempty"`         // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
-	MoralAlignment faction.MoralAlignment `json:"moral_alignment,omitempty"` // 3 维数值道德轴；F2 阵营切换输入、自治偏置
-	Pinned         bool                   `json:"pinned,omitempty"`          // 角色级「不可自动处置」标记（离线自治绝不自动卖/弃/送走）
+	Identity         Identity               `json:"identity"`
+	Stats            Stats                  `json:"stats"`
+	Skills           SkillSet               `json:"skills"`
+	Social           SocialState            `json:"social"`
+	Memory           MemoryProfile          `json:"memory"`
+	Ambition         Ambition               `json:"ambition,omitempty"`           // 六维野心向量（自发行为引力源），随 profile blob 持久化
+	Faction          string                 `json:"faction,omitempty"`            // 所属阵营（freedom/order/chaos），阵营开放世界 F1 引入
+	MoralAlignment   faction.MoralAlignment `json:"moral_alignment,omitempty"`    // 3 维数值道德轴；F2 阵营切换输入、自治偏置
+	MoralDriftStreak int                    `json:"moral_drift_streak,omitempty"` // F2 阵营切换隐藏条件②：主导阵营持续背离当前阵营的连击计数
+	Pinned           bool                   `json:"pinned,omitempty"`             // 角色级「不可自动处置」标记（离线自治绝不自动卖/弃/送走）
 }
