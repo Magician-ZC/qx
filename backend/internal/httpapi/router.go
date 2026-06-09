@@ -984,6 +984,111 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"id": id})
 	})
 
+	// ===== 客户管理（玩家账户）：列表/搜索/聚合详情 + 封禁/擦除/退款 =====
+	// 含 PII，读端套 opsWriter(operator+)；高危写(封禁/擦除/退款)套 opsAdmin(fail-closed)+auditOps。
+	// 列/搜索账户。q 模糊匹配 username/display_name 或 id 精确；limit 默认 100。
+	router.GET("/api/admin/clients", opsWriter, func(c *gin.Context) {
+		if deps.Accounts == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account service unavailable"})
+			return
+		}
+		limit := 100
+		if v := strings.TrimSpace(c.Query("limit")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
+			}
+		}
+		users, err := deps.Accounts.ListUsers(c.Request.Context(), c.Query("q"), limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"clients": users})
+	})
+
+	// 单个客户聚合详情：账号 + 角色/命运进度 + 充值权益 + 实名/防沉迷状态。各子项 best-effort，单项失败不阻断整体。
+	router.GET("/api/admin/clients/:id", opsWriter, func(c *gin.Context) {
+		if deps.Accounts == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account service unavailable"})
+			return
+		}
+		id := c.Param("id")
+		user, err := deps.Accounts.GetByID(c.Request.Context(), id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		characters, _ := newSessionService().ListCharactersByAccount(c.Request.Context(), id)
+		complianceStatus, _ := complianceSvc.GetStatus(c.Request.Context(), id)
+		entitlements := []billing.Entitlement{}
+		if billingSvc != nil {
+			if ents, eErr := billingSvc.ListEntitlements(c.Request.Context(), id); eErr == nil {
+				entitlements = ents
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"account":      user,
+			"characters":   characters,
+			"entitlements": entitlements,
+			"compliance":   complianceStatus,
+		})
+	})
+
+	// 封禁/解封（admin+，fail-closed）。body {banned:bool}。封禁后该账户拒登录、既有 token 失效。
+	router.POST("/api/admin/clients/:id/ban", opsAdmin, func(c *gin.Context) {
+		if deps.Accounts == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account service unavailable"})
+			return
+		}
+		var body struct {
+			Banned bool `json:"banned"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := deps.Accounts.SetBanned(c.Request.Context(), c.Param("id"), body.Banned); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		action := "client_unban"
+		if body.Banned {
+			action = "client_ban"
+		}
+		auditOps(opsStore, c, action, c.Param("id"))
+		c.JSON(http.StatusOK, gin.H{"ok": true, "banned": body.Banned})
+	})
+
+	// 按账户数据擦除（admin+，fail-closed，不可逆）：擦该账户全部 session 的对话/记忆/审计/举报。
+	router.POST("/api/admin/clients/:id/erase", opsAdmin, func(c *gin.Context) {
+		erased, err := newSessionService().EraseAccountPrivateData(c.Request.Context(), c.Param("id"))
+		if err != nil && erased == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "client_erase", c.Param("id"))
+		c.JSON(http.StatusOK, gin.H{"erased_sessions": erased})
+	})
+
+	// 退款撤权益（admin+，fail-closed）：body {sku_id} 撤指定 SKU，空则撤该账户全部 active 权益。billing 关时 503。
+	router.POST("/api/admin/clients/:id/refund", opsAdmin, func(c *gin.Context) {
+		if billingSvc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "billing disabled"})
+			return
+		}
+		var body struct {
+			SKUID string `json:"sku_id"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		n, err := billingSvc.RevokeEntitlement(c.Request.Context(), c.Param("id"), body.SKUID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		auditOps(opsStore, c, "client_refund", c.Param("id")+":"+body.SKUID)
+		c.JSON(http.StatusOK, gin.H{"revoked": n})
+	})
+
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
 	// 漏斗端点是 ops 敏感只读聚合，套 opsTokenGuard；POST /api/leads 是 landing 公开提交，保持公开（不守卫）。
 	// 漏斗路由在 leads.go 内注册，这里用路径作用域的前置中间件守卫，避免影响公开的 /api/leads。

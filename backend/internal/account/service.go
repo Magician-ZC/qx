@@ -66,6 +66,7 @@ func (service *Service) EnsureSchema(ctx context.Context) error {
 		username TEXT NOT NULL UNIQUE,
 		display_name TEXT NOT NULL,
 		password_hash TEXT NOT NULL,
+		banned INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -87,6 +88,7 @@ func (service *Service) EnsureSchema(ctx context.Context) error {
 			username VARCHAR(191) NOT NULL UNIQUE,
 			display_name VARCHAR(191) NOT NULL,
 			password_hash VARCHAR(191) NOT NULL,
+			banned TINYINT NOT NULL DEFAULT 0,
 			created_at VARCHAR(64) NOT NULL DEFAULT (CURRENT_TIMESTAMP),
 			updated_at VARCHAR(64) NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -111,7 +113,35 @@ func (service *Service) EnsureSchema(ctx context.Context) error {
 			return fmt.Errorf("ensure account schema: %w", err)
 		}
 	}
+	// 存量库补 banned 列（fresh 库 CREATE TABLE 已含；本步对已建表的旧库幂等补列，三驱动）。best-effort：列已存在的报错吞掉。
+	service.ensureBannedColumn(ctx)
 	return nil
+}
+
+// ensureBannedColumn 给存量 accounts_users 幂等补 banned 列（客户管理封禁用）。列已存在时各驱动报「duplicate/exists」，吞掉。
+// fresh 库的 CREATE TABLE 已含该列，此 ALTER 即 no-op（报错被吞）。
+func (service *Service) ensureBannedColumn(ctx context.Context) {
+	if service == nil || service.db == nil {
+		return
+	}
+	alter := `ALTER TABLE accounts_users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0`
+	if dbdialect.IsMySQL(service.db) {
+		alter = `ALTER TABLE accounts_users ADD COLUMN banned TINYINT NOT NULL DEFAULT 0`
+	}
+	// 列已存在/不支持 IF NOT EXISTS 的驱动会报错——best-effort 吞掉（幂等）。
+	_, _ = service.db.ExecContext(ctx, alter)
+}
+
+// isBanned 查某账户是否被封禁（客户管理封禁后，Login/CurrentUser 据此拒绝）。查询失败保守按未封禁（不误锁正常用户）。
+func (service *Service) isBanned(ctx context.Context, userID string) bool {
+	if service == nil || service.db == nil {
+		return false
+	}
+	var banned int
+	if err := service.db.QueryRowContext(ctx, `SELECT banned FROM accounts_users WHERE id = ?`, userID).Scan(&banned); err != nil {
+		return false
+	}
+	return banned != 0
 }
 
 // Register 注册新用户并写入账户表。
@@ -208,6 +238,10 @@ func (service *Service) Login(ctx context.Context, username string, password str
 	if compareErr := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); compareErr != nil {
 		return LoginResult{}, fmt.Errorf("invalid username or password")
 	}
+	// 封禁拦截：被客户管理封禁的账户拒绝登录（密码正确也不放行）。
+	if service.isBanned(ctx, user.ID) {
+		return LoginResult{}, fmt.Errorf("account is banned")
+	}
 
 	token, err := generateToken()
 	if err != nil {
@@ -282,6 +316,10 @@ func (service *Service) CurrentUser(ctx context.Context, token string) (User, er
 	user.UpdatedAt, err = parseAccountTime(updatedAtRaw)
 	if err != nil {
 		return User{}, err
+	}
+	// 封禁拦截：被封禁账户的既有 token 立即失效（即便会话未过期）。
+	if service.isBanned(ctx, user.ID) {
+		return User{}, fmt.Errorf("account is banned")
 	}
 	return user, nil
 }

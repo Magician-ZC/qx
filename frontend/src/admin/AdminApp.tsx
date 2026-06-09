@@ -35,6 +35,7 @@ import { GmEventPanel } from "./GmEventPanel";
 import { SeasonPanel } from "./SeasonPanel";
 import { ContentPanel } from "./ContentPanel";
 import { MonitoringPanel } from "./MonitoringPanel";
+import { ClientPanel } from "./ClientPanel";
 
 // AdminTab 是左导航的页签标识。
 type AdminTab =
@@ -46,7 +47,8 @@ type AdminTab =
   | "seasons"
   | "content"
   | "monitoring"
-  | "operators";
+  | "operators"
+  | "clients";
 
 const TABS: { id: AdminTab; label: string }[] = [
   { id: "flags", label: "运行时开关" },
@@ -58,6 +60,7 @@ const TABS: { id: AdminTab; label: string }[] = [
   { id: "content", label: "内容运营" },
   { id: "monitoring", label: "监控" },
   { id: "operators", label: "操作者" },
+  { id: "clients", label: "客户管理" },
 ];
 
 // AdminLogin 是 ops-token 登录门：填 token → 存 localStorage（adminApi 持有）→ 进后台。
@@ -171,6 +174,7 @@ export function AdminApp(): JSX.Element {
           {tab === "content" ? <ContentPanel /> : null}
           {tab === "monitoring" ? <MonitoringPanel /> : null}
           {tab === "operators" ? <OperatorPanel /> : null}
+          {tab === "clients" ? <ClientPanel /> : null}
         </main>
       </div>
     </div>

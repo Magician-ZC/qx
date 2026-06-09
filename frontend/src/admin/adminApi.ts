@@ -692,6 +692,109 @@ export async function fetchProductFunnel(days?: number): Promise<ProductFunnelRe
   return request<ProductFunnelReport>(`/api/ops/product-funnel${qs}`);
 }
 
+// ============ ⑦ 客户管理（账户/角色/权益/合规；后端 /api/admin/clients 已接线，读端 operator 级·写端 admin 级） ============
+
+// AdminClient 对齐后端 AdminUser（json tag，全小写键名）：账户标识 + 展示名 + 封禁态 + 创建时间。
+//   - 列表行与详情里的 account 同型。banned=true 表示该账户已被封禁。
+export type AdminClient = {
+  id: string;
+  username: string;
+  display_name: string;
+  banned: boolean;
+  created_at: string;
+};
+
+// ClientCharacter 对齐后端 CharacterSummary（json tag）：该账户名下一个角色（一局命运）的概览。
+//   - session_id/world_id：归属会话与世界；turn：当前回合；hero_name：主角名；life_state：生命状态（如存活/陨落）。
+export type ClientCharacter = {
+  session_id: string;
+  world_id: string;
+  turn: number;
+  hero_name: string;
+  life_state: string;
+  created_at: string;
+  updated_at: string;
+};
+
+// ClientEntitlement 对齐后端 Entitlement（json tag）：该账户的一项充值权益（SKU 授予态）。
+//   - account_id/sku_id：归属账户与 SKU；status：权益状态（如 active/expired/revoked）；granted_at/expires_at：起止时间。
+export type ClientEntitlement = {
+  account_id: string;
+  sku_id: string;
+  status: string;
+  granted_at: string;
+  expires_at: string;
+};
+
+// ClientCompliance 对齐后端 ComplianceStatus（json tag）：该账户的实名/防沉迷合规态。
+//   - realname_verified：是否实名；minor_mode：是否未成年模式；day_bucket：当日时段桶；daily_play_seconds：当日已玩秒数。
+export type ClientCompliance = {
+  account_id: string;
+  birth_date: string;
+  realname_verified: boolean;
+  minor_mode: boolean;
+  day_bucket: string;
+  daily_play_seconds: number;
+};
+
+// ClientDetail 对齐后端 GET /api/admin/clients/:id 返回体：账号 + 角色摘要 + 权益 + 合规四块。
+export type ClientDetail = {
+  account: AdminClient;
+  characters: ClientCharacter[];
+  entitlements: ClientEntitlement[];
+  compliance: ClientCompliance | null;
+};
+
+// listClients 模糊检索客户（GET /api/admin/clients?q=&limit=，q 匹配 username/display_name 或 id 精确，limit 默认 100）。
+// 读端是 operator 级（opsWriter）——未配 ops 鉴权时可能 503，调用方据抛错降级提示（ClientPanel 已做）。
+export async function listClients(q = "", limit = 100): Promise<AdminClient[]> {
+  const params = new URLSearchParams();
+  if (q.trim() !== "") params.set("q", q.trim());
+  params.set("limit", String(limit));
+  const data = await request<{ clients?: AdminClient[] }>(`/api/admin/clients?${params.toString()}`);
+  return data.clients ?? [];
+}
+
+// getClientDetail 拉单个客户详情（GET /api/admin/clients/:id）：账号 + 角色 + 权益 + 合规。
+export async function getClientDetail(id: string): Promise<ClientDetail> {
+  const data = await request<ClientDetail>(`/api/admin/clients/${encodeURIComponent(id)}`);
+  return {
+    account: data.account ?? { id, username: "", display_name: "", banned: false, created_at: "" },
+    characters: data.characters ?? [],
+    entitlements: data.entitlements ?? [],
+    compliance: data.compliance ?? null,
+  };
+}
+
+// setClientBanned 封禁/解封一个账户（POST /api/admin/clients/:id/ban，body {banned}，admin 级）。返回封禁后的最新态。
+export async function setClientBanned(id: string, banned: boolean): Promise<boolean> {
+  const data = await request<{ ok?: boolean; banned?: boolean }>(
+    `/api/admin/clients/${encodeURIComponent(id)}/ban`,
+    { method: "POST", body: JSON.stringify({ banned }) },
+  );
+  return data.banned ?? banned;
+}
+
+// eraseClientData 按账户不可逆擦除其全部会话数据（POST /api/admin/clients/:id/erase，admin 级）。返回被擦除的会话数。
+export async function eraseClientData(id: string): Promise<number> {
+  const data = await request<{ erased_sessions?: number }>(
+    `/api/admin/clients/${encodeURIComponent(id)}/erase`,
+    { method: "POST" },
+  );
+  return data.erased_sessions ?? 0;
+}
+
+// refundClient 撤销该账户权益/退款（POST /api/admin/clients/:id/refund，body {sku_id?}，admin 级）。
+// 不传 sku_id 表示撤销全部权益。billing 关闭时后端返 503。返回被撤销的权益条数。
+export async function refundClient(id: string, skuId?: string): Promise<number> {
+  const body = skuId && skuId.trim() !== "" ? JSON.stringify({ sku_id: skuId.trim() }) : JSON.stringify({});
+  const data = await request<{ revoked?: number }>(
+    `/api/admin/clients/${encodeURIComponent(id)}/refund`,
+    { method: "POST", body },
+  );
+  return data.revoked ?? 0;
+}
+
 // errText 把错误归一为可展示文案，鉴权类错误（401/403）额外提示填/换 X-Ops-Token。
 export function errText(err: unknown): string {
   if (err instanceof AdminAPIError) {
