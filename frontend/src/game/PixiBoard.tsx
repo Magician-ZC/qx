@@ -14,6 +14,7 @@ type Props = {
   onOpenUnitChat?: (unitID: string) => void;
   nowMs?: number;
   zoom?: number;
+  spectator?: boolean;
   executionMarkers?: Array<{
     unitID: string;
     status: "started" | "completed";
@@ -35,6 +36,7 @@ export function PixiBoard({
   onOpenUnitChat = () => undefined,
   nowMs = Date.now(),
   zoom = 1,
+  spectator = false,
   executionMarkers = [],
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -49,6 +51,7 @@ export function PixiBoard({
     onOpenUnitChat,
     nowMs,
     zoom,
+    spectator,
     executionMarkers,
   });
 
@@ -62,6 +65,7 @@ export function PixiBoard({
     onOpenUnitChat,
     nowMs,
     zoom,
+    spectator,
     executionMarkers,
   };
 
@@ -92,7 +96,7 @@ export function PixiBoard({
   useEffect(() => {
     // 会话数据变更时只触发 scene.render，不重新挂载 Pixi 应用。
     sceneRef.current?.render(latestModelRef.current);
-  }, [session, commanderFactionID, fogPerspectiveUnitID, selectedTileCoord, onTileClick, onOpenDialogues, onOpenUnitChat, nowMs, zoom, executionMarkers]);
+  }, [session, commanderFactionID, fogPerspectiveUnitID, selectedTileCoord, onTileClick, onOpenDialogues, onOpenUnitChat, nowMs, zoom, spectator, executionMarkers]);
 
   return <div ref={containerRef} className="pixi-board" aria-label="一念单局战场" />;
 }

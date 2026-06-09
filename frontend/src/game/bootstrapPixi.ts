@@ -151,6 +151,8 @@ type SceneModel = {
   onOpenUnitChat?: (unitID: string) => void;
   nowMs?: number;
   zoom?: number;
+  // spectator=true（命运主世界全屏观战）：跳过战棋专属 HUD（回合卡/地形图例），地图更纯净。
+  spectator?: boolean;
   executionMarkers?: Array<{
     unitID: string;
     status: "started" | "completed";
@@ -321,8 +323,12 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
     drawStructures(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
     drawBattlefieldRemnants(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
     drawUnits(unitLayer, { ...latest, onTileClick: handleTileClick }, placement, width, height);
-    hudLayer.addChild(drawTurnCard(width, height, latest.session));
-    hudLayer.addChild(drawTerrainLegend(width, latest.session));
+    // 观战模式（命运主世界全屏地图）：不画战棋专属的「回合卡 / 地形图例」HUD——那是部署/执行战棋概念，
+    // 命运观战里只会变成压在地图上的无关浮窗。spectator=false（战棋视图）时照旧显示。
+    if (!latest.spectator) {
+      hudLayer.addChild(drawTurnCard(width, height, latest.session));
+      hudLayer.addChild(drawTerrainLegend(width, latest.session));
+    }
     renderFrame();
   };
 
@@ -456,9 +462,7 @@ function drawBackdrop(width: number, height: number): Container {
   shell.drawRoundedRect(0, 0, width, height, 22);
   shell.endFill();
 
-  shell.beginFill(palette.ember, 0.07);
-  shell.drawEllipse(width * 0.8, height * 0.2, width * 0.3, height * 0.22);
-  shell.endFill();
+  // （原先这里画一个暖色装饰椭圆光晕；在全屏世界地图上会变成一坨突兀的怪斑，已移除。）
 
   shell.lineStyle({
     color: palette.panelLine,

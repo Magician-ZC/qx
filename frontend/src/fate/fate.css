@@ -661,11 +661,13 @@
   cursor: pointer;
   box-shadow: 0 4px 14px rgba(60, 44, 27, 0.2);
 }
-/* 全屏态下「换个账号」浮到左上角。 */
+/* 全屏态下「换个账号」浮到左上角（基样式有 right:16，这里必须 unset 否则 left+right 拉成全宽横条）。 */
 .fate-play-fullscreen .fate-restart {
   position: fixed;
   top: 14px;
   left: 14px;
+  right: auto;
+  width: auto;
   z-index: 21;
 }
 

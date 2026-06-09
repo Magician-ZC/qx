@@ -36,6 +36,30 @@ function factionNameZH(id: string): string {
   return FACTION_NAME_ZH[key] ?? (id ?? "").trim();
 }
 
+// TERRAIN_NAME_ZH 把地形代码译成中文（点格子时展示「这是什么地方」）。未知回落原码。
+const TERRAIN_NAME_ZH: Record<string, string> = {
+  plains: "平原",
+  forest: "森林",
+  mountain: "山地",
+  river: "河流",
+  river_valley: "河谷",
+  grassland: "草原",
+  desert: "荒漠",
+  swamp: "沼泽",
+  ruins: "废墟",
+  village: "村庄",
+  city: "城市",
+  snowfield: "雪原",
+  road: "道路",
+};
+
+function terrainNameZH(code: string): string {
+  return TERRAIN_NAME_ZH[(code ?? "").trim().toLowerCase()] ?? (code ?? "").trim() ?? "未知之地";
+}
+
+// 城镇类地形（点击展示「这里住着谁」名单）。
+const TOWN_TERRAINS = new Set(["city", "village"]);
+
 // BOARD_POLL_MS：观战自身轮询间隔。她在执行阶段被唤醒移动后，board 至多滞后这一拍即追平。
 // 取较慢节奏（避免高频拉整快照增成本）；父层 refreshSignal 才是「这拍刚跑完，立刻看她在哪」的精确刷新。
 const BOARD_POLL_MS = 8000;
@@ -43,11 +67,13 @@ const BOARD_POLL_MS = 8000;
 // 「这是谁」只读浮卡的内联样式（墨色宣纸调，叠在 PixiBoard 之上）。本文件不可改 css，故内联。
 const whoCardStyle: React.CSSProperties = {
   position: "absolute",
-  top: 12,
-  left: 12,
-  zIndex: 5,
-  maxWidth: 240,
-  padding: "10px 14px",
+  bottom: 16,
+  left: 16,
+  zIndex: 8,
+  maxWidth: 280,
+  maxHeight: "44vh",
+  overflowY: "auto",
+  padding: "12px 16px",
   borderRadius: 10,
   background: "rgba(250, 244, 232, 0.96)",
   border: "1px solid rgba(120, 90, 50, 0.4)",
@@ -115,20 +141,30 @@ function allUnitsOf(snap: SessionSnapshot | null): BattleUnit[] {
   ];
 }
 
-// WhoInfo 是只读浮卡要展示的「这是谁」——名字 + 称谓（lineage）+ 阵营 + 是否就是她。
-type WhoInfo = {
+// TileOccupant 是格子上一个角色的简介（名字 + 称谓 + 阵营 + 是否就是她）。
+type TileOccupant = {
   name: string;
   lineage: string;
   faction: string;
   isHer: boolean;
 };
 
+// TilePanel 是点格子弹出的「这是什么地方 + 这里有谁」只读面板内容。
+type TilePanel = {
+  q: number;
+  r: number;
+  terrain: string; // 中文地形名
+  landmark: string; // 地标（如有）
+  isTown: boolean; // 城镇（城市/村庄）——展示「镇上的人」名单
+  occupants: TileOccupant[];
+};
+
 export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
   // selected：当前点选的格子（用于 PixiBoard 高亮 + 浮卡定位锚点）。
   const [selected, setSelected] = useState<{ q: number; r: number } | null>(null);
-  // who：只读「这是谁」浮卡内容；null=不展示。
-  const [who, setWho] = useState<WhoInfo | null>(null);
+  // tile：点格子弹出的「这是什么地方 + 这里有谁」面板内容；null=不展示。
+  const [tile, setTile] = useState<TilePanel | null>(null);
   // mountedRef 守卫异步拉取返回时组件已卸载就不再 setState。
   const mountedRef = useRef(true);
 
@@ -159,22 +195,28 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  // 点格子（观战不下令）：查这格上站的是谁，弹只读浮卡；空格则收起浮卡、清选中。
+  // 点格子（观战不下令）：弹一张只读面板，展示「这是什么地方」（地形 + 地标）+「这里有谁」（占据者名单）。
+  // 城镇（城市/村庄）会把住户当名单列出；空地也展示地形信息（不再是点了没反应）。
   const onTileClick = useCallback(
     (q: number, r: number) => {
-      const units = allUnitsOf(snap);
-      const hit = units.find((u) => u.status.position_q === q && u.status.position_r === r);
-      if (!hit) {
-        setSelected(null);
-        setWho(null);
-        return;
-      }
+      const mapTile = snap?.map?.tiles?.find((t) => t.coord.q === q && t.coord.r === r);
+      const terrainCode = (mapTile?.terrain ?? "").toLowerCase();
+      const occupants: TileOccupant[] = allUnitsOf(snap)
+        .filter((u) => u.status.position_q === q && u.status.position_r === r)
+        .map((u) => ({
+          name: u.identity?.name || u.identity?.nickname || "无名之人",
+          lineage: u.identity?.lineage ?? "",
+          faction: u.faction_id ?? "",
+          isHer: u.id === unitId,
+        }));
       setSelected({ q, r });
-      setWho({
-        name: hit.identity?.name || hit.identity?.nickname || "无名之人",
-        lineage: hit.identity?.lineage ?? "",
-        faction: hit.faction_id ?? "",
-        isHer: hit.id === unitId,
+      setTile({
+        q,
+        r,
+        terrain: terrainNameZH(terrainCode),
+        landmark: mapTile?.landmark ?? "",
+        isTown: TOWN_TERRAINS.has(terrainCode),
+        occupants,
       });
     },
     [snap, unitId],
@@ -192,19 +234,50 @@ export function FateBoard({ sessionId, unitId, refreshSignal }: Props) {
           fogPerspectiveUnitID=""
           selectedTileCoord={selected}
           onTileClick={onTileClick}
+          spectator
+          zoom={1.3}
         />
       </Suspense>
-      {who && (
-        <div style={whoCardStyle} role="dialog" aria-label="这是谁">
-          <button style={whoCardCloseStyle} aria-label="收起" onClick={() => setWho(null)}>
+      {tile && (
+        <div style={whoCardStyle} role="dialog" aria-label="这是什么地方">
+          <button style={whoCardCloseStyle} aria-label="收起" onClick={() => setTile(null)}>
             ×
           </button>
           <div style={whoCardNameStyle}>
-            {who.name}
-            {who.isHer && <span style={{ fontSize: 12, color: "#a83a28", marginLeft: 6 }}>· 就是她</span>}
+            {tile.terrain}
+            {tile.landmark && (
+              <span style={{ fontSize: 12, color: "#8a7556", marginLeft: 6 }}>· {tile.landmark}</span>
+            )}
           </div>
-          {who.lineage && <div style={whoCardLineStyle}>{who.lineage}</div>}
-          {who.faction && <div style={whoCardLineStyle}>心向{factionNameZH(who.faction)}</div>}
+          <div style={whoCardLineStyle}>
+            坐标（{tile.q}, {tile.r}）
+          </div>
+          {tile.occupants.length === 0 ? (
+            <div style={{ ...whoCardLineStyle, marginTop: 8 }}>
+              {tile.isTown ? "镇上此刻无人露面。" : "此地此刻空无一人。"}
+            </div>
+          ) : (
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 12, color: "#6b4a22" }}>
+                {tile.isTown ? `镇上的人（${tile.occupants.length}）` : `这里的人（${tile.occupants.length}）`}
+              </div>
+              {tile.occupants.map((o, i) => (
+                <div key={i} style={{ borderTop: "1px solid rgba(120, 90, 50, 0.16)", paddingTop: 5 }}>
+                  <div style={{ fontSize: 14, color: "#4a3417" }}>
+                    {o.name}
+                    {o.isHer && <span style={{ fontSize: 11, color: "#a83a28", marginLeft: 6 }}>· 就是她</span>}
+                  </div>
+                  {(o.lineage || o.faction) && (
+                    <div style={whoCardLineStyle}>
+                      {o.lineage}
+                      {o.lineage && o.faction ? " · " : ""}
+                      {o.faction ? `心向${factionNameZH(o.faction)}` : ""}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
