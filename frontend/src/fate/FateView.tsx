@@ -5,8 +5,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  advanceFateWorld,
   emitClientAnalytics,
   getFateFeed,
+  getSessionExecutionInProgress,
   getUnitStatus,
   recordPlayerIntervention,
   resolveFateDecision,
@@ -146,6 +148,68 @@ const fateChoiceHintStyle: React.CSSProperties = {
   fontWeight: 400,
 };
 
+// 「她近来经历的」日常 beat 的内联样式（本文件不可改 fate.css，故内联）：灰底小字时间线，
+// 刻意比高光卡更低调——这是她平常活着的一拍，不是值得惊呼的高光，也不是要你拿主意的待决策。
+const lifeBeatListStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  marginTop: 4,
+};
+const lifeBeatItemStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  padding: "7px 11px",
+  borderRadius: 8,
+  background: "rgba(120, 90, 50, 0.06)",
+  borderLeft: "2px solid rgba(140, 110, 70, 0.3)",
+  fontSize: 13,
+  lineHeight: 1.7,
+  color: "#7a6646",
+};
+const lifeBeatDotStyle: React.CSSProperties = {
+  flex: "none",
+  marginTop: 1,
+  color: "#a08a60",
+  opacity: 0.8,
+};
+
+// 「让世界往前走」按钮的内联样式：低调墨色描边按钮，点一下推世界往前一拍（她自己活一段）。
+const advanceWorldBtnStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  marginTop: 6,
+  padding: "8px 16px",
+  border: "1px solid rgba(140, 100, 50, 0.4)",
+  borderRadius: 8,
+  background: "rgba(255, 252, 246, 0.9)",
+  color: "#7a5226",
+  fontFamily: "inherit",
+  fontSize: 13,
+  cursor: "pointer",
+};
+const advanceWorldBtnDisabledStyle: React.CSSProperties = {
+  ...advanceWorldBtnStyle,
+  opacity: 0.55,
+  cursor: "default",
+};
+
+// 「她正在经历」loading 条的内联样式：托梦/推世界后这拍正在世界里执行时的过场提示。
+const livingBannerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "9px 13px",
+  borderRadius: 8,
+  background: "rgba(160, 110, 50, 0.1)",
+  border: "1px solid rgba(160, 110, 50, 0.28)",
+  color: "#7a5226",
+  fontSize: 13,
+  margin: "2px 0 6px",
+};
+
 // 高光卡三键反馈的事件名（设计 GDD §8 核心乐趣度量：玩家一点即埋点，供后端算「惊喜命中率 / OOC 率」）。
 // expected=意料之中、surprise=有点意外但合理（命中惊喜）、ooc=太离谱（疑似失格）。
 const fateReactEventName = {
@@ -249,6 +313,11 @@ export function FateView({ sessionId, unitId }: Props) {
   const [resolving, setResolving] = useState<string>("");
   const [interveneText, setInterveneText] = useState("");
   const [toast, setToast] = useState("");
+  // living=true：托梦/推世界后，这一拍正在世界里执行（她正去经历）。期间禁用托梦框与推进按钮，
+  // 由 runWorldTick 轮询 execution_in_progress 由 true→false（或超时兜底）后解除并刷新 feed/状态卡。
+  const [living, setLiving] = useState(false);
+  // livingRef 镜像 living，供轮询 setTimeout 闭包内读最新态、并在卸载时停轮询（避免对已卸载组件 setState）。
+  const livingRef = useRef(false);
   const seenRef = useRef<Set<string>>(new Set());
   // statusViewedRef 守卫 status_card_viewed 埋点只触发一次（首次拉到角色状态时），避免每次重渲重复上报。
   const statusViewedRef = useRef(false);
@@ -277,6 +346,58 @@ export function FateView({ sessionId, unitId }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // 组件卸载时落 livingRef=false，让在飞的轮询 setTimeout 闭包看到「已卸载」即自停、不再 setState。
+  useEffect(() => {
+    return () => {
+      livingRef.current = false;
+    };
+  }, []);
+
+  // runWorldTick 是「托梦后她去经历 / 推世界往前走一拍」的公共收尾循环：
+  //   进 living（loading）态 → 轮询 GET /api/sessions/:id 的 execution_in_progress 由 true→false（这拍执行完）
+  //   → 刷新 feed + 状态卡 → 解除 living。设 90s 超时兜底（异步执行慢 / 后端未真推进时也终会解除，不会卡死）。
+  // 后端契约：托梦 intervene 与 advance 都已自动触发世界推进，前端无需再调 advance-phase，只负责轮询+刷新。
+  const runWorldTick = useCallback(async () => {
+    setLiving(true);
+    livingRef.current = true;
+    const startedAt = Date.now();
+    const timeoutMs = 90_000;
+    const pollIntervalMs = 1500;
+    // sawInProgress 记是否曾观测到 in_progress=true：避免「推进还没起来就先读到 false」被误判为已跑完。
+    // 但也不强求必现 true（极快的一拍可能在首轮轮询前就已结束）——故超时与「曾 true 后转 false」双出口。
+    let sawInProgress = false;
+    try {
+      // 给后端一点起步时间，再开始轮询（intervene/advance 返回后世界推进多为异步起 goroutine）。
+      while (livingRef.current && Date.now() - startedAt < timeoutMs) {
+        await new Promise((r) => window.setTimeout(r, pollIntervalMs));
+        if (!livingRef.current) return; // 已卸载/被打断
+        let inProgress = false;
+        try {
+          inProgress = await getSessionExecutionInProgress(sessionId);
+        } catch {
+          // 轮询单次失败（网络抖动）不致命：继续下一轮，由超时兜底。
+          continue;
+        }
+        if (inProgress) {
+          sawInProgress = true;
+          continue;
+        }
+        // in_progress=false：若曾见 true（这拍确已从执行翻回闲置）→ 跑完，退出轮询。
+        // 若从未见 true，再多等一轮（startedAt 起 >4.5s 仍未见 true 视为这拍极快/未真推进，也退出）。
+        if (sawInProgress || Date.now() - startedAt > pollIntervalMs * 3) {
+          break;
+        }
+      }
+    } finally {
+      // 无论正常跑完/超时/异常，都刷新一次 feed+状态卡并解除 living（仍挂载时）。
+      if (livingRef.current) {
+        await refresh();
+        livingRef.current = false;
+        setLiving(false);
+      }
+    }
+  }, [sessionId, refresh]);
 
   // status_card_viewed：首次拉到角色状态（命运状态卡有内容可看）时上报一次（best-effort，吞错、once 守卫）。
   useEffect(() => {
@@ -321,6 +442,23 @@ export function FateView({ sessionId, unitId }: Props) {
         if (String(payload.unit_id ?? "") !== unitId) return;
         setCards((prev) => [{ kind: "echo", narrative: cardText(payload) }, ...prev]);
       },
+      // 世界推进一拍后她的日常经历：WS 推来即 append 成一条 life_beat 卡（免轮询更跟手）。
+      // 与首屏 feed 共用 seenRef 去重：life_beat 无 decision_id，按「life_beat 冒号 narrative」key（与 refresh 播种一致）。
+      onFateLifeBeat: (payload) => {
+        if (String(payload.unit_id ?? "") !== unitId) return;
+        const narrative = cardText(payload);
+        const key = fateDedupKey("life_beat", "", narrative);
+        if (seenRef.current.has(key)) return;
+        seenRef.current.add(key);
+        setCards((prev) => [
+          {
+            kind: "life_beat",
+            narrative,
+            occurred_at: payload.occurred_at ? String(payload.occurred_at) : undefined,
+          },
+          ...prev,
+        ]);
+      },
     });
     return unsub;
   }, [sessionId, unitId]);
@@ -328,6 +466,8 @@ export function FateView({ sessionId, unitId }: Props) {
   const pending = useMemo(() => cards.filter((c) => c.kind === "pending"), [cards]);
   const highlights = useMemo(() => cards.filter((c) => c.kind === "highlight").slice(0, 3), [cards]);
   const echoes = useMemo(() => cards.filter((c) => c.kind === "echo").slice(0, 4), [cards]);
+  // lifeBeats：她近来的日常经历（世界推进一拍后的低调叙事）。feed/WS 都按时间倒序插入，取前若干条展示。
+  const lifeBeats = useMemo(() => cards.filter((c) => c.kind === "life_beat").slice(0, 6), [cards]);
 
   const onResolve = useCallback(
     async (decisionId: string, resolveType: string, label: string) => {
@@ -348,15 +488,30 @@ export function FateView({ sessionId, unitId }: Props) {
 
   const onIntervene = useCallback(async () => {
     const text = interveneText.trim();
-    if (!text) return;
+    if (!text || living) return;
     try {
+      // 后端 intervene 已自动触发世界推进——这里无需再调 advance。成功后进 living 态轮询这拍跑完再刷新。
       await recordPlayerIntervention(sessionId, unitId, text);
       setInterveneText("");
-      setToast("你的嘱咐，托梦给了她。");
+      setToast("你的嘱咐，托梦给了她。她正听着，去经历了…");
+      await runWorldTick();
     } catch (err) {
       setToast(`托梦未达：${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [interveneText, sessionId, unitId]);
+  }, [interveneText, living, sessionId, unitId, runWorldTick]);
+
+  // onAdvanceWorld 让世界往前走一拍（玩家不托梦也能推她自己活一段）：调 advanceFateWorld 起一拍世界推进，
+  // 再走与托梦同一条 living→轮询→刷新收尾循环。advancing=false（已在推进/无可推进）也照常进收尾轮询（很快解除）。
+  const onAdvanceWorld = useCallback(async () => {
+    if (living) return;
+    try {
+      const advancing = await advanceFateWorld(sessionId);
+      setToast(advancing ? "世界往前走了一拍。她正去经历…" : "世界正自行往前——稍候看看她经历了什么。");
+      await runWorldTick();
+    } catch (err) {
+      setToast(`没能推动世界：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [living, sessionId, runWorldTick]);
 
   // onShare 把一段命运叙事复制到剪贴板供玩家分享，并埋点 share_initiated（同一段叙事只上报一次）。
   // 埋点与复制均 best-effort：剪贴板不可用时仍给 toast 反馈，绝不阻断 UX。
@@ -466,10 +621,47 @@ export function FateView({ sessionId, unitId }: Props) {
         </section>
       )}
 
-      {/* 槽二：高光卡（一瞥她经历的事） */}
+      {/* 槽二：高光卡 + 生活 beat（一瞥她经历的事） */}
       <section className="fate-highlights">
         <div className="fate-slot-title">她近来经历的</div>
-        {highlights.length === 0 && <div className="fate-empty">还很平静。让世界往前走走看。</div>}
+
+        {/* 「她正在经历」过场：托梦/推世界后这拍正在世界里执行，给一句祖魂语气的等待提示，期间托梦/推进按钮禁用。 */}
+        {living && (
+          <div style={livingBannerStyle} aria-live="polite">
+            <span aria-hidden="true">✦</span>
+            <span>她正听着你的牵挂，去经历了…稍候，看看她这一程遇上了什么。</span>
+          </div>
+        )}
+
+        {/* 空态：没有高光也没有生活 beat 时，把「让世界往前走走看」做成可点按钮——
+            玩家不托梦也能推世界往前一拍（她自己活一段），同样进 living→轮询→刷新。living 中禁用避免重入。 */}
+        {highlights.length === 0 && lifeBeats.length === 0 && (
+          <div className="fate-empty">
+            <span>还很平静。</span>
+            <button
+              style={living ? advanceWorldBtnDisabledStyle : advanceWorldBtnStyle}
+              disabled={living}
+              onClick={() => void onAdvanceWorld()}
+            >
+              {living ? "她正去经历…" : "让世界往前走走看 →"}
+            </button>
+          </div>
+        )}
+
+        {/* 生活 beat 时间线：她近来的日常经历，低调灰底小字、与高光/待决策视觉区分，按时间倒序。 */}
+        {lifeBeats.length > 0 && (
+          <div style={lifeBeatListStyle}>
+            {lifeBeats.map((c, i) => (
+              <div style={lifeBeatItemStyle} key={`l${i}`}>
+                <span style={lifeBeatDotStyle} aria-hidden="true">
+                  ·
+                </span>
+                <span>{c.narrative}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {highlights.map((c, i) => {
           // reactedTick 进表达式仅为让按钮态随 reactedRef 变化重渲（值本身不参与逻辑）。
           const reacted = reactedTick >= 0 && reactedRef.current.has(fateCardKey(c));
@@ -519,6 +711,19 @@ export function FateView({ sessionId, unitId }: Props) {
             </div>
           );
         })}
+
+        {/* 常驻「让世界往前走」入口：即便已有高光/生活 beat，玩家也能不托梦就推世界往前一拍（她自己活一段）。
+            空态已自带按钮，这里仅在「有内容可看」时补一个，避免空态重复出现两枚。 */}
+        {(highlights.length > 0 || lifeBeats.length > 0) && (
+          <button
+            style={living ? advanceWorldBtnDisabledStyle : advanceWorldBtnStyle}
+            disabled={living}
+            onClick={() => void onAdvanceWorld()}
+            title="让世界往前走一拍，看看她自己会经历什么"
+          >
+            {living ? "她正去经历…" : "让世界往前走一拍 →"}
+          </button>
+        )}
       </section>
 
       {/* 槽三：回响带（因为你上次…） */}
@@ -533,17 +738,20 @@ export function FateView({ sessionId, unitId }: Props) {
         </section>
       )}
 
-      {/* 托梦：给她一句嘱咐（可被日后回响引用） */}
+      {/* 托梦：给她一句嘱咐（可被日后回响引用）。这拍正在经历（living）时禁用，避免重入推进。 */}
       <section className="fate-intervene">
         <input
           value={interveneText}
-          placeholder="给她托个梦，留一句嘱咐…（如：别恋战，护住身边人）"
+          disabled={living}
+          placeholder={living ? "她正去经历你方才的嘱咐…" : "给她托个梦，留一句嘱咐…（如：别恋战，护住身边人）"}
           onChange={(e) => setInterveneText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") void onIntervene();
           }}
         />
-        <button onClick={() => void onIntervene()}>托梦</button>
+        <button disabled={living} onClick={() => void onIntervene()}>
+          {living ? "经历中…" : "托梦"}
+        </button>
       </section>
 
       {toast && (

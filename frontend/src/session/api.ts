@@ -74,6 +74,9 @@ type SessionStreamHandlers = {
   // 故倒计时不能由 WS 直接取：收到推送后应调 getFateFeed(unitID) 拉最新 feed（pending 卡才带 expires_at/countdown_hours）。
   onFateInbox?: (payload: Record<string, unknown>) => void;
   onFateEcho?: (payload: Record<string, unknown>) => void;
+  // onFateLifeBeat 收到 fate_life_beat 推送（后端 fate_world.go：世界推进一拍后她的日常经历）。
+  // payload 只含 unit_id/narrative/turn（无 decision_id/倒计时）——直接 append 成一条 life_beat 卡，免轮询更跟手。
+  onFateLifeBeat?: (payload: Record<string, unknown>) => void;
   // onLlmInteraction 收到 llm_interaction 推送（后端推的是裸 interaction 对象，二层解包后即 LLMInteraction）。
   onLlmInteraction?: (interaction: LLMInteraction) => void;
 };
@@ -82,7 +85,9 @@ type SessionStreamHandlers = {
 // expires_at/countdown_hours 仅 pending 卡随 feed 返回，供前端渲染倒计时；
 // 若来源（如 WS fate_inbox）只给 occurred_at，前端可按 occurred_at + 48h 自算。
 export type FateCard = {
-  kind: "highlight" | "pending" | "echo";
+  // life_beat：世界推进一拍后她的日常经历（区别于值得一看的 highlight / 需拿主意的 pending / 回响 echo），
+  // 低调叙事体渲染在「她近来经历的」时间线。后端 fate.go 的 ReasonLifeBeat → kind:"life_beat"，并随 WS fate_life_beat 推送。
+  kind: "highlight" | "pending" | "echo" | "life_beat";
   decision_id?: string;
   narrative: string;
   occurred_at?: string;
@@ -455,6 +460,10 @@ export function subscribeSessionStream(sessionID: string, handlers: SessionStrea
       }
       if (type === "fate_echo") {
         handlers.onFateEcho?.(payload);
+        return;
+      }
+      if (type === "fate_life_beat") {
+        handlers.onFateLifeBeat?.(payload);
       }
     };
 
@@ -496,6 +505,27 @@ export function subscribeSessionStream(sessionID: string, handlers: SessionStrea
 export async function getFateFeed(unitID: string): Promise<FateCard[]> {
   const data = await request<{ feed?: FateCard[] }>(`/api/fate/feed/${encodeURIComponent(unitID)}`);
   return data.feed ?? [];
+}
+
+// advanceFateWorld 让命运世界往前走一拍（不依赖玩家托梦，她自己活一段）。
+// 后端 POST /api/fate/sessions/:sessionId/advance 触发一次世界推进，返回 {advancing}：
+//   - true=已开始推进（随后异步执行，前端应进 loading 并轮询 execution_in_progress 由 true→false）；
+//   - false=未推进（已在推进中 / 无可推进单位 / 出错——出错时后端把 error 并进 200 体，这里吞掉只取 advancing）。
+export async function advanceFateWorld(sessionID: string): Promise<boolean> {
+  const data = await request<{ advancing?: boolean; error?: string }>(
+    `/api/fate/sessions/${encodeURIComponent(sessionID)}/advance`,
+    { method: "POST" },
+  );
+  return data.advancing ?? false;
+}
+
+// getSessionExecutionInProgress 轻量轮询某会话「执行是否进行中」（命运循环判这拍跑完用）。
+// 复用 GET /api/sessions/:id 取快照的 execution_in_progress；读不到（404/字段缺）按 false 处理。
+export async function getSessionExecutionInProgress(sessionID: string): Promise<boolean> {
+  const data = await request<{ session?: { execution_in_progress?: boolean } }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}`,
+  );
+  return Boolean(data.session?.execution_in_progress);
 }
 
 // resolveFateDecision 处理一条待决策（玩家拿主意）。
