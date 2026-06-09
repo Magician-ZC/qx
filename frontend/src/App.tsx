@@ -201,7 +201,7 @@ const gameGuideSections: GameGuideSection[] = [
   {
     title: "这是一个怎样的世界",
     body: [
-      "《群像》发生在一片被城镇、村庄、森林、河谷、废墟和荒地切开的六边形战场。每个单位都有姓名、性格、属性、背包、装备、饥饿、记忆和人际关系。",
+      "《一念》发生在一片被城镇、村庄、森林、河谷、废墟和荒地切开的六边形战场。每个单位都有姓名、性格、属性、背包、装备、饥饿、记忆和人际关系。",
       "你不是逐个点击技能的传统指挥官，而是给阵营发布自然语言方针；单位会结合地形、敌我距离、装备、伤势、饥饿、性格、记忆和最近对话，自主选择行动。",
       "胜利目标通常是击败全部敌方单位；失败条件是己方全灭。战斗中会留下尸体、墓碑、掉落物、战报和单位自己的记忆。",
     ],
@@ -4121,7 +4121,7 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
                 ) : null}
                 {eliteEncounterResult.InboxCard ? (
                   <div className="unit-detail-section">
-                    <span className="shop-label">祖魂托梦</span>
+                    <span className="shop-label">祖魂指引</span>
                     <p>{eliteEncounterResult.InboxCard}</p>
                   </div>
                 ) : null}
@@ -4215,7 +4215,7 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
                 <div className="game-guide-hero">
                   <div>
                     <p className="card-kicker">Game Guide</p>
-                    <h2 id="game-guide-title">游戏攻略：怎么玩《群像》</h2>
+                    <h2 id="game-guide-title">游戏攻略：怎么玩《一念》</h2>
                     <p className="panel-note">
                       这是一份给新玩家的完整说明：先理解世界、回合、自然语言指挥，再学会看地图、照顾单位、复盘战报。
                     </p>

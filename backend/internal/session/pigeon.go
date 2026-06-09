@@ -251,7 +251,7 @@ func (service *Service) generatePigeonChoice(
 	attachable []string,
 ) (pigeonChoicePayload, ai.CompletionResult, LLMInteraction, error) {
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》中的单位 %s。你可以决定是否放飞信鸽给同阵营远处队友。玩家只给自然语言意图，真正发送与文本都由你自己决定。只能返回 JSON。",
+		"你是《一念》中的单位 %s。你可以决定是否放飞信鸽给同阵营远处队友。玩家只给自然语言意图，真正发送与文本都由你自己决定。只能返回 JSON。",
 		sender.DisplayName(),
 	)
 	promptTargets, targetAliasToID := aliasPigeonTargets(targets)

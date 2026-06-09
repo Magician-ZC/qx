@@ -165,8 +165,8 @@ export function FateApp() {
       const unitId = mine.unit_id;
       if (!sessionId || !unitId) throw new Error("未能创建角色");
 
-      // 离线宪章 + 欲望/伤痕作为「家训/托梦」落成可被回响引用的玩家动作。
-      // （createMyCharacter 已带四要素入库；这里再以托梦形式落一条人话版家训，供日后回响引用。）
+      // 离线宪章 + 欲望/伤痕作为「家训/指引」落成可被回响引用的玩家动作。
+      // （createMyCharacter 已带四要素入库；这里再以指引形式落一条人话版家训，供日后回响引用。）
       const charter = [
         desire.trim() && `她想要的：${desire.trim()}`,
         wound.trim() && `她的伤痕：${wound.trim()}`,
@@ -176,7 +176,7 @@ export function FateApp() {
         .filter(Boolean)
         .join("；");
       if (charter) {
-        // best-effort：托梦失败不挡降生（角色已建）。
+        // best-effort：指引失败不挡降生（角色已建）。
         try {
           await recordPlayerIntervention(sessionId, unitId, charter);
         } catch {
@@ -297,8 +297,8 @@ export function FateApp() {
   return (
     <div className="fate-shell fate-onboarding">
       <div className="fate-create">
-        <h1>群像 · 命运开盒</h1>
-        <p className="fate-create-lead">捏一个人，把她丢进世界。她会自己活——你只能托梦、疾呼，却不能替她做主。</p>
+        <h1>一念 · 命运开盒</h1>
+        <p className="fate-create-lead">捏一个人，把她丢进世界。她会自己活——你只能指引、疾呼，却不能替她做主。</p>
 
         <label>
           名字

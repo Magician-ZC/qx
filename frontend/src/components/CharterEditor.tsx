@@ -355,7 +355,7 @@ export function CharterEditor({
     <aside style={panelStyle} role="dialog" aria-label="离线宪章编辑">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 立约</div>
+          <div style={brandStyle}>一念 · 立约</div>
           <div style={subStyle}>
             你不在时，{who}依这份约自处。立下她绝不越的底线、她一生奔赴的方向、你许她自主的边界。
           </div>

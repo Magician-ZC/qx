@@ -1088,8 +1088,8 @@ func (service *Service) ClearUnitCharterForSession(ctx context.Context, sessionI
 // 漂移失败/读不到回合一律吞错，绝不影响接管事件本身的落库（接管是真实动作、漂移是旁路增益）。
 // 返回接管事件 ID（与 RecordPlayerIntervention 一致），供前端关联回响。
 //
-// 命运开盒「托梦→她去经历一段」：记录托梦后 best-effort 调 AdvanceFateWorld 推主世界一拍——托梦内容已经
-// loadRecentPlayerActions 喂进 generateUnitDecision 的 order_echo，advance 后她会带着托梦去自治。推进失败吞错不崩托梦。
+// 命运开盒「指引→她去经历一段」：记录指引后 best-effort 调 AdvanceFateWorld 推主世界一拍——指引内容已经
+// loadRecentPlayerActions 喂进 generateUnitDecision 的 order_echo，advance 后她会带着指引去自治。推进失败吞错不崩指引。
 func (service *Service) RecordPlayerInterventionWithDrift(ctx context.Context, sessionID, unitID, summary string) (string, error) {
 	id, err := service.RecordPlayerIntervention(ctx, sessionID, unitID, summary)
 	if err != nil {
@@ -1103,7 +1103,7 @@ func (service *Service) RecordPlayerInterventionWithDrift(ctx context.Context, s
 		}
 	}
 	_, _ = service.ApplyPersonalityDrift(ctx, sessionID, unitID, DriftReasonIntervention, turn)
-	// 托梦触发推进（命运开盒核心循环）：给她托个梦 → 让她带着托梦去经历一拍。best-effort：吞错绝不阻断托梦本身。
+	// 指引触发推进（命运开盒核心循环）：给她托个梦 → 让她带着指引去经历一拍。best-effort：吞错绝不阻断指引本身。
 	_, _ = service.AdvanceFateWorld(ctx, sessionID)
 	return id, nil
 }

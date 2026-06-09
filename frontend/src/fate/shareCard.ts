@@ -25,7 +25,7 @@ export type ShareCardOptions = {
   accent?: string;
   // footer 可选落款（祖魂语气的一句话）；不传则按 kind 取预设落款。
   footer?: string;
-  // watermark 可选右下角水印；不传默认「群像 · 命运」。
+  // watermark 可选右下角水印；不传默认「一念 · 命运」。
   watermark?: string;
 };
 
@@ -243,7 +243,7 @@ function drawCard(ctx: CanvasRenderingContext2D, opts: ShareCardOptions): void {
   ctx.fillText(`— ${footerText}`, PADDING, CARD_HEIGHT - 64);
 
   // 右下角水印。
-  const watermark = opts.watermark ?? "群像 · 命运";
+  const watermark = opts.watermark ?? "一念 · 命运";
   ctx.fillStyle = hexWithAlpha(accent, 0.7);
   ctx.font = `600 16px ${cjkFont}`;
   ctx.textAlign = "right";

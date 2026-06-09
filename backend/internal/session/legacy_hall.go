@@ -266,7 +266,7 @@ func (service *Service) generateHallBiography(
 	topEvents []string,
 ) (string, ai.CompletionResult, LLMInteraction) {
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》的战后档案官。请基于单位 %s 的战斗经历，生成一段不超过 200 字的中文生平摘要。要突出其性格、行为倾向与关键经历。只返回 JSON。",
+		"你是《一念》的战后档案官。请基于单位 %s 的战斗经历，生成一段不超过 200 字的中文生平摘要。要突出其性格、行为倾向与关键经历。只返回 JSON。",
 		record.DisplayName(),
 	)
 	userPrompt := buildHallBiographyPrompt(state, record, topEvents)

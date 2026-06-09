@@ -32,7 +32,7 @@ func main() {
 	req := session.BenchDecisionRequest()
 	ctx := context.Background()
 
-	fmt.Printf("=== 群像 LLM 决策成本基准 ===\n调用次数 n=%d，折算用 decisions-per-day=%d\n\n", *n, *perDay)
+	fmt.Printf("=== 一念 LLM 决策成本基准 ===\n调用次数 n=%d，折算用 decisions-per-day=%d\n\n", *n, *perDay)
 
 	var (
 		okCalls                       int

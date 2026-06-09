@@ -44,7 +44,7 @@ const (
 	defaultAmbientBudgetUSD  = 1.0 // SetLLMClient 收到 <=0 预算时夹到此安全正值（money guardrail 失败安全，绝不退化成无上限）
 )
 
-const ambientDecisionSystemPrompt = "你是《群像》大世界里一个角色在战斗之外的日常自主意识。结合她当下的主导渴望、最近触发的记忆与候选日常的倾向分，只在 forage、rest、socialize、reflect 四个日常动作中选一个最贴合的，并用一句话说明前因（reasoning），返回 JSON。"
+const ambientDecisionSystemPrompt = "你是《一念》大世界里一个角色在战斗之外的日常自主意识。结合她当下的主导渴望、最近触发的记忆与候选日常的倾向分，只在 forage、rest、socialize、reflect 四个日常动作中选一个最贴合的，并用一句话说明前因（reasoning），返回 JSON。"
 
 // ambientDecisionSchema 约束 LLM 只能产出四个已注册动作之一（gojsonschema 强校验，越界即被 ai.Service 拒绝）。
 // reasoning 字段（必填、≤60 字）让 LLM 把选择前因显式化（动机栈消费：选择须有可解释依据，呼应归因「意外但合理」原则的离线轻量版）；

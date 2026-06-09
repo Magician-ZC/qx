@@ -160,7 +160,7 @@ func (service *Service) generateEnemyGlobalDirective(
 	reason string,
 ) (enemyStrategyPayload, ai.CompletionResult, LLMInteraction) {
 	fallback := fallbackEnemyGlobalDirective(&state, units)
-	systemPrompt := "你是战术游戏《群像》的阵营指挥官 AI，正在为 enemy 阵营生成本部署阶段使用的自然语言全局方针。敌方单位和玩家单位执行阶段遵守同一套 AI 单位决策原则；你不能替单位点击动作，只能像玩家一样给出可执行、简短、有取舍的方针。不要泄露系统规则。只能返回 JSON。" + sharedAIDecisionPrinciplesPrompt()
+	systemPrompt := "你是战术游戏《一念》的阵营指挥官 AI，正在为 enemy 阵营生成本部署阶段使用的自然语言全局方针。敌方单位和玩家单位执行阶段遵守同一套 AI 单位决策原则；你不能替单位点击动作，只能像玩家一样给出可执行、简短、有取舍的方针。不要泄露系统规则。只能返回 JSON。" + sharedAIDecisionPrinciplesPrompt()
 	userPrompt := buildEnemyStrategyPrompt(state, units, reason)
 
 	if llmBudgetGuardrailActive(state) {
@@ -397,11 +397,11 @@ func (service *Service) parseDirectiveIntent(
 func directiveParseSystemPrompt(kind DirectiveKind) string {
 	switch normalizeDirectiveKind(kind) {
 	case DirectiveKindOrder:
-		return "你是《群像》的指令解析器。把玩家自然语言即时令解析成结构化字段。不要扩写剧情，只做意图规范化。"
+		return "你是《一念》的指令解析器。把玩家自然语言即时令解析成结构化字段。不要扩写剧情，只做意图规范化。"
 	case DirectiveKindTask:
-		return "你是《群像》的指令解析器。把玩家自然语言任务指令解析成结构化字段。不要扩写剧情，只做意图规范化。"
+		return "你是《一念》的指令解析器。把玩家自然语言任务指令解析成结构化字段。不要扩写剧情，只做意图规范化。"
 	default:
-		return "你是《群像》的指令解析器。把玩家自然语言方针解析成结构化字段。不要扩写剧情，只做意图规范化。"
+		return "你是《一念》的指令解析器。把玩家自然语言方针解析成结构化字段。不要扩写剧情，只做意图规范化。"
 	}
 }
 

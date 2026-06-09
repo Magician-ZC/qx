@@ -64,7 +64,7 @@ func (service *Service) requestTradeConsent(
 ) (tradeConsentPayload, ai.CompletionResult, LLMInteraction, bool) {
 	proposal := tradeConsentProposal(decision, actor, target)
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》中的单位 %s。有人向你提出战场交易，你必须只代表自己判断 accept/reject；可以因为敌我关系、风险、需要、信任、物品价值或当前局势拒绝，并写清理由。只能返回 JSON。",
+		"你是《一念》中的单位 %s。有人向你提出战场交易，你必须只代表自己判断 accept/reject；可以因为敌我关系、风险、需要、信任、物品价值或当前局势拒绝，并写清理由。只能返回 JSON。",
 		target.DisplayName(),
 	)
 	userPrompt := buildTradeConsentPrompt(state, byID, actor, target, proposal)

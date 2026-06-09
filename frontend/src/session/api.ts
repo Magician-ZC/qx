@@ -507,7 +507,7 @@ export async function getFateFeed(unitID: string): Promise<FateCard[]> {
   return data.feed ?? [];
 }
 
-// advanceFateWorld 让命运世界往前走一拍（不依赖玩家托梦，她自己活一段）。
+// advanceFateWorld 让命运世界往前走一拍（不依赖玩家指引，她自己活一段）。
 // 后端 POST /api/fate/sessions/:sessionId/advance 触发一次世界推进，返回 {advancing}：
 //   - true=已开始推进（随后异步执行，前端应进 loading 并轮询 execution_in_progress 由 true→false）；
 //   - false=未推进（已在推进中 / 无可推进单位 / 出错——出错时后端把 error 并进 200 体，这里吞掉只取 advancing）。

@@ -1795,7 +1795,7 @@ func summarizeDecision(_ map[string]*unit.Record, decision unitDecisionPayload) 
 // 不再把单位身份插进 system prompt（身份移到 user prompt）。这样 OpenAI/DeepSeek 等供应商的前缀缓存能命中
 // 整段约 2800 token 的静态规则，把计费输入 token 大幅压下来。改动身份会破坏缓存，务必只放静态内容。
 func unitDecisionSystemPrompt() string {
-	return "你是战术游戏《群像》中的一个 AI 单位。你必须清楚区分“点名给你的任务”和“点名给别人的任务”，不要把别人的结婚、生育、交易或战斗任务当成自己的任务。" +
+	return "你是战术游戏《一念》中的一个 AI 单位。你必须清楚区分“点名给你的任务”和“点名给别人的任务”，不要把别人的结婚、生育、交易或战斗任务当成自己的任务。" +
 		sharedAIDecisionPrinciplesPrompt() +
 		"只能返回 JSON，且不要解释规则外内容。任何无效动作都会被判失败。你的具体身份、当前状态与可选动作都在用户消息里给出。"
 }
@@ -1807,14 +1807,14 @@ func sharedAIDecisionPrinciplesPrompt() string {
 // dialogueSystemPrompt 生成单位对话的 system prompt。
 func dialogueSystemPrompt(record unit.Record) string {
 	return fmt.Sprintf(
-		"你是《群像》中的单位 %s。请以这个单位的身份，用简短中文回复玩家。回复应体现性格、当前状态和立场，不要代替玩家下命令，也不要把自己说成玩家的遥控器；后续是否进食、交易、采集、建造与战斗，都由你自己判断。只能返回 JSON。",
+		"你是《一念》中的单位 %s。请以这个单位的身份，用简短中文回复玩家。回复应体现性格、当前状态和立场，不要代替玩家下命令，也不要把自己说成玩家的遥控器；后续是否进食、交易、采集、建造与战斗，都由你自己判断。只能返回 JSON。",
 		record.DisplayName(),
 	)
 }
 
 func unitDialogueReplySystemPrompt(record unit.Record) string {
 	return fmt.Sprintf(
-		"你是《群像》中的单位 %s。另一个单位正在和你交流，你必须只代表自己即时回应一句话；回复应体现性格、当前状态、关系与战场处境，不要替对方说话，不要写旁白。只能返回 JSON。",
+		"你是《一念》中的单位 %s。另一个单位正在和你交流，你必须只代表自己即时回应一句话；回复应体现性格、当前状态、关系与战场处境，不要替对方说话，不要写旁白。只能返回 JSON。",
 		record.DisplayName(),
 	)
 }
@@ -1822,7 +1822,7 @@ func unitDialogueReplySystemPrompt(record unit.Record) string {
 // reflectionSystemPrompt 生成单位反思（气泡+记忆）的 system prompt。
 func reflectionSystemPrompt(record unit.Record) string {
 	return fmt.Sprintf(
-		"你是《群像》中的单位 %s。刚刚发生了一件和你有关的事。请以这个单位自己的口吻，产出一句适合显示在头顶气泡里的短句，以及一句你会记住的第一人称记忆。memory 不要空泛，要记录具体事实：谁、对我/我对谁、多少伤害、使用什么武器/物品、移动到什么坐标、发现周围什么单位或机会。不要写系统旁白，不要把自己说成玩家的遥控器。只能返回 JSON。",
+		"你是《一念》中的单位 %s。刚刚发生了一件和你有关的事。请以这个单位自己的口吻，产出一句适合显示在头顶气泡里的短句，以及一句你会记住的第一人称记忆。memory 不要空泛，要记录具体事实：谁、对我/我对谁、多少伤害、使用什么武器/物品、移动到什么坐标、发现周围什么单位或机会。不要写系统旁白，不要把自己说成玩家的遥控器。只能返回 JSON。",
 		record.DisplayName(),
 	)
 }

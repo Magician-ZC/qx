@@ -304,7 +304,7 @@ func (service *Service) loadMemoriesForMemory2Compaction(ctx context.Context, un
 
 func (service *Service) generateMemory2Compaction(ctx context.Context, state State, record unit.Record, startTurn int, endTurn int, rows []memoryRow) (string, ai.CompletionResult, LLMInteraction) {
 	fallback := fallbackMemory2Summary(startTurn, endTurn, rows)
-	systemPrompt := fmt.Sprintf("你是《群像》中单位 %s 的长期记忆整理器。请把较早的逐回合 memory 压缩成一条 memory2，保留关键人物、伤害、位置、物品、关系变化和发现，不要写系统旁白。只能返回 JSON。", record.DisplayName())
+	systemPrompt := fmt.Sprintf("你是《一念》中单位 %s 的长期记忆整理器。请把较早的逐回合 memory 压缩成一条 memory2，保留关键人物、伤害、位置、物品、关系变化和发现，不要写系统旁白。只能返回 JSON。", record.DisplayName())
 	userPrompt := buildMemory2CompactionPrompt(record, startTurn, endTurn, rows)
 	if service.llm == nil || llmBudgetGuardrailActive(state) {
 		result := budgetGuardrailResult(state)

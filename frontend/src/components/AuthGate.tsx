@@ -141,7 +141,7 @@ export function AuthGate({ children }: AuthGateProps): JSX.Element {
   return (
     <div className="fate-shell fate-onboarding">
       <div className="fate-create">
-        <h1>群像 · 命运开盒</h1>
+        <h1>一念 · 命运开盒</h1>
         <p className="fate-create-lead">
           {isRegister
             ? "立一个名号，让她的命运从此有人牵挂。这名号会在你每次归来时认出你。"

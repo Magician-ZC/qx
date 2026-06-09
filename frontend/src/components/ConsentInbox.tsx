@@ -235,7 +235,7 @@ export function ConsentInbox({ unitId, worldId, unitName, onClose }: Props) {
     <aside style={panelStyle} role="dialog" aria-label="跨玩家同意收件箱">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 来意</div>
+          <div style={brandStyle}>一念 · 来意</div>
           <div style={subStyle}>{headerSub}</div>
         </div>
         <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭来意收件箱">

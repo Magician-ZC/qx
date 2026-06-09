@@ -614,7 +614,7 @@ func (service *Service) generateEquipmentNameBestEffort(ctx context.Context, sta
 	if !ok {
 		return fallback
 	}
-	systemPrompt := "你是《群像》的装备命名器。为刚锻造出的装备取一个短中文名，名字要像游戏内物品名，不要解释，只返回 JSON。"
+	systemPrompt := "你是《一念》的装备命名器。为刚锻造出的装备取一个短中文名，名字要像游戏内物品名，不要解释，只返回 JSON。"
 	userPrompt := fmt.Sprintf(
 		"锻造者: %s\n性格: %s\n生平: %s\n装备模板: %s\n装备槽位: %s\n强化等级: +%d\n要求: 名字必须结合锻造者生平、性格和装备用途，2-8 个汉字，避免通用的“神兵/传奇”。",
 		actor.DisplayName(),

@@ -146,7 +146,7 @@ func buildDeploymentChoiceSchema(candidates []deploymentCandidate) []byte {
 // deploymentSystemPrompt 生成“双单位协商交易”任务的 system prompt。
 func deploymentSystemPrompt(left unit.Record, right unit.Record) string {
 	return fmt.Sprintf(
-		"你要同时扮演《群像》中的两个相邻 AI 单位：%s 和 %s。玩家只能用自然语言表达意图，不能替他们点击交易。请根据两人的性格、记忆、钱包、背包、周围环境和玩家最近的方针/对话，从候选列表中决定他们这一刻是否自己谈成一笔交易，并给出两人各自会说的一句短话和各自会记住的一句短记忆。只能返回 JSON。",
+		"你要同时扮演《一念》中的两个相邻 AI 单位：%s 和 %s。玩家只能用自然语言表达意图，不能替他们点击交易。请根据两人的性格、记忆、钱包、背包、周围环境和玩家最近的方针/对话，从候选列表中决定他们这一刻是否自己谈成一笔交易，并给出两人各自会说的一句短话和各自会记住的一句短记忆。只能返回 JSON。",
 		left.DisplayName(),
 		right.DisplayName(),
 	)
@@ -155,7 +155,7 @@ func deploymentSystemPrompt(left unit.Record, right unit.Record) string {
 // upkeepSystemPrompt 生成日常生存动作判断任务的 system prompt。
 func upkeepSystemPrompt(record unit.Record) string {
 	return fmt.Sprintf(
-		"你是《群像》中的单位 %s。现在轮到你自己判断要不要处理一件日常生存动作，比如吃口粮或吃药。玩家不会逐个指定你吃不吃。请根据你的性格、记忆、当前状态、周围环境和全局方针，自己决定是否行动；方针很重要，但你仍要结合自身处境、生存风险和个人判断。重要生存规则：饥饿度降到 0 会直接死亡；饥饿度高于 80 每回合自动恢复 3 HP；没有口粮且饥饿偏低时，后续要主动找食物、采集、狩猎、钓鱼、交易或求援，不能原地等到饿死；受伤时可以用治疗药剂恢复。行动时给出一句短气泡和一句短记忆。只能返回 JSON。",
+		"你是《一念》中的单位 %s。现在轮到你自己判断要不要处理一件日常生存动作，比如吃口粮或吃药。玩家不会逐个指定你吃不吃。请根据你的性格、记忆、当前状态、周围环境和全局方针，自己决定是否行动；方针很重要，但你仍要结合自身处境、生存风险和个人判断。重要生存规则：饥饿度降到 0 会直接死亡；饥饿度高于 80 每回合自动恢复 3 HP；没有口粮且饥饿偏低时，后续要主动找食物、采集、狩猎、钓鱼、交易或求援，不能原地等到饿死；受伤时可以用治疗药剂恢复。行动时给出一句短气泡和一句短记忆。只能返回 JSON。",
 		record.DisplayName(),
 	)
 }
@@ -163,7 +163,7 @@ func upkeepSystemPrompt(record unit.Record) string {
 // combatShakeSystemPrompt 生成战斗应激快决策任务的 system prompt。
 func combatShakeSystemPrompt(record unit.Record) string {
 	return fmt.Sprintf(
-		"你是《群像》中的单位 %s，正在执行阶段战斗中。玩家不会逐项遥控你；玩家方针是重要强信号，但应激反应还要结合环境、性格、记忆、关系和当前压力。请在 200ms 内做一次应激快决策。牢记：饥饿度为 0 会直接死亡，饥饿度高于 80 每回合自动恢复 3 HP。你只能输出 JSON，且 action 只能是 continue/retreat/surrender/rage 之一。",
+		"你是《一念》中的单位 %s，正在执行阶段战斗中。玩家不会逐项遥控你；玩家方针是重要强信号，但应激反应还要结合环境、性格、记忆、关系和当前压力。请在 200ms 内做一次应激快决策。牢记：饥饿度为 0 会直接死亡，饥饿度高于 80 每回合自动恢复 3 HP。你只能输出 JSON，且 action 只能是 continue/retreat/surrender/rage 之一。",
 		record.DisplayName(),
 	)
 }

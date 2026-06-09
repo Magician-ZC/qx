@@ -97,7 +97,7 @@ const goalAnchorWeight = 1.0
 func (service *Service) generateGoalReassessment(ctx context.Context, state State, record unit.Record, turn int) (string, LLMInteraction) {
 	fallback := fallbackGoalReassessment(state, record)
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》中单位 %s 的内心独白器。请据她的人格、野心与近况，给出一个具体、可落地的短期目标，第一人称、不超过%d字、不写系统旁白。只能返回 JSON。",
+		"你是《一念》中单位 %s 的内心独白器。请据她的人格、野心与近况，给出一个具体、可落地的短期目标，第一人称、不超过%d字、不写系统旁白。只能返回 JSON。",
 		record.DisplayName(),
 		goalReassessMaxRunes,
 	)

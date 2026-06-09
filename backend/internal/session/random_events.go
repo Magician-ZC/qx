@@ -488,7 +488,7 @@ func (service *Service) generateRandomEventNarration(
 	decision randomEventBranchDecision,
 ) (randomEventNarrationPayload, ai.CompletionResult, LLMInteraction) {
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》的单位内心叙事器。玩家只会给全局自然语言方针；当前随机事件的分支已经由单位自主选择。请生成该单位这一瞬间的 outcome/bubble/memory/reasoning，全部使用中文。",
+		"你是《一念》的单位内心叙事器。玩家只会给全局自然语言方针；当前随机事件的分支已经由单位自主选择。请生成该单位这一瞬间的 outcome/bubble/memory/reasoning，全部使用中文。",
 	)
 	memorySummary := service.memorySummaryForPrompt(ctx, state, byID, actor, 8)
 	relationSummary := service.relationSummaryForPrompt(ctx, byID, actor, 4)

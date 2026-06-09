@@ -1,7 +1,7 @@
 /* 文件说明：角色命运开盒的「四槽主界面」（设计宪法 §4.6 / §3.2 祖魂换皮）。
    四槽：状态卡（她现在怎样）+ 高光卡（一瞥她经历的事）+ 待决策（等你拿主意）+ 回响带（因为你上次…）。
    数据来自 GET /api/fate/feed + GET /api/units，实时增量来自 WS 的 fate_inbox / fate_echo 推送。
-   祖魂语气：不出现「命令/控制」字眼；玩家是垂看后人的先祖，给的是家训、托梦、疾呼，不是遥控。*/
+   祖魂语气：不出现「命令/控制」字眼；玩家是垂看后人的先祖，给的是家训、指引、疾呼，不是遥控。*/
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -196,7 +196,7 @@ const advanceWorldBtnDisabledStyle: React.CSSProperties = {
   cursor: "default",
 };
 
-// 「她正在经历」loading 条的内联样式：托梦/推世界后这拍正在世界里执行时的过场提示。
+// 「她正在经历」loading 条的内联样式：指引/推世界后这拍正在世界里执行时的过场提示。
 const livingBannerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -313,7 +313,7 @@ export function FateView({ sessionId, unitId }: Props) {
   const [resolving, setResolving] = useState<string>("");
   const [interveneText, setInterveneText] = useState("");
   const [toast, setToast] = useState("");
-  // living=true：托梦/推世界后，这一拍正在世界里执行（她正去经历）。期间禁用托梦框与推进按钮，
+  // living=true：指引/推世界后，这一拍正在世界里执行（她正去经历）。期间禁用指引框与推进按钮，
   // 由 runWorldTick 轮询 execution_in_progress 由 true→false（或超时兜底）后解除并刷新 feed/状态卡。
   const [living, setLiving] = useState(false);
   // livingRef 镜像 living，供轮询 setTimeout 闭包内读最新态、并在卸载时停轮询（避免对已卸载组件 setState）。
@@ -354,10 +354,10 @@ export function FateView({ sessionId, unitId }: Props) {
     };
   }, []);
 
-  // runWorldTick 是「托梦后她去经历 / 推世界往前走一拍」的公共收尾循环：
+  // runWorldTick 是「指引后她去经历 / 推世界往前走一拍」的公共收尾循环：
   //   进 living（loading）态 → 轮询 GET /api/sessions/:id 的 execution_in_progress 由 true→false（这拍执行完）
   //   → 刷新 feed + 状态卡 → 解除 living。设 90s 超时兜底（异步执行慢 / 后端未真推进时也终会解除，不会卡死）。
-  // 后端契约：托梦 intervene 与 advance 都已自动触发世界推进，前端无需再调 advance-phase，只负责轮询+刷新。
+  // 后端契约：指引 intervene 与 advance 都已自动触发世界推进，前端无需再调 advance-phase，只负责轮询+刷新。
   const runWorldTick = useCallback(async () => {
     setLiving(true);
     livingRef.current = true;
@@ -493,15 +493,15 @@ export function FateView({ sessionId, unitId }: Props) {
       // 后端 intervene 已自动触发世界推进——这里无需再调 advance。成功后进 living 态轮询这拍跑完再刷新。
       await recordPlayerIntervention(sessionId, unitId, text);
       setInterveneText("");
-      setToast("你的嘱咐，托梦给了她。她正听着，去经历了…");
+      setToast("你的嘱咐，指引给了她。她正听着，去经历了…");
       await runWorldTick();
     } catch (err) {
-      setToast(`托梦未达：${err instanceof Error ? err.message : String(err)}`);
+      setToast(`指引未达：${err instanceof Error ? err.message : String(err)}`);
     }
   }, [interveneText, living, sessionId, unitId, runWorldTick]);
 
-  // onAdvanceWorld 让世界往前走一拍（玩家不托梦也能推她自己活一段）：调 advanceFateWorld 起一拍世界推进，
-  // 再走与托梦同一条 living→轮询→刷新收尾循环。advancing=false（已在推进/无可推进）也照常进收尾轮询（很快解除）。
+  // onAdvanceWorld 让世界往前走一拍（玩家不指引也能推她自己活一段）：调 advanceFateWorld 起一拍世界推进，
+  // 再走与指引同一条 living→轮询→刷新收尾循环。advancing=false（已在推进/无可推进）也照常进收尾轮询（很快解除）。
   const onAdvanceWorld = useCallback(async () => {
     if (living) return;
     try {
@@ -548,8 +548,8 @@ export function FateView({ sessionId, unitId }: Props) {
   return (
     <div className="fate-root">
       <header className="fate-header">
-        <span className="fate-brand">群像 · 命运</span>
-        <span className="fate-sub">你是垂看后人的先祖。你能托梦、能疾呼，却不能替她活。</span>
+        <span className="fate-brand">一念 · 命运</span>
+        <span className="fate-sub">你是垂看后人的先祖。你能指引、能疾呼，却不能替她活。</span>
       </header>
 
       {/* 槽一：状态卡 */}
@@ -625,7 +625,7 @@ export function FateView({ sessionId, unitId }: Props) {
       <section className="fate-highlights">
         <div className="fate-slot-title">她近来经历的</div>
 
-        {/* 「她正在经历」过场：托梦/推世界后这拍正在世界里执行，给一句祖魂语气的等待提示，期间托梦/推进按钮禁用。 */}
+        {/* 「她正在经历」过场：指引/推世界后这拍正在世界里执行，给一句祖魂语气的等待提示，期间指引/推进按钮禁用。 */}
         {living && (
           <div style={livingBannerStyle} aria-live="polite">
             <span aria-hidden="true">✦</span>
@@ -634,7 +634,7 @@ export function FateView({ sessionId, unitId }: Props) {
         )}
 
         {/* 空态：没有高光也没有生活 beat 时，把「让世界往前走走看」做成可点按钮——
-            玩家不托梦也能推世界往前一拍（她自己活一段），同样进 living→轮询→刷新。living 中禁用避免重入。 */}
+            玩家不指引也能推世界往前一拍（她自己活一段），同样进 living→轮询→刷新。living 中禁用避免重入。 */}
         {highlights.length === 0 && lifeBeats.length === 0 && (
           <div className="fate-empty">
             <span>还很平静。</span>
@@ -712,7 +712,7 @@ export function FateView({ sessionId, unitId }: Props) {
           );
         })}
 
-        {/* 常驻「让世界往前走」入口：即便已有高光/生活 beat，玩家也能不托梦就推世界往前一拍（她自己活一段）。
+        {/* 常驻「让世界往前走」入口：即便已有高光/生活 beat，玩家也能不指引就推世界往前一拍（她自己活一段）。
             空态已自带按钮，这里仅在「有内容可看」时补一个，避免空态重复出现两枚。 */}
         {(highlights.length > 0 || lifeBeats.length > 0) && (
           <button
@@ -738,7 +738,7 @@ export function FateView({ sessionId, unitId }: Props) {
         </section>
       )}
 
-      {/* 托梦：给她一句嘱咐（可被日后回响引用）。这拍正在经历（living）时禁用，避免重入推进。 */}
+      {/* 指引：给她一句嘱咐（可被日后回响引用）。这拍正在经历（living）时禁用，避免重入推进。 */}
       <section className="fate-intervene">
         <input
           value={interveneText}
@@ -750,7 +750,7 @@ export function FateView({ sessionId, unitId }: Props) {
           }}
         />
         <button disabled={living} onClick={() => void onIntervene()}>
-          {living ? "经历中…" : "托梦"}
+          {living ? "经历中…" : "指引"}
         </button>
       </section>
 

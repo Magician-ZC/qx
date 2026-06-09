@@ -177,7 +177,7 @@ func (service *Service) GenerateOpeningUnitCandidates(ctx context.Context, seed 
 		return fallback, nil
 	}
 
-	systemPrompt := "你是群像战棋游戏的角色导演，负责生成开局候选单位。只输出 JSON。"
+	systemPrompt := "你是一念战棋游戏的角色导演，负责生成开局候选单位。只输出 JSON。"
 	userPrompt := fmt.Sprintf("请生成 %d 个中文候选单位。每个单位必须有 id、name、gender(male/female/nonbinary)、portrait_url、age、biography、recruitment_pitch、specialties(1-3项)、stats、skills，以及 personality 中 courage/loyalty/aggression/prudence/sociability/integrity/stability/ambition 八项 0-1 数值。stats.primary 六项范围 6-15，stats.derived 表示基础战斗/探索能力：attack 6-18、defense/evasion 2-12、accuracy 5-18、vision 3-7、carry_weight 4-10；skills 三组数值范围 0-5。姓名/外号、生平、招募词、属性必须共同体现 personality：高 courage/aggression 的名字可更硬、更冲、更锋利；高 prudence/stability 的名字更稳、更克制；高 sociability/charisma 的名字可更市井、更会来事；高 integrity/loyalty 的名字更可靠；高 ambition 的名字更有野心。所有属性必须结合生平和性格：例如猎户/斥候更高 perception/scouting/bow/vision，铁匠/矿工更高 strength/blunt/carry_weight，医徒更高 wisdom/medical/medicine，商贩/说客更高 charisma/trade/negotiation，谨慎者 defense/evasion/medicine 可高，莽勇者 attack/strength 可高但 prudence 不要硬凑。portrait_url 从 /characters/generated_001_male_warrior.svg 到 /characters/generated_100_female_drummer.svg 中挑选，男女可按编号段大致匹配。名字不要死板，可以混入互联网流行语、谐音梗、轻度抽象梗或含梗外号，但必须服务于性格，不要为了搞怪而和 personality 矛盾；每局必须新鲜，不要复用固定名单。生平要一人一句独特经历，并解释为什么形成这些性格，不要套用同一句模板。生平、性格和属性可被玩家再编辑。随机种子：%d", openingCandidateCount, seed)
 	result, err := service.llm.GenerateJSON(ctx, ai.CompletionRequest{
 		Task:           ai.TaskBackstory,

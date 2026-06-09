@@ -3,11 +3,11 @@ package session
 // 文件说明：命运开盒「世界推进」——让降生主世界后停在 Turn1/部署阶段的 session 真正转起来。
 //
 // 问题（本文件解决的）：主世界角色降生即 Turn1/PhaseDeployment（mainworld.go），从无人推进它跨阶段；而所有命运
-// 事件、角色自治「生活」全挂在执行阶段 + 阶段边界（只有 AdvancePhase 触达）。结果托梦只记日志（执行期永不跑故永不消费）、
+// 事件、角色自治「生活」全挂在执行阶段 + 阶段边界（只有 AdvancePhase 触达）。结果指引只记日志（执行期永不跑故永不消费）、
 // 角色永不自治、命运卡永不冒出来、feed 永远「还很平静」。
 //
 // 本文件提供：
-//   - AdvanceFateWorld：best-effort 推主世界 session 一拍（部署→异步执行一轮自治+边界结算）。复用于托梦/端点/ticker。
+//   - AdvanceFateWorld：best-effort 推主世界 session 一拍（部署→异步执行一轮自治+边界结算）。复用于指引/端点/ticker。
 //   - surfaceLifeBeatBestEffort：主世界玩家角色执行期自治一拍后，把她这拍的经历低调 surface 成一条命运 feed 生活 beat
 //     （LIFE_BEAT 流程事件，每拍至多 1 条、仅玩家角色），让「她近来经历的」始终有内容。
 //   - RunFateAutoTickLoop：后台低频 ticker（flag QUNXIANG_FATE_AUTOTICK 默认关），开启时扫 world_default 下活跃主世界
@@ -36,7 +36,7 @@ import (
 // advanceDeploymentToExecutionFastPath（切执行阶段 + 置 ExecutionInProgress + launchAsyncExecution 起后台一轮）：
 // 角色据**长期生效**的离线宪章/出生 doctrine 自治，无需玩家每回合下令。
 //
-// 全程吞错不崩（best-effort）：推进失败绝不阻断调用它的托梦/端点/ticker。复用于托梦触发、"让世界往前走"端点、后台 ticker。
+// 全程吞错不崩（best-effort）：推进失败绝不阻断调用它的指引/端点/ticker。复用于指引触发、"让世界往前走"端点、后台 ticker。
 func (service *Service) AdvanceFateWorld(ctx context.Context, sessionID string) (advancing bool, err error) {
 	if service == nil || service.sessions == nil {
 		return false, fmt.Errorf("advance fate world: missing dependencies")
@@ -134,7 +134,31 @@ func composeLifeBeatText(actor unit.Record, decision unitDecisionPayload) string
 	if gist == "" {
 		return ""
 	}
+	// 剥掉 gist 开头冗余的自名：当 gist 取自她的对白（decision.Speak 常以自称名起头，如「丛仔，我先稳住」），
+	// 直接 fmt 会拼成「丛仔：丛仔，我先稳住」自己喊自己名字。先去掉开头那一截「名字+分隔符」，避免重复。
+	gist = stripLeadingSelfName(gist, actor.DisplayName())
+	if gist == "" {
+		return ""
+	}
 	return fmt.Sprintf("%s：%s", actor.DisplayName(), gist)
+}
+
+// stripLeadingSelfName 去掉文本开头冗余的「自名 + 常见分隔符（，,：: 、 空格）」前缀（可重复一次），
+// 使生活 beat 不出现「名字：名字，…」的自我称名。纯函数、确定性；名字为空或无前缀则原样返回。
+func stripLeadingSelfName(text, name string) string {
+	out := strings.TrimSpace(text)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return out
+	}
+	if strings.HasPrefix(out, name) {
+		rest := strings.TrimLeft(strings.TrimPrefix(out, name), "，,：:、 \t")
+		// 仅当剥掉名字后仍有实质内容才采用，避免把「丛仔」这种纯名字 beat 清空。
+		if strings.TrimSpace(rest) != "" {
+			out = strings.TrimSpace(rest)
+		}
+	}
+	return out
 }
 
 // isMainWorldPlayerUnit 判断某单位是否为「主世界玩家角色」：本局绑定 world_default（页游主世界）
@@ -157,7 +181,7 @@ func isMainWorldPlayerUnit(state State, unitID string) bool {
 // ===== ④ 后台自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认关）：让她自己活，世界自己往前走 =====
 
 // fateAutoTickEnabled 读 QUNXIANG_FATE_AUTOTICK（true/1/yes/on 视为开），默认关 → ticker 零行为
-//（与既有 flag 风格一致；默认玩家手动托梦/按钮即可推进，开启=世界自己往前走）。
+//（与既有 flag 风格一致；默认玩家手动指引/按钮即可推进，开启=世界自己往前走）。
 func fateAutoTickEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FATE_AUTOTICK"))) {
 	case "true", "1", "yes", "on":

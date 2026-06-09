@@ -175,7 +175,7 @@ export function BloodFeudPanel({ sessionID, unitID, unitName, onClose }: Props) 
     <aside style={panelStyle} role="dialog" aria-label="血仇网络面板">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 血仇</div>
+          <div style={brandStyle}>一念 · 血仇</div>
           <div style={subStyle}>{subject}心里记着的恨。有些是亲历，有些是听闻而来。</div>
         </div>
         <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭血仇面板">

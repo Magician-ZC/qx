@@ -200,9 +200,9 @@ function viewKey(v: ChronicleView): string {
 }
 
 // buildEntryShareCard 把一条编年史条目化成可分享的图片卡：死亡条目用悼卡（death），其余用传记卡（biography）。
-// name 取传入的主角名（整局总览无主角名时用「群像」兜底）；副标带类型徽标 + 回合，正文用条目文案。
+// name 取传入的主角名（整局总览无主角名时用「一念」兜底）；副标带类型徽标 + 回合，正文用条目文案。
 function buildEntryShareCard(entry: ChronicleEntry, unitName: string | undefined): ShareCardOptions {
-  const who = unitName?.trim() || "群像";
+  const who = unitName?.trim() || "一念";
   const meta = metaForKind(entry.kind);
   const subtitle = `${meta.label} · 第 ${entry.turn} 回合`;
   if (entry.kind === "death") {
@@ -301,7 +301,7 @@ export function ChroniclePanel({
     [expanded, anchorOverride, resolveMoment, sessionID, onAnchor],
   );
 
-  const title = unitName?.trim() ? `${unitName.trim()} 的传记` : "群像 · 编年史";
+  const title = unitName?.trim() ? `${unitName.trim()} 的传记` : "一念 · 编年史";
   const subtitle = unitName?.trim()
     ? "她走过的路，一笔一笔都记着。点一条可回到那一刻。"
     : "这片土地上发生过的事，按时间倒着翻。点一条可回到那一刻。";

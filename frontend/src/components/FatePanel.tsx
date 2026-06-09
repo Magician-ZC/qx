@@ -399,8 +399,8 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
     <aside style={panelStyle} role="dialog" aria-label="命运面板">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 命运</div>
-          <div style={subStyle}>你是垂看后人的先祖，能托梦能疾呼，却不能替她活。</div>
+          <div style={brandStyle}>一念 · 命运</div>
+          <div style={subStyle}>你是垂看后人的先祖，能指引能疾呼，却不能替她活。</div>
         </div>
         <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭命运面板">
           ×

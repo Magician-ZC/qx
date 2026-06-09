@@ -60,7 +60,7 @@ function AdminLogin({ onEnter }: { onEnter: () => void }): JSX.Element {
     <div className="adm-shell">
       <div className="adm-login">
         <div className="adm-login-card">
-          <h1>群像 · 司命台</h1>
+          <h1>一念 · 司命台</h1>
           <p>
             GM 管理后台。请输入运营令牌（X-Ops-Token）登录。
             <br />
@@ -118,7 +118,7 @@ export function AdminApp(): JSX.Element {
     <div className="adm-shell">
       <div className="adm-topbar">
         <div className="adm-brand">
-          <span className="adm-brand-title">群像 · 司命台</span>
+          <span className="adm-brand-title">一念 · 司命台</span>
           <span className="adm-brand-sub">GM 管理后台 · 与游戏客户端分离的运营界面</span>
         </div>
         <div className="adm-topbar-right">

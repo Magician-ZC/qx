@@ -221,7 +221,7 @@ export function BillingPanel({ accountId = "", onClose, onRequireLogin }: Props)
     <aside style={panelStyle} role="dialog" aria-label="商城面板">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 商城</div>
+          <div style={brandStyle}>一念 · 商城</div>
           <div style={subStyle}>会员订阅 / 永久解锁 / 配额仪表 · 支付走 {platformLabel(platform)}</div>
         </div>
         <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭商城面板">

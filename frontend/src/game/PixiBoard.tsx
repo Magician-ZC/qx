@@ -94,5 +94,5 @@ export function PixiBoard({
     sceneRef.current?.render(latestModelRef.current);
   }, [session, commanderFactionID, fogPerspectiveUnitID, selectedTileCoord, onTileClick, onOpenDialogues, onOpenUnitChat, nowMs, zoom, executionMarkers]);
 
-  return <div ref={containerRef} className="pixi-board" aria-label="群像单局战场" />;
+  return <div ref={containerRef} className="pixi-board" aria-label="一念单局战场" />;
 }

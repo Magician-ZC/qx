@@ -295,7 +295,7 @@ export function ComplianceGatePanel({ accountId = "", onClose, onRequireLogin }:
     <aside style={panelStyle} role="dialog" aria-label="合规面板">
       <div style={headerStyle}>
         <div>
-          <div style={brandStyle}>群像 · 合规</div>
+          <div style={brandStyle}>一念 · 合规</div>
           <div style={subStyle}>实名认证 · 未成年保护 · 防沉迷</div>
         </div>
         <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭合规面板">

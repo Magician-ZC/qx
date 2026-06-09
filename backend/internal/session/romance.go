@@ -469,7 +469,7 @@ func (service *Service) requestRomanceProposal(
 	leftTier := service.relationTier(ctx, left.ID, right.ID)
 	rightTier := service.relationTier(ctx, right.ID, left.ID)
 	systemPrompt := fmt.Sprintf(
-		"你要同时扮演《群像》中的两个相邻 AI 单位：%s 和 %s。两人已经有过多轮真实交流，但玩家或阵营方针不能替他们决定亲密关系。请判断这段交谈里，是否会由其中一人主动提出确认亲密关系；只有先有人主动提出，另一人又真心接受，关系才会成立。若没人会主动提出，就把 proposer 设为 none。只能返回 JSON。",
+		"你要同时扮演《一念》中的两个相邻 AI 单位：%s 和 %s。两人已经有过多轮真实交流，但玩家或阵营方针不能替他们决定亲密关系。请判断这段交谈里，是否会由其中一人主动提出确认亲密关系；只有先有人主动提出，另一人又真心接受，关系才会成立。若没人会主动提出，就把 proposer 设为 none。只能返回 JSON。",
 		left.DisplayName(),
 		right.DisplayName(),
 	)
@@ -549,7 +549,7 @@ func (service *Service) requestPairConsent(
 		interactionKind = "unit_consent"
 	}
 	systemPrompt := fmt.Sprintf(
-		"你要同时扮演《群像》中的两个相邻 AI 单位：%s 和 %s。玩家不能替任何单位决定%s。请分别判断两人是否自愿同意这个提议；只有双方都真心同意，才把 left_agree 和 right_agree 都设为 true。只能返回 JSON。",
+		"你要同时扮演《一念》中的两个相邻 AI 单位：%s 和 %s。玩家不能替任何单位决定%s。请分别判断两人是否自愿同意这个提议；只有双方都真心同意，才把 left_agree 和 right_agree 都设为 true。只能返回 JSON。",
 		left.DisplayName(),
 		right.DisplayName(),
 		consentScope,
@@ -841,7 +841,7 @@ func (service *Service) generateChildProfile(
 ) (childProfilePayload, ai.CompletionResult, LLMInteraction) {
 	fallback := fallbackChildProfile(state, left, right)
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》的家族档案生成器。%s 与 %s 的孩子即将出生，请同时扮演两位父母共同为孩子取名，并生成孩子的性别、生平和人格向量。名字要像父母在战局中会认真取的名字，不要叫“崽”，不要使用系统旁白。只能返回 JSON。",
+		"你是《一念》的家族档案生成器。%s 与 %s 的孩子即将出生，请同时扮演两位父母共同为孩子取名，并生成孩子的性别、生平和人格向量。名字要像父母在战局中会认真取的名字，不要叫“崽”，不要使用系统旁白。只能返回 JSON。",
 		left.DisplayName(),
 		right.DisplayName(),
 	)

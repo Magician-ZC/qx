@@ -622,7 +622,7 @@ func (service *Service) generateUnitIdentityNarrative(
 // buildUnitIdentityNarrativeRequest 组装单位身份叙事请求（三元组：system、user、request）。
 func buildUnitIdentityNarrativeRequest(record unit.Record) (string, string, ai.CompletionRequest) {
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》的单位设定生成器。请为单位 %s 生成两段文本：1) biography：约 200 字第三人称人物传记；2) recruitment_pitch：单位第一人称招募词。姓名/外号、生平、招募词必须和性格向量互相解释：勇敢或激进的人说话更冲，谨慎或稳定的人更克制，社交高的人更会来事，正直或忠诚高的人更可靠，野心高的人更想证明自己。不要把单位写成玩家遥控器。只返回 JSON。",
+		"你是《一念》的单位设定生成器。请为单位 %s 生成两段文本：1) biography：约 200 字第三人称人物传记；2) recruitment_pitch：单位第一人称招募词。姓名/外号、生平、招募词必须和性格向量互相解释：勇敢或激进的人说话更冲，谨慎或稳定的人更克制，社交高的人更会来事，正直或忠诚高的人更可靠，野心高的人更想证明自己。不要把单位写成玩家遥控器。只返回 JSON。",
 		record.DisplayName(),
 	)
 	userPrompt := buildUnitIdentityNarrativePrompt(record)
@@ -795,7 +795,7 @@ func (service *Service) generateBattleReport(
 	narrator unit.Record,
 ) (battleReportPayload, ai.CompletionResult, LLMInteraction, error) {
 	systemPrompt := fmt.Sprintf(
-		"你是《群像》里的单位 %s。请用第一人称写一段本回合战报，长度 150-300 字，强调你如何依据环境、性格和记忆自主行动。只返回 JSON。",
+		"你是《一念》里的单位 %s。请用第一人称写一段本回合战报，长度 150-300 字，强调你如何依据环境、性格和记忆自主行动。只返回 JSON。",
 		narrator.DisplayName(),
 	)
 	// 叙事密度付费档（PRD §3.6，反 P2W：只增描写详略、不改结果）：会员账户的战报更丰富细腻。默认账户/匿名局无 perk=今日行为。
