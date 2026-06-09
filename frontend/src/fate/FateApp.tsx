@@ -13,15 +13,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   createMyCharacter,
+  deleteCharter,
   getAccountToken,
+  getCharter,
   getMyCharacter,
   getUnitStatus,
   logoutAccount,
+  putCharter,
   recordPlayerIntervention,
   trackFunnel,
 } from "../session/api";
 import { FateView } from "./FateView";
 import { FateBoard } from "./FateBoard";
+import { OnboardingTour } from "../components/OnboardingTour";
+import { CharterEditor } from "../components/CharterEditor";
 import {
   fromPersonalityBlock,
   optionFit,
@@ -116,6 +121,21 @@ const fatePlaySideStyle: React.CSSProperties = {
   minWidth: 300,
   maxWidth: 560,
 };
+// 立约入口按钮的内联样式（本文件不可改 fate.css，故内联，贴合墨色宣纸调）：右栏顶部一条低调暖色描边按钮。
+const charterToggleBtnStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  marginBottom: 10,
+  padding: "8px 14px",
+  border: "1px solid rgba(140, 100, 50, 0.4)",
+  borderRadius: 8,
+  background: "rgba(255, 252, 246, 0.9)",
+  color: "#7a5226",
+  fontFamily: "inherit",
+  fontSize: 13,
+  cursor: "pointer",
+};
 
 export function FateApp() {
   // 初始相位恒为 gate：AuthGate 已保证挂载即已登录，进入直接拉「我的主世界角色」。
@@ -124,6 +144,8 @@ export function FateApp() {
   const [saved, setSaved] = useState<Saved | null>(() => loadSaved());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // charterOpen：降生后玩家点「立约/改约」按钮，浮层式打开 CharterEditor（读/改/撤她的离线宪章）。
+  const [charterOpen, setCharterOpen] = useState(false);
 
   // 捏人四要素 + 出身。
   const [name, setName] = useState("");
@@ -279,12 +301,39 @@ export function FateApp() {
             <FateBoard sessionId={saved.sessionId} unitId={saved.unitId} />
           </div>
           <div style={fatePlaySideStyle}>
+            {/* 立约入口：降生后玩家可随时查看/改/撤她的结构化离线宪章（红线/长期目标/社交授权）。
+                点击浮层式打开 CharterEditor；与 FateView 旁白并列在右栏顶部。 */}
+            <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
+              ✦ 立约 · 看看你与她定下的约
+            </button>
             <FateView sessionId={saved.sessionId} unitId={saved.unitId} />
           </div>
         </div>
         <button className="fate-restart" onClick={() => void signOut()}>
           换个账号登入
         </button>
+
+        {/* 离线宪章编辑浮层：read=getCharter / save=putCharter / delete=deleteCharter（api.ts 现有）。
+            单角色客户端只一名单位，故 units 传单元素；onClose 收起浮层。
+            CharterEditor 的 charter 类型与 api 的 *DTO 结构同构，经薄适配闭包透传以对齐 props 名义类型。 */}
+        {charterOpen && (
+          <CharterEditor
+            sessionId={saved.sessionId}
+            units={[{ id: saved.unitId, name: saved.name }]}
+            initialUnitID={saved.unitId}
+            fetchCharter={(sessionID, unitID) => getCharter(sessionID, unitID)}
+            saveCharter={(sessionID, unitID, charter) => putCharter(sessionID, unitID, charter)}
+            deleteCharter={(sessionID, unitID) => deleteCharter(sessionID, unitID)}
+            onClose={() => setCharterOpen(false)}
+          />
+        )}
+
+        {/* 新手第一分钟引导：首次进入 play 相位才弹（OnboardingTour 内部用 localStorage 'qx_onboarded' 判重）。
+            聚光锚点 [data-tour='fate']/[data-tour='intervene'] 由 FateView 状态卡/指引区的 data-tour 属性提供。
+            onComplete 回调埋点 onboarding_tour 漏斗（finished/skipped 作 source）。 */}
+        <OnboardingTour
+          onComplete={(reason) => void trackFunnel("onboarding_tour", { source: reason })}
+        />
       </div>
     );
   }

@@ -553,7 +553,8 @@ export function FateView({ sessionId, unitId }: Props) {
       </header>
 
       {/* 槽一：状态卡 */}
-      <section className="fate-status">
+      {/* data-tour='fate'：新手引导「世界之事会成为她的命运 / 命运四槽这样看她」步骤的聚光锚点。 */}
+      <section className="fate-status" data-tour="fate">
         {status ? (
           <>
             <div className="fate-status-name">{status.name}</div>
@@ -739,7 +740,8 @@ export function FateView({ sessionId, unitId }: Props) {
       )}
 
       {/* 指引：给她一句嘱咐（可被日后回响引用）。这拍正在经历（living）时禁用，避免重入推进。 */}
-      <section className="fate-intervene">
+      {/* data-tour='intervene'：新手引导「你影响她，而非遥控她」步骤的聚光锚点。 */}
+      <section className="fate-intervene" data-tour="intervene">
         <input
           value={interveneText}
           disabled={living}
