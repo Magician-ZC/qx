@@ -675,6 +675,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	router.GET("/api/admin/worlds-detail", opsTokenGuard(), adminWorldsDetail)
 	router.GET("/api/admin/worlds", opsTokenGuard(), adminWorldsDetail) // 兼容别名
 
+	// 三阵营 GM 只读概览（标识/中文名/道德信条/道德基准/出生据点/当前人口）。阵营开放世界 F3。
+	// 与 worlds-detail 同口径只读守卫（opsTokenGuard：未配 token 放行，配了需正确 X-Ops-Token）。
+	router.GET("/api/admin/factions", opsTokenGuard(), func(c *gin.Context) {
+		details, err := newSessionService().ListFactionsDetail(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"factions": details})
+	})
+
 	// 绝对置位某 region 的威胁等级（GM 人工拉高/清零某地威胁度做活动/演练）。返回置位后的实际威胁值。
 	// 写端点：状态变更，fail-closed（opsTokenGuardStrict）。
 	router.POST("/api/admin/worlds/:worldId/regions/:regionId/threat", opsTokenGuardStrict(), func(c *gin.Context) {

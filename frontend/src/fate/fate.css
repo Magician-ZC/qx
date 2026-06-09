@@ -63,6 +63,82 @@
   color: #97825f;
   margin-top: 2px;
 }
+/* 状态卡：阵营 + 道德倾向行（她现在归属哪片天地、心向何方）。
+   一行横向：左侧阵营徽（中文名，按阵营着色）、中部「心向…」描述、右侧/下方三色道德条。
+   窄屏 flex-wrap 自然换行不溢出。 */
+.fate-faction-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.fate-faction-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  border: 1px solid rgba(120, 90, 50, 0.35);
+  background: rgba(160, 110, 50, 0.1);
+  color: #6b4a22;
+}
+/* 三阵营各自配色：自由暖橙、秩序沉蓝、混乱赭红——与三色道德条同口径，呼应阵营底色。 */
+.fate-faction-badge-freedom {
+  border-color: rgba(196, 132, 58, 0.5);
+  background: rgba(196, 132, 58, 0.14);
+  color: #9a6a2a;
+}
+.fate-faction-badge-order {
+  border-color: rgba(90, 110, 150, 0.5);
+  background: rgba(90, 110, 150, 0.14);
+  color: #4a5e86;
+}
+.fate-faction-badge-chaos {
+  border-color: rgba(168, 70, 58, 0.5);
+  background: rgba(168, 70, 58, 0.14);
+  color: #9a4438;
+}
+/* 主导维与归属阵营一致时，徽加一圈描边强调（她确实「认了」这一阵营）。 */
+.fate-faction-badge.dominant {
+  box-shadow: 0 0 0 1px currentColor inset;
+  font-weight: 600;
+}
+.fate-moral-desc {
+  color: #7a6038;
+  letter-spacing: 0.04em;
+}
+.fate-moral-nums {
+  color: #a08a64;
+  font-size: 11px;
+}
+/* 三色道德条：自由/秩序/混乱按各维 [0,100] 占比横向铺色，一眼看清她心之所偏。 */
+.fate-moral-bar {
+  display: inline-flex;
+  width: 100%;
+  height: 7px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(120, 90, 50, 0.12);
+  margin-top: 2px;
+}
+.fate-moral-seg {
+  display: block;
+  height: 100%;
+  transition: width 0.4s ease;
+}
+.fate-moral-seg-freedom {
+  background: linear-gradient(90deg, #c4843a, #d9a566);
+}
+.fate-moral-seg-order {
+  background: linear-gradient(90deg, #5a6e96, #8aa0c4);
+}
+.fate-moral-seg-chaos {
+  background: linear-gradient(90deg, #a8463a, #c47060);
+}
+
 .fate-status-bars {
   display: flex;
   flex-direction: column;
@@ -216,6 +292,26 @@
   border-left-color: #9a6a3a;
   background: rgba(245, 232, 210, 0.7);
   font-style: italic;
+}
+
+/* 阵营切换卡专属视觉标记（锦上添花）：她的心渐渐偏离了旧阵营、认了新归属——
+   用赭红左缘 + 微染底色把这桩「立场之变」与寻常高光卡区分开，呼应阵营之变的分量。 */
+.fate-card-switch {
+  border-left-color: #a8463a;
+  background: linear-gradient(180deg, rgba(168, 70, 58, 0.08), rgba(245, 232, 210, 0.55));
+}
+.fate-switch-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: #9a4438;
+  background: rgba(168, 70, 58, 0.12);
+  border: 1px solid rgba(168, 70, 58, 0.4);
 }
 
 /* 高光卡：纵向 flex + gap 把「叙事文 + 三键反馈 + 讲给别人听 + 分享图 + 接管战」逐行分隔，
@@ -380,6 +476,55 @@
   font-size: 14px;
   color: #4a3417;
 }
+/* 捏人 · 阵营三选一：她心向何方。三张卡片各配阵营名 + 一句道德信条，选中态高亮。
+   与 .fate-create 表单同款墨色宣纸调，独立成块（非 <label>），故另起样式。 */
+.fate-faction-pick {
+  margin-bottom: 14px;
+}
+.fate-faction-pick-label {
+  font-size: 13px;
+  color: #6a4e26;
+  margin-bottom: 8px;
+}
+.fate-faction-options {
+  display: flex;
+  gap: 8px;
+}
+.fate-faction-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 8px;
+  border: 1px solid rgba(140, 100, 50, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 253, 248, 0.92);
+  color: #5a3f1c;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.2s, border-color 0.2s, transform 0.1s;
+}
+.fate-faction-option:hover {
+  background: #f5e8cf;
+}
+.fate-faction-option.selected {
+  border-color: rgba(122, 82, 38, 0.85);
+  background: #f0dcb8;
+  box-shadow: 0 0 0 1px rgba(122, 82, 38, 0.4) inset;
+}
+.fate-faction-name {
+  font-size: 16px;
+  letter-spacing: 0.1em;
+  color: #6b4a22;
+}
+.fate-faction-creed {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #8a7556;
+}
+
 .fate-create-btn {
   width: 100%;
   margin-top: 8px;
@@ -473,5 +618,10 @@
     min-width: 0;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+  /* 捏人阵营三选项在窄屏收紧内边距、允许卡片收缩，三张仍同行不溢出。 */
+  .fate-faction-option {
+    min-width: 0;
+    padding: 10px 6px;
   }
 }

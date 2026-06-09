@@ -28,16 +28,18 @@ import "./admin.css";
 import { getAdminOpsToken, hasAdminOpsToken, setAdminOpsToken } from "./adminApi";
 import { FlagsPanel } from "./FlagsPanel";
 import { WorldConfigPanel } from "./WorldConfigPanel";
+import { FactionPanel } from "./FactionPanel";
 import { GmEventPanel } from "./GmEventPanel";
 import { SeasonPanel } from "./SeasonPanel";
 import { MonitoringPanel } from "./MonitoringPanel";
 
 // AdminTab 是左导航的页签标识。
-type AdminTab = "flags" | "worlds" | "gm-events" | "seasons" | "monitoring";
+type AdminTab = "flags" | "worlds" | "factions" | "gm-events" | "seasons" | "monitoring";
 
 const TABS: { id: AdminTab; label: string }[] = [
   { id: "flags", label: "运行时开关" },
   { id: "worlds", label: "世界配置" },
+  { id: "factions", label: "阵营配置" },
   { id: "gm-events", label: "事件注入" },
   { id: "seasons", label: "赛季" },
   { id: "monitoring", label: "监控" },
@@ -147,6 +149,7 @@ export function AdminApp(): JSX.Element {
         <main className="adm-content">
           {tab === "flags" ? <FlagsPanel /> : null}
           {tab === "worlds" ? <WorldConfigPanel /> : null}
+          {tab === "factions" ? <FactionPanel /> : null}
           {tab === "gm-events" ? <GmEventPanel /> : null}
           {tab === "seasons" ? <SeasonPanel /> : null}
           {tab === "monitoring" ? <MonitoringPanel /> : null}

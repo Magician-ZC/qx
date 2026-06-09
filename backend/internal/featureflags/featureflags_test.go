@@ -108,6 +108,8 @@ func TestKnownGameplayFlagsContainsMainFlags(t *testing.T) {
 		"QUNXIANG_SERENDIPITY", "QUNXIANG_WORLDIZE_INBOUND", "QUNXIANG_AUTO_MATCH", "QUNXIANG_AUTO_SOCIAL",
 		"QUNXIANG_ZEROSUM_CONTEST", "QUNXIANG_BLOOD_FEUD", "QUNXIANG_FREEZE_LIST", "QUNXIANG_CONSISTENCY_TIGHTEN",
 		"QUNXIANG_COURAGE_CURVE", "QUNXIANG_AMBITION_SCORING", "QUNXIANG_MAIN_VILLAGE", "QUNXIANG_WORLD_BINDING",
+		// 三阵营开放世界 F2/F3：阵营切换 + 阵营冲突遭遇（均默认关，GM 后台可运行时开关）。
+		"QUNXIANG_FACTION_SWITCH", "QUNXIANG_FACTION_PVE",
 	}
 	for _, name := range mustHave {
 		if _, ok := present[name]; !ok {
@@ -140,6 +142,14 @@ func TestKnownGameplayFlagsContainsMainFlags(t *testing.T) {
 	// 多档字符串型 world_binding 应带 Values。
 	if len(present["QUNXIANG_WORLD_BINDING"].Values) == 0 {
 		t.Errorf("QUNXIANG_WORLD_BINDING 应是多档字符串型（带 Values）")
+	}
+
+	// 阵营切换 / 阵营冲突默认关（零行为，需 GM 显式开启）。
+	defaultOff := []string{"QUNXIANG_FACTION_SWITCH", "QUNXIANG_FACTION_PVE"}
+	for _, name := range defaultOff {
+		if present[name].DefaultOn {
+			t.Errorf("%s 应默认关（DefaultOn=false）", name)
+		}
 	}
 }
 

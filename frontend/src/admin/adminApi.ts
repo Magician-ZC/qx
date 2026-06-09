@@ -236,6 +236,32 @@ export async function seedVillage(
   return data.result ?? { seeded: data.seeded ?? 0 };
 }
 
+// ============ ②b 阵营概览（GM 只读，三阵营开放世界 F3；后端 session.ListFactionsDetail，GET /api/admin/factions） ============
+
+// AdminFactionTriaxis 对齐后端 session.Triaxis（json tag）：道德基准三维（freedom/order/chaos，各 [0,100]）。
+export type AdminFactionTriaxis = {
+  freedom: number;
+  order: number;
+  chaos: number;
+};
+
+// AdminFactionDetail 对齐后端 session.FactionDetail（json tag）：阵营标识 + 中文名 + 信条 + 基准 + 据点 + 人口。
+export type AdminFactionDetail = {
+  id: string; // 阵营 ID（freedom/order/chaos）
+  name_zh: string; // 中文名（自由/秩序/混乱）
+  moral_creed: string; // 道德信条
+  baseline: AdminFactionTriaxis; // 道德基准
+  spawn_points: string[] | null; // 出生据点 region ID 集合
+  population: number; // 当前人口（属该阵营的 units 计数，best-effort）
+};
+
+// listFactionsDetail 拉三阵营概览（GET /api/admin/factions；后端 session.ListFactionsDetail 已就绪）。
+// 后端未接线（404）时调用方回退到空列表（FactionPanel 已做友好降级提示）。
+export async function listFactionsDetail(): Promise<AdminFactionDetail[]> {
+  const data = await request<{ factions?: AdminFactionDetail[] }>(`/api/admin/factions`);
+  return data.factions ?? [];
+}
+
 // ============ ③ GM 世界事件注入（已落地：POST /api/ops/worlds/:worldId/events） ============
 
 export type GmWorldEventInput = {

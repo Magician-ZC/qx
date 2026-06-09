@@ -23,6 +23,14 @@ type Props = {
   unitId: string;
 };
 
+// MoralAlignment 是她的三维数值道德轴（对齐后端 faction.MoralAlignment 的 json tag，各 [0,100]）。
+// omitempty：旧单位/旧存档无此字段→全 0（无明显倾向），状态卡按「未显道德倾向」处理、不渲染道德行。
+type MoralAlignment = {
+  freedom: number;
+  order: number;
+  chaos: number;
+};
+
 type StatusCard = {
   name: string;
   hp: number;
@@ -31,7 +39,62 @@ type StatusCard = {
   mood: string;
   biography: string;
   lineage: string;
+  // faction：她当前所属阵营 id（freedom/order/chaos）；空串=旧单位无阵营字段，不渲染阵营行。
+  faction: string;
+  // moral：她的三维道德轴；全 0 视为无明显倾向，不渲染道德行。
+  moral: MoralAlignment;
 };
+
+// FACTION_NAME_ZH 把阵营 id 译成中文名（对齐后端 faction.Definition.NameZH）。未知 id 回落原串。
+const FACTION_NAME_ZH: Record<string, string> = {
+  freedom: "自由",
+  order: "秩序",
+  chaos: "混乱",
+};
+
+function factionNameZH(id: string): string {
+  const key = id.trim().toLowerCase();
+  return FACTION_NAME_ZH[key] ?? id.trim();
+}
+
+// readMoral 从单位 JSON 的 moral_alignment 块（后端 faction.MoralAlignment）防御性解出三维道德轴。
+// 缺字段/非对象→全 0（无明显倾向）。各维不夹钳（后端已 clamp 到 [0,100]，前端只读展示）。
+function readMoral(raw: unknown): MoralAlignment {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    freedom: Number(o.freedom ?? 0),
+    order: Number(o.order ?? 0),
+    chaos: Number(o.chaos ?? 0),
+  };
+}
+
+// moralIsZero 判定道德轴是否全零（旧单位/无倾向）——对齐后端 MoralAlignment.IsZero。
+function moralIsZero(m: MoralAlignment): boolean {
+  return m.freedom === 0 && m.order === 0 && m.chaos === 0;
+}
+
+// dominantMoral 据三维道德轴用 argmax 取主导维（对齐后端 DominantFaction：平手按 freedom>order>chaos 稳定裁定）。
+// 全零返回空串（无明显倾向）。返回的是阵营 id（freedom/order/chaos）。
+function dominantMoral(m: MoralAlignment): string {
+  if (moralIsZero(m)) return "";
+  let dominant = "freedom";
+  let best = m.freedom;
+  if (m.order > best) {
+    best = m.order;
+    dominant = "order";
+  }
+  if (m.chaos > best) {
+    dominant = "chaos";
+  }
+  return dominant;
+}
+
+// moralDescribe 用主导维译成一句「心向…」的人话（祖魂语气），如「心向自由」。
+function moralDescribe(m: MoralAlignment): string {
+  const dom = dominantMoral(m);
+  if (!dom) return "";
+  return `心向${factionNameZH(dom)}`;
+}
 
 function readStatus(unit: Record<string, unknown> | null): StatusCard | null {
   if (!unit) return null;
@@ -45,11 +108,23 @@ function readStatus(unit: Record<string, unknown> | null): StatusCard | null {
     mood: String(status.mood ?? ""),
     biography: String(identity.biography ?? ""),
     lineage: String(identity.lineage ?? ""),
+    // faction/moral_alignment 是 unit.Record 的顶层字段（GET /api/units/:id 直接 marshal record）。
+    faction: String(unit.faction ?? ""),
+    moral: readMoral(unit.moral_alignment),
   };
 }
 
 function cardText(payload: Record<string, unknown>): string {
   return String(payload.narrative ?? "她那边，出了点事。");
+}
+
+// isFactionSwitchCard 嗅探一张命运卡是否为「阵营切换」事件（后端 FACTION_SWITCH 命运卡，走通用 feed）。
+// 后端叙事固定含「渐渐偏离了…认了…」措辞（faction_switch.go 的 cardSummary/provenance）。
+// 命运卡无专属 kind/code 字段透传到前端，故按叙事特征串识别——锦上添花的视觉标记，命中即给阵营切换专属调；
+// 不命中按普通高光卡渲染，绝不影响功能。
+function isFactionSwitchCard(card: FateCard): boolean {
+  const text = (card.narrative ?? "").trim();
+  return text.includes("渐渐偏离了") || (text.includes("偏离") && text.includes("认了"));
 }
 
 // 情境化 choice 按钮的内联样式（叠在 fate.css 的 `.fate-actions button` 基础态之上，仅补「label 叠倾向提示」的纵向排版）。
@@ -328,6 +403,9 @@ export function FateView({ sessionId, unitId }: Props) {
           <>
             <div className="fate-status-name">{status.name}</div>
             {status.lineage && <div className="fate-status-lineage">{status.lineage}</div>}
+            {/* 阵营 + 道德倾向：她现在归属哪片天地、心向何方。
+                faction 空（旧单位无字段）则不渲染该行；道德轴全零（无明显倾向）则省略道德描述与三色条。 */}
+            <FactionLine faction={status.faction} moral={status.moral} />
             <div className="fate-status-bars">
               <Bar label="气血" value={status.hp} max={100} tone="hp" />
               <Bar label="饥饱" value={status.hunger} max={100} tone="hunger" />
@@ -395,8 +473,14 @@ export function FateView({ sessionId, unitId }: Props) {
         {highlights.map((c, i) => {
           // reactedTick 进表达式仅为让按钮态随 reactedRef 变化重渲（值本身不参与逻辑）。
           const reacted = reactedTick >= 0 && reactedRef.current.has(fateCardKey(c));
+          // 阵营切换卡专属视觉标记（锦上添花）：命中则加 -switch 调 + 顶部小徽，提示「她的心渐渐偏离了…」。
+          const switched = isFactionSwitchCard(c);
           return (
-            <div className="fate-card fate-card-highlight" key={`h${i}`}>
+            <div
+              className={`fate-card fate-card-highlight${switched ? " fate-card-switch" : ""}`}
+              key={`h${i}`}
+            >
+              {switched && <span className="fate-switch-badge">⟲ 阵营之变</span>}
               <span className="fate-card-text">{c.narrative}</span>
               {/* 三键轻反馈：这段她的命运，落在你预期里还是吓你一跳？一点即埋点（同卡只记一次）。 */}
               <div className="fate-react-row">
@@ -527,6 +611,47 @@ function BattleTakeoverButton({ card }: { card: FateCard }) {
       <div style={fateTakeoverHintStyle}>
         {battle.opponent ? `她正与「${battle.opponent}」对阵。` : "她正陷入一场恶战。"}你可以接过指挥，替她打完这一仗。
       </div>
+    </div>
+  );
+}
+
+// FactionLine 渲染状态卡里的「阵营 + 道德倾向」一行：左侧阵营徽（中文名）、右侧主导倾向描述 +
+// 三色道德条（自由/秩序/混乱按各维 [0,100] 占比着色）。
+//   - faction 空（旧单位无阵营字段）→ 整行不渲染（返回 null），向后兼容；
+//   - 道德轴全零（无明显倾向）→ 渲染阵营徽，但省略「心向…」描述与三色条（无可视化的倾向）。
+function FactionLine({ faction, moral }: { faction: string; moral: MoralAlignment }) {
+  const fid = faction.trim();
+  if (!fid) return null;
+  const zero = moralIsZero(moral);
+  const describe = zero ? "" : moralDescribe(moral);
+  // 三色条按三维数值归一为占比（防全零除零：zero 时不渲染条）。
+  const sum = moral.freedom + moral.order + moral.chaos;
+  const pct = (v: number) => (sum > 0 ? (v / sum) * 100 : 0);
+  // 主导维高亮：与 describe 同口径取主导阵营 id，用于给该徽加 selected 调。
+  const dom = dominantMoral(moral);
+  return (
+    <div className="fate-faction-line">
+      <span
+        className={`fate-faction-badge fate-faction-badge-${fid}${dom === fid ? " dominant" : ""}`}
+        title={`她现在归属：${factionNameZH(fid)}`}
+      >
+        {factionNameZH(fid)}
+      </span>
+      {describe && (
+        <span className="fate-moral-desc" title={`自由 ${Math.round(moral.freedom)} · 秩序 ${Math.round(moral.order)} · 混乱 ${Math.round(moral.chaos)}`}>
+          {describe}
+          <span className="fate-moral-nums">
+            （自由{Math.round(moral.freedom)}/秩序{Math.round(moral.order)}/混乱{Math.round(moral.chaos)}）
+          </span>
+        </span>
+      )}
+      {!zero && (
+        <span className="fate-moral-bar" aria-label="道德倾向三色条">
+          <span className="fate-moral-seg fate-moral-seg-freedom" style={{ width: `${pct(moral.freedom)}%` }} />
+          <span className="fate-moral-seg fate-moral-seg-order" style={{ width: `${pct(moral.order)}%` }} />
+          <span className="fate-moral-seg fate-moral-seg-chaos" style={{ width: `${pct(moral.chaos)}%` }} />
+        </span>
+      )}
     </div>
   );
 }

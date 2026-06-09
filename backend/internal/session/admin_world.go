@@ -13,9 +13,11 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"qunxiang/backend/internal/faction"
 	"qunxiang/backend/internal/featureflags"
 	"qunxiang/backend/internal/region"
 	"qunxiang/backend/internal/storage/dbdialect"
@@ -177,6 +179,89 @@ func (service *Service) countSeededVillagers(ctx context.Context, sessionID stri
 		}
 	}
 	return count, true
+}
+
+// ===== 阵营概览（GM 只读，三阵营开放世界 F3） =====
+
+// FactionDetail 是一个阵营的 GM 只读视图：标识 + 中文名 + 道德基准 + 出生据点 + 当前人口。
+// 供 GM 后台「阵营配置」面板展示世界的阵营分布（人口按该阵营 units 计数，best-effort）。
+type FactionDetail struct {
+	ID          string   `json:"id"`           // 阵营 ID（freedom/order/chaos）
+	NameZH      string   `json:"name_zh"`      // 中文名（自由/秩序/混乱）
+	MoralCreed  string   `json:"moral_creed"`  // 道德信条（行事底色）
+	Baseline    Triaxis  `json:"baseline"`     // 道德基准（该阵营角色降生初值）
+	SpawnPoints []string `json:"spawn_points"` // 出生据点 region ID 集合
+	Population  int      `json:"population"`   // 当前人口（属该阵营的 units 计数，best-effort，读失败为 0）
+}
+
+// Triaxis 是道德基准的三维数值视图（freedom/order/chaos 各 [0,100]），对齐 faction.MoralAlignment 的 json tag。
+type Triaxis struct {
+	Freedom float64 `json:"freedom"`
+	Order   float64 `json:"order"`
+	Chaos   float64 `json:"chaos"`
+}
+
+// ListFactionsDetail 列出三阵营的 GM 只读概览（标识/中文名/道德基准/出生据点/当前人口）。
+// 三阵营定义来自 faction.All()（静态、确定性）；人口按全库 units 的 profile.faction 计数（best-effort）。
+// best-effort：人口聚合查询失败时人口留 0，绝不让阵营概览整体失败——阵营定义本身恒可返回。
+func (service *Service) ListFactionsDetail(ctx context.Context) ([]FactionDetail, error) {
+	if service == nil {
+		return nil, fmt.Errorf("list factions detail: nil service")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 人口按阵营聚合（best-effort：DB 缺失/查询失败 → 全零人口，不阻断）。
+	popByFaction := service.countUnitsByFaction(ctx)
+	defs := faction.All()
+	out := make([]FactionDetail, 0, len(defs))
+	for _, def := range defs {
+		out = append(out, FactionDetail{
+			ID:         def.ID,
+			NameZH:     def.NameZH,
+			MoralCreed: def.MoralCreed,
+			Baseline: Triaxis{
+				Freedom: def.Baseline.Freedom,
+				Order:   def.Baseline.Order,
+				Chaos:   def.Baseline.Chaos,
+			},
+			SpawnPoints: append([]string(nil), def.SpawnPoints...),
+			Population:  popByFaction[def.ID],
+		})
+	}
+	return out, nil
+}
+
+// countUnitsByFaction best-effort 扫全库 units 的 profile_json，把 faction 字段归一后按阵营 ID 计数。
+// 返回 faction-ID → 人口数（仅含三阵营之一的有效阵营；空/未知阵营不计）。
+// best-effort：service.db 为 nil 或查询/扫描失败时返回空 map（人口全零），绝不让 ListFactionsDetail 失败。
+// 只 SELECT profile_json（不取全行），仅反序列化 faction 字段（轻量），避免拉满整张单位表。
+func (service *Service) countUnitsByFaction(ctx context.Context) map[string]int {
+	out := map[string]int{}
+	if service == nil || service.db == nil {
+		return out
+	}
+	rows, err := service.db.QueryContext(ctx, `SELECT profile_json FROM units`)
+	if err != nil {
+		return out // best-effort：查询失败 → 人口全零
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var profileJSON string
+		if err := rows.Scan(&profileJSON); err != nil {
+			continue // 单行扫描失败跳过（best-effort）
+		}
+		var slim struct {
+			Faction string `json:"faction"`
+		}
+		if err := json.Unmarshal([]byte(profileJSON), &slim); err != nil {
+			continue
+		}
+		if fid := faction.Normalize(slim.Faction); fid != "" {
+			out[fid]++
+		}
+	}
+	return out
 }
 
 // ===== featureflags.Store 实现（运行时 flag override 的双驱动持久化后端） =====

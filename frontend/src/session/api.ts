@@ -826,6 +826,11 @@ export type MyCharacter = {
   name?: string;
   world_id?: string;
   origin?: string;
+  // faction/spawn_region/moral_alignment 对齐后端 MainWorldCharacter 的 json tag（阵营开放世界 F1+）：
+  // 所属阵营（freedom/order/chaos）/ 出生据点 region / 3 维道德基准（=该阵营道德基准）。均 omitempty。
+  faction?: string;
+  spawn_region?: string;
+  moral_alignment?: { freedom?: number; order?: number; chaos?: number };
   created?: boolean;
 };
 
@@ -836,6 +841,8 @@ export type MyCharacterInput = {
   desire?: string;
   wound?: string;
   redline?: string;
+  // faction 是玩家选的阵营（freedom/order/chaos）；空/非法时后端据出身/夙愿启发选（阵营开放世界 F3 捏人入口）。
+  faction?: string;
 };
 
 // getMe 读当前登录账号；未登录（无 token）或 token 失效（401）一律返回 null（不抛），供 AuthGate 判定登录态。

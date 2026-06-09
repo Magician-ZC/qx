@@ -76,6 +76,15 @@ function persistSaved(next: Saved | null): void {
 
 const ORIGINS = ["边境猎户", "铁匠之女", "落魄书生", "行脚商人", "庙祝巫医", "流亡贵族", "采药孤女"];
 
+// FACTIONS 三阵营选项（对齐后端 internal/faction：ID freedom/order/chaos + 中文名 + 道德信条）。
+// 玩家捏人时三选一，连同 name/origin/desire/wound/redline 一起 createMyCharacter({...,faction})。
+// id 用后端稳定常量；后端 Normalize 也容中文别名，但前端固定传英文 id 最稳。
+const FACTIONS: { id: string; nameZH: string; creed: string }[] = [
+  { id: "freedom", nameZH: "自由", creed: "不受束缚，各凭本心。" },
+  { id: "order", nameZH: "秩序", creed: "守序尽责，敬畏规矩。" },
+  { id: "chaos", nameZH: "混乱", creed: "打破桎梏，快意恩仇。" },
+];
+
 export function FateApp() {
   // 初始相位恒为 gate：AuthGate 已保证挂载即已登录，进入直接拉「我的主世界角色」。
   const [phase, setPhase] = useState<Phase>("gate");
@@ -87,6 +96,8 @@ export function FateApp() {
   // 捏人四要素 + 出身。
   const [name, setName] = useState("");
   const [origin, setOrigin] = useState(ORIGINS[0]);
+  // faction：玩家选择的阵营（freedom/order/chaos），默认自由。决定她降生的阵营 + 道德基准 + 出生据点。
+  const [faction, setFaction] = useState(FACTIONS[0].id);
   const [desire, setDesire] = useState("");
   const [wound, setWound] = useState("");
   const [redline, setRedline] = useState("");
@@ -139,13 +150,17 @@ export function FateApp() {
     setError("");
     try {
       // 账号绑定幂等降生：后端据令牌把角色挂到该账号，重复调用返回同一角色（多设备/重试安全）。
+      // faction 随捏人入参一起提交，决定她降生的阵营 + 道德基准 + 出生据点（后端 MainWorldCharacterInput.Faction）。
+      // crossFileNeeds：api.ts 的 MyCharacterInput 尚无 faction 字段——为不阻塞本文件类型检查，这里在传入处局部
+      // 扩展类型（&{faction:string}）。待 B1 给 MyCharacterInput 补 faction?:string 后，可移除此 cast。
       const mine = await createMyCharacter({
         name: trimmed,
         origin,
         desire: desire.trim(),
         wound: wound.trim(),
         redline: redline.trim(),
-      });
+        faction,
+      } as Parameters<typeof createMyCharacter>[0] & { faction: string });
       const sessionId = mine.session_id;
       const unitId = mine.unit_id;
       if (!sessionId || !unitId) throw new Error("未能创建角色");
@@ -203,7 +218,7 @@ export function FateApp() {
     } finally {
       setBusy(false);
     }
-  }, [name, origin, desire, wound, redline]);
+  }, [name, origin, faction, desire, wound, redline]);
 
   // 换个账号登入 / 登出：FateApp 不自管鉴权态，故登出后**不能**只切自身相位（那样会与外层 AuthGate 的
   // authed 脱钩 → 双登录 UI 并存 + 残留前一用户名）。正确做法：清账号令牌（logoutAccount 内部无论成败都清本地
@@ -299,6 +314,26 @@ export function FateApp() {
             ))}
           </select>
         </label>
+
+        {/* 阵营：她降生在哪片天地、心向何方。三选一，各配一句道德信条——这决定她为人处世的底色。 */}
+        <div className="fate-faction-pick">
+          <div className="fate-faction-pick-label">她心向何方</div>
+          <div className="fate-faction-options">
+            {FACTIONS.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className={`fate-faction-option${faction === f.id ? " selected" : ""}`}
+                onClick={() => setFaction(f.id)}
+                aria-pressed={faction === f.id}
+              >
+                <span className="fate-faction-name">{f.nameZH}</span>
+                <span className="fate-faction-creed">{f.creed}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         <label>
           欲望（她真正想要的）
           <input value={desire} placeholder="如：替惨死的父母讨回公道" onChange={(e) => setDesire(e.target.value)} />

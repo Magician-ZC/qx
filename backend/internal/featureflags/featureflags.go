@@ -174,6 +174,10 @@ var knownGameplayFlags = []FlagSpec{
 	{Name: "QUNXIANG_AMBITION_SCORING", Description: "野心打分（带野心语义的候选动作按角色野心引力加权）；默认关。", DefaultOn: false},
 	{Name: "QUNXIANG_MAIN_VILLAGE", Description: "主战局出生织 20 人关系网（命运开盒「身边已有二十个有名有姓的人」）；**默认开**。", DefaultOn: true},
 
+	// —— 三阵营开放世界（F2/F3） —— //
+	{Name: "QUNXIANG_FACTION_SWITCH", Description: "阵营切换（满足隐藏条件时角色概率切换阵营）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_FACTION_PVE", Description: "阵营冲突遭遇（游历中撞见敌对阵营的人时低频概率触发一次冲突遭遇，对手入敌方队列、出命运卡可接管）；默认关。", DefaultOn: false},
+
 	// —— 多档字符串型 —— //
 	{
 		Name:        "QUNXIANG_WORLD_BINDING",

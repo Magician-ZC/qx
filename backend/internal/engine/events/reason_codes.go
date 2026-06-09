@@ -83,6 +83,8 @@ const (
 	// 阵营改换（漂移满足全部隐藏条件后的概率性涌现切换，流程留痕 + 经命运卡 surface）。
 	ReasonMoralDrift    ReasonCode = "MORAL_DRIFT"
 	ReasonFactionSwitch ReasonCode = "FACTION_SWITCH"
+	// 阵营开放世界 F3：阵营冲突遭遇（游历中撞见敌对阵营的人，刀已出鞘——流程留痕，对手入敌方队列、出命运卡可接管）。
+	ReasonFactionConflict ReasonCode = "FACTION_CONFLICT"
 
 	// 治理处置（举报闭环 ResolveModerationReport，经 status.Mutator 改保护字段并留痕）。
 	// MODERATION_WARNING：警告——对被举报单位小幅下调士气示警；MODERATION_BAN：封禁——重罚士气与忠诚。
@@ -251,6 +253,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonAmbitionShift, Category: CategoryLifecycle, DisplayName: "野心流转", DefaultReasonText: "经历沉淀，她内心所求悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonMoralDrift, Category: CategoryLifecycle, DisplayName: "道德流转", DefaultReasonText: "经历沉淀，她的道德取向悄然偏移了几分", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonFactionSwitch, Category: CategoryLifecycle, DisplayName: "改换门庭", DefaultReasonText: "她的心，渐渐偏离了旧阵营，认了新的归属", StatDomains: []string{}, ImportanceMin: 7, ImportanceMax: 10},
+		{Code: ReasonFactionConflict, Category: CategoryLifecycle, DisplayName: "阵营冲突", DefaultReasonText: "她在路上撞见了敌对阵营的人，刀已出鞘", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
 		{Code: ReasonRedlineTrip, Category: CategoryLifecycle, DisplayName: "触碰红线", DefaultReasonText: "一桩行为越过了她（或你）立下的红线", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonOOCRejected, Category: CategoryLifecycle, DisplayName: "动机被拦", DefaultReasonText: "因无法解释的动机被拦下，回退到稳妥选择", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 
