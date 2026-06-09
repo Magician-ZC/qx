@@ -146,8 +146,10 @@ CREATE TABLE IF NOT EXISTS single_player_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_single_player_sessions_updated_at ON single_player_sessions(updated_at DESC);
--- 大世界页游入口：按 (account_id, world_id) 查「该账号在某世界的角色 session」（GET /api/me/character resume）。
-CREATE INDEX IF NOT EXISTS idx_single_player_sessions_account_world ON single_player_sessions(account_id, world_id);
+-- 大世界页游入口的 (account_id, world_id) 复合索引（GET /api/me/character resume）刻意不在此建：
+-- world_id 是后加列，存量旧库的 single_player_sessions 建表时无此列，而 schema.sql 早于补列迁移执行，
+-- 在此 CREATE INDEX 会因 “no such column: world_id” 致启动失败（fresh 库也无需——下方迁移统一建）。
+-- 该索引由 store.go Open 路径的 dbmigrate.EnsureIndex（EnsureColumns 补 world_id 之后）幂等创建，双驱动安全。
 
 CREATE TABLE IF NOT EXISTS session_phase_snapshots (
   id TEXT PRIMARY KEY,

@@ -134,8 +134,9 @@ CREATE TABLE IF NOT EXISTS single_player_sessions (
   world_id VARCHAR(191) NULL,
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
-  INDEX idx_single_player_sessions_updated_at (updated_at),
-  INDEX idx_single_player_sessions_account_world (account_id, world_id)
+  -- (account_id, world_id) 复合索引统一由 store.go Open 的 dbmigrate.EnsureIndex 在 EnsureColumns 补列之后建（与 sqlite 同源），
+  -- 不在此内联——保持双驱动一致、避免存量库列序差异。
+  INDEX idx_single_player_sessions_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS session_phase_snapshots (
