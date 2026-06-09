@@ -93,15 +93,19 @@ func (service *Service) propagateThreatSetback(ctx context.Context, state *State
 
 		summary := threatSetbackSummary(victimName, threatOrRegion, penaltyLayer, regionRavaged, fidelity)
 
+		// reason-code 是 SurfaceFateEvent 的「分类器」（不经 Mutator、不改状态）：标记旁观者「目睹/闻知一场惨烈挫败」。
+		//   - 家乡遭劫(regionRavaged) → REGION_RAVAGED（PvE 专属码，家园之难取材；CategoryLifecycle）。
+		//   - 单纯「她败了」 → EMOTION_TRAUMA（「目睹惨烈事件后情绪受挫」）。
+		// 两者**皆不在** fateReasonIsIrreversibleClass 里——威胁失败未致死，旁观者绝不被升级成「不可逆」重档。
+		classifier := events.ReasonEmotionTrauma
+		if regionRavaged {
+			classifier = events.ReasonRegionRavaged
+		}
 		owner := unit.Record{ID: b.sourceID}
 		routing, err := service.SurfaceFateEvent(ctx, state.ID, &owner, FateEvent{
-			ActorID:  victim.ID,
-			TargetID: victim.ID,
-			// reason-code 是 SurfaceFateEvent 的「分类器」（不经 Mutator、不改状态）：用 EMOTION_TRAUMA
-			//（「目睹惨烈事件后情绪受挫」）标记「目睹/闻知一场惨烈挫败」。它**不在** fateReasonIsIrreversibleClass
-			// 里——威胁失败未致死，旁观者不应被升级成「不可逆」重档。
-			// 待 PvE reason-codes agent 落地专用的 region_ravaged / 目睹挫败码后，此处可直接替换为该码（见 notes）。
-			ReasonCode:    events.ReasonEmotionTrauma,
+			ActorID:       victim.ID,
+			TargetID:      victim.ID,
+			ReasonCode:    classifier,
 			Importance:    importance,
 			EmotionWeight: emotion,
 			Summary:       summary,

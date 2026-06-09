@@ -15,7 +15,7 @@ import (
 
 func TestGatedActionForChoice_Romance(t *testing.T) {
 	choice := unitDecisionChoicePayload{Action: DecisionActionRomance, TargetUnitID: "u2"}
-	got, ok := gatedActionForChoice(choice)
+	got, ok := gatedActionForChoice(nil, choice)
 	if !ok || got != decision.ActionRomance {
 		t.Fatalf("romance 动作应识别为 ActionRomance，得到 (%q, %v)", got, ok)
 	}
@@ -27,7 +27,7 @@ func TestGatedActionForChoice_DefectByKeyword(t *testing.T) {
 		Action:     DecisionActionMove,
 		NextAction: "向对面阵营移动，投敌归顺。",
 	}
-	got, ok := gatedActionForChoice(choice)
+	got, ok := gatedActionForChoice(nil, choice)
 	if !ok || got != decision.ActionDefect {
 		t.Fatalf("next_action 含叛变意图应识别为 ActionDefect，得到 (%q, %v)", got, ok)
 	}
@@ -45,7 +45,7 @@ func TestGatedActionForChoice_DefectFalsePositivesAvoided(t *testing.T) {
 		{Action: DecisionActionMove, Memory: "主公令我提防营中叛变", NextAction: "沿营寨边界巡逻"},
 	}
 	for i, c := range cases {
-		if got, ok := gatedActionForChoice(c); ok {
+		if got, ok := gatedActionForChoice(nil, c); ok {
 			t.Fatalf("用例 %d 文本提及叛变但 next_action 正常，不应被门控，得到 %q", i, got)
 		}
 	}
@@ -59,9 +59,60 @@ func TestGatedActionForChoice_SellPinnedOffCatalog(t *testing.T) {
 		ItemID:    "father_blade_legacy",
 		ItemName:  "父亲的断剑",
 	}
-	got, ok := gatedActionForChoice(choice)
+	got, ok := gatedActionForChoice(nil, choice)
 	if !ok || got != decision.ActionSellPinned {
 		t.Fatalf("变卖目录外遗物应识别为 ActionSellPinned，得到 (%q, %v)", got, ok)
+	}
+}
+
+// TestGatedActionForChoice_SellUpgradedCatalogLegacy 验证 §5 闭环：目录内装备（long_sword）被 upgradeItemToLegacy
+// 刻成传家物（IsLegacy&&SoulBound&&Pinned）后，即便其 ID 在静态目录里（isPermanentAnchorItem 会漏判），
+// 只要该角色实际持有这件升级实例，sell_pinned 门控仍触发——落实「升级后 LLM 自治也卖不掉」。
+func TestGatedActionForChoice_SellUpgradedCatalogLegacy(t *testing.T) {
+	actor := &unit.Record{ID: "u1"}
+	actor.Inventory.Equipment = map[string]unit.ItemStack{
+		"weapon": {ItemID: "long_sword", Quantity: 1, IsLegacy: true, SoulBound: true, Pinned: true},
+	}
+	// 目录启发式对 long_sword 返回 false（量产可买卖），但持有的是升级实例 → 仍门控。
+	if isPermanentAnchorItem("long_sword", "") {
+		t.Fatalf("前提失败：long_sword 不应被目录启发式判为永久锚")
+	}
+	choice := unitDecisionChoicePayload{Action: DecisionActionTrade, TradeKind: TradeActionKindSell, ItemID: "long_sword"}
+	got, ok := gatedActionForChoice(actor, choice)
+	if !ok || got != decision.ActionSellPinned {
+		t.Fatalf("变卖升级后的目录内传家物应识别为 ActionSellPinned，得到 (%q, %v)", got, ok)
+	}
+	// 持有实例驱动 ItemIsPermanentAnchor=true → GateSurprise 判 PINNED_PERMANENT 剔除（连重压也卖不掉）。
+	in := buildSurpriseGateInput(actor, choice, decision.ActionSellPinned)
+	if !in.ItemIsPermanentAnchor {
+		t.Fatalf("持有升级实例应令 ItemIsPermanentAnchor=true，得到 %+v", in)
+	}
+	res := decision.GateSurprise(decision.ActionSellPinned, in)
+	if res.Decision != decision.GateReject || res.Reason != "PINNED_PERMANENT" {
+		t.Fatalf("升级后的传家物应判 PINNED_PERMANENT 剔除，得到 %+v", res)
+	}
+}
+
+// TestActorHoldsPermanentAnchor 验证持有实例判定：仅同 ID 且三标记齐备才算永久锚（背包/装备栏皆查）。
+func TestActorHoldsPermanentAnchor(t *testing.T) {
+	actor := &unit.Record{ID: "u1"}
+	actor.Inventory.Equipment = map[string]unit.ItemStack{
+		"weapon": {ItemID: "long_sword", Pinned: true}, // 仅 Pinned，未满三标记 → 非永久锚
+	}
+	actor.Inventory.Backpack = []unit.ItemStack{
+		{ItemID: "spear", IsLegacy: true, SoulBound: true, Pinned: true}, // 满三标记 → 永久锚
+	}
+	if actorHoldsPermanentAnchor(actor, "long_sword") {
+		t.Fatalf("仅 Pinned 的 long_sword 不应判为永久锚")
+	}
+	if !actorHoldsPermanentAnchor(actor, "spear") {
+		t.Fatalf("三标记齐备的 spear 应判为永久锚")
+	}
+	if actorHoldsPermanentAnchor(actor, "dagger") {
+		t.Fatalf("未持有的 dagger 不应判为永久锚")
+	}
+	if actorHoldsPermanentAnchor(nil, "spear") {
+		t.Fatalf("nil actor 应安全返回 false")
 	}
 }
 
@@ -77,7 +128,7 @@ func TestGatedActionForChoice_OrdinaryActionsNotGated(t *testing.T) {
 		{Action: DecisionActionFamily, TargetUnitID: "u2"},
 	}
 	for i, c := range cases {
-		if got, ok := gatedActionForChoice(c); ok {
+		if got, ok := gatedActionForChoice(nil, c); ok {
 			t.Fatalf("用例 %d 不应被门控，得到 %q", i, got)
 		}
 	}

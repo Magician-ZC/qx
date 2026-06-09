@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -53,6 +54,10 @@ type WorldBossStrikeResult struct {
 	Participants  int               // 结算时的参战人数（仅 Defeated&&SettledByMe 时有意义）
 	Awards        []encounter.Award // 全员分赃结果（仅结算者填充）
 	BroadcastCard string            // 讨平广播的祖魂语气卡（仅结算者填充）
+	// SoloLocked 标记本次出手被「单人物理锁」挡下（severity>soloCap 且发起方为单人，未真打）。
+	// 此时不扣血、不记账本，HPRemaining=Boss 当前血、SoloCard 给出「这不是一个人能撼动的」祖魂语气卡。
+	SoloLocked bool
+	SoloCard   string // 单人物理锁触发时的高光卡（祖魂语气），其余情况为空
 }
 
 // 世界Boss默认掉落规模系数（货币按血量给、外加一件唯一遗物）。
@@ -88,11 +93,45 @@ func (service *Service) SpawnWorldBoss(ctx context.Context, worldID string, name
 
 // StrikeWorldBoss 对一头世界Boss出手一次：原子扣血 + 把伤害记进世界总线（贡献账本）；
 // 若这一击清零血池，则由抢到结算闩锁的请求读账本全员分赃并广播。
+//
+// 这是**协作出手**入口：世界Boss 是共享血池的异步协作机制，不同玩家的角色在不同时间各自出手共同消耗血池——
+// 这本身就是「组队/协力」语义，故协作出手不受单人物理锁约束（共享血池的每一击都是这场群体围猎的一份子）。
+// 「单人独自撼动世界Boss」的物理锁见 StrikeWorldBossParty（显式声明参战 party，party 单人且 severity>cap → 锁）。
 func (service *Service) StrikeWorldBoss(ctx context.Context, worldID string, bossID string, attacker *unit.Record) (WorldBossStrikeResult, error) {
+	if attacker == nil {
+		return WorldBossStrikeResult{}, fmt.Errorf("strike world boss: missing dependencies")
+	}
+	// 协作入口：把本击并入共享血池的群体围猎——party 取「账本既有不同出手者 ∪ 本人」，恒视作协作（不触发单人锁）。
+	return service.StrikeWorldBossParty(ctx, worldID, bossID, attacker, nil)
+}
+
+// StrikeWorldBossParty 是带**显式 party 声明**的世界Boss出手入口（设计 §7 单人物理锁）。
+// partyUnitIDs 是本次参战队伍的全部成员（含 attacker）；为空/仅含 attacker 即「单人独闯」。
+//   - ① 单人物理锁：world_boss 的 severity 恒 >soloCap（存亡级威胁），若声明的 party 实为单人——物理上撼不动它，
+//     **根本不让 strike**（不扣血、不记账本），返回「这不是一个人能撼动的」高光卡。组队（≥2 不同成员）才解锁。
+//   - 解锁后落入与共享血池协作完全一致的原子扣血 + 记账本 + 闩锁结算链路。
+//
+// 确定性、付费不进：是否锁只看 hp_max（战力派生 severity）+ party 成员数，绝不含 wallet/billing/出手频率。
+func (service *Service) StrikeWorldBossParty(ctx context.Context, worldID string, bossID string, attacker *unit.Record, partyUnitIDs []string) (WorldBossStrikeResult, error) {
 	if service == nil || service.db == nil || attacker == nil {
 		return WorldBossStrikeResult{}, fmt.Errorf("strike world boss: missing dependencies")
 	}
 	result := WorldBossStrikeResult{BossID: bossID, AttackerID: attacker.ID}
+
+	// ① 单人物理锁（设计 §7）：仅当**显式声明了 party 且其为单人**时才判锁；party 为空表示「协作共享血池出手」（不锁）。
+	// 组队（party 含 ≥2 不同成员，或账本里已沉淀别的出手者）才解锁。world_boss severity 恒 >cap，故单人必锁。
+	if soloParty := isSoloParty(attacker.ID, partyUnitIDs); soloParty {
+		locked, hpNow, bossName, err := service.worldBossSoloLocked(ctx, worldID, bossID, attacker.ID)
+		if err != nil {
+			return result, err
+		}
+		if locked {
+			result.SoloLocked = true
+			result.HPRemaining = hpNow
+			result.SoloCard = service.surfaceWorldBossSoloLock(ctx, worldID, attacker, bossID, bossName)
+			return result, nil
+		}
+	}
 
 	damage := attacker.Status.Attack
 	if damage < 1 {
@@ -195,6 +234,118 @@ func (service *Service) strikeTx(ctx context.Context, worldID, bossID, attackerI
 		return 0, "", 0, fmt.Errorf("commit world boss strike: %w", err)
 	}
 	return hpRemaining, bossName, hpMax, nil
+}
+
+// ---- ① 单人物理锁（设计 §7：world_boss severity>cap → 单人物理不解锁，必须组队）----
+
+// isSoloParty 判断一次出手声明的 party 是否实为「单人独闯」（设计 §7 单人门的输入侧）。
+//   - partyUnitIDs 为空（nil/[]）→ 表示「协作共享血池出手」语义（StrikeWorldBoss 走此路），**不视作单人**（返回 false，不锁）。
+//   - 非空时：去重后只剩 attacker 自己（或就是单元素 {attacker}）→ 单人独闯（返回 true）；含 ≥1 个别的成员 → 组队（false）。
+//
+// 确定性、纯函数：只看成员集合基数，不含任何付费/频率信号。
+func isSoloParty(attackerID string, partyUnitIDs []string) bool {
+	if len(partyUnitIDs) == 0 {
+		return false // 协作共享血池出手：不在「显式 party」语义内，不判单人锁
+	}
+	distinct := map[string]bool{attackerID: true}
+	for _, id := range partyUnitIDs {
+		if id != "" {
+			distinct[id] = true
+		}
+	}
+	return len(distinct) <= 1
+}
+
+// worldBossSeverityCap 是世界Boss单人解锁门的 severity 上限：超过此值物理上单人不解锁（必须组队）。
+// 与 encounter.SoloAllowed 的 soloCap 同义；定为 60——elite(40)/dungeon 可单人，world_boss 的 severity 恒在其上。
+const worldBossSeverityCap = 60.0
+
+// worldBossSeverity 把世界Boss的血上限（hp_max，来自战力派生、非付费）映射为确定性 severity（设计 §1 四档表：
+// world_boss 是「存亡级威胁」）。world_boss 的 severity **恒 > worldBossSeverityCap**——任何被当作 world_boss 投放的目标
+// 都视为单人物理不解锁。血量越高 severity 越高（在 [cap+10, 100) 单调），但下限钉死在 cap+10，确保单人门恒触发。
+// 纯函数、确定性、不含 wallet/billing。
+func worldBossSeverity(hpMax int) float64 {
+	floor := worldBossSeverityCap + 10 // world_boss 恒视作存亡级：severity 下限即 >cap，单人物理不解锁
+	if hpMax <= 0 {
+		return floor // 异常血量也按存亡级处理（保守锁单人）
+	}
+	// 血量在 (0, maxWorldBossHP] 上单调映射到 [0,100)，再抬到下限 floor 之上（保证恒 >cap、且随血量单调不降）。
+	scaled := 100.0 * float64(hpMax) / float64(maxWorldBossHP+1)
+	if scaled < floor {
+		return floor
+	}
+	return scaled
+}
+
+// worldBossSoloLocked 判定一次出手是否应被单人物理锁挡下（设计 §7）。返回 (是否锁住, Boss 当前血, Boss 名)。
+//   - 读 Boss 的 hp_max/hp_remaining/name/status（确定性、不含付费）；非 active 不在此判（交由 strikeTx 报 ErrWorldBossInactive）。
+//   - severity = worldBossSeverity(hp_max)；若 encounter.SoloAllowed(severity, cap) 为真（低威胁可 solo）→ 不锁。
+//   - 否则数贡献账本里**不同**的既往出手者：本次 attacker 之外**已有 ≥1 名**别的出手者 → 视作组队，解锁；
+//     否则（本次出手者是唯一/首位 → 单人）→ 锁住，返回「这不是一个人能撼动的」高光卡。
+//
+// 反 P2W / 确定性：判定只用 hp_max（战力派生）+ 账本里的不同 actor 集合，绝不含 wallet/billing/出手频率。
+// best-effort 读：DB 故障按「不锁」放行（绝不因读失败把本可出手的玩家挡在门外——锁是保护、非门禁），由 strikeTx 兜底校验 active。
+func (service *Service) worldBossSoloLocked(ctx context.Context, worldID, bossID, attackerID string) (bool, int, string, error) {
+	var hpMax, hpRemaining int
+	var bossName, st string
+	err := service.db.QueryRowContext(ctx, `
+		SELECT hp_max, hp_remaining, name, status FROM world_bosses WHERE id = ? AND world_id = ?`,
+		bossID, worldID).Scan(&hpMax, &hpRemaining, &bossName, &st)
+	if errors.Is(err, sql.ErrNoRows) || st != "active" {
+		return false, hpRemaining, bossName, nil // 不存在/非 active：不在此判，交由 strikeTx 报 ErrWorldBossInactive
+	}
+	if err != nil {
+		return false, 0, "", fmt.Errorf("read world boss for solo gate: %w", err)
+	}
+
+	severity := worldBossSeverity(hpMax)
+	if encounter.SoloAllowed(severity, worldBossSeverityCap) {
+		return false, hpRemaining, bossName, nil // 低威胁档：单人可挑战，不锁
+	}
+
+	// 数账本里**不同**的既往出手者（本次 attacker 之外有别人 → 组队 → 解锁）。
+	busEvents, err := worldbus.ListByWorldKind(ctx, service.db, worldID, worldbus.KindWorldBossStrike)
+	if err != nil {
+		// best-effort：读账本失败时不锁（锁是保护非门禁，宁可放行也不误挡），strikeTx 仍会原子兜底。
+		return false, hpRemaining, bossName, nil
+	}
+	others := map[string]bool{}
+	for _, ev := range busEvents {
+		var p struct {
+			BossID string `json:"boss_id"`
+		}
+		if raw, ok := ev.Payload.(json.RawMessage); ok {
+			_ = json.Unmarshal(raw, &p)
+		}
+		if p.BossID != bossID || ev.ActorID == "" || ev.ActorID == attackerID {
+			continue
+		}
+		others[ev.ActorID] = true
+	}
+	if len(others) >= 1 {
+		return false, hpRemaining, bossName, nil // 已有别的角色出手过 → 组队协力，解锁
+	}
+	return true, hpRemaining, bossName, nil // 唯一/首位出手者 = 单人 → 物理锁
+}
+
+// surfaceWorldBossSoloLock 在单人物理锁触发时，把「这不是一个人能撼动的」祖魂语气高光卡路由进发起者命运收件箱。
+// best-effort：SurfaceFateEvent 失败只吞错（绝不让「投卡」失败影响「不打」这个确定性结果）；恒返回卡文案供调用方回传。
+func (service *Service) surfaceWorldBossSoloLock(ctx context.Context, worldID string, attacker *unit.Record, bossID, bossName string) string {
+	card := fmt.Sprintf("她一个人站在那头%s的影子里，忽然懂了：这不是一个人能撼动的。", bossName)
+	if attacker == nil {
+		return card
+	}
+	// 经命运层投一张高光卡（她自己的事，重要度高、情绪低落但非创伤）。worldID 透传供来源标注；失败不阻断。
+	_, _ = service.SurfaceFateEvent(ctx, "", attacker, FateEvent{
+		ActorID:        attacker.ID,
+		TargetID:       attacker.ID,
+		ReasonCode:     events.ReasonThreatEmerged, // 威胁浮现：她撞见了一头撼不动的存亡级威胁（流程留痕，非状态变更）
+		Importance:     7,
+		EmotionWeight:  -0.45,
+		Summary:        card,
+		SourceRegionID: worldID,
+	})
+	return card
 }
 
 // settleWorldBoss 读世界总线的贡献账本，按贡献全员分赃，并广播讨平事件。
@@ -351,6 +502,18 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 		return fmt.Errorf("auto spawn world boss: %w", err)
 	}
 
+	// ② 威胁度链升级 provenance（设计 §1：world_boss 仅当 region 威胁度触顶且已沉淀 ≥1 个未解决 field_boss 时升级，不凭空刷）。
+	// 当前无 threats 持久表，用既有可查信号近似 provenance 门：该 world 是否已沉淀 ≥1 个 field_boss/elite「痕迹」
+	// （events 表 THREAT_EMERGED 计数）。无任何痕迹 → 威胁度尚未升级到该出 world_boss 的程度 → 不凭空 spawn（return nil）。
+	// 有痕迹才升级——保证自动刷新有「威胁度链」前因，而非脱钩威胁度的凭空 FNV spawn。
+	emergedTraces, err := service.countThreatEmergedTraces(ctx, worldID)
+	if err != nil {
+		return fmt.Errorf("auto spawn world boss: read threat provenance: %w", err)
+	}
+	if emergedTraces < 1 {
+		return nil // 无 provenance 信号（该 region 尚无沉淀的 field_boss/elite 痕迹）→ 不凭空刷，正常 no-op
+	}
+
 	// 名/血都由 FNV(worldID) 派生：同一世界稳定可复现，不同世界各异，不用全局 rand。
 	name := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
 	hp := autoWorldBossHPTiers[worldBossNameHash(worldID, "hp")%uint64(len(autoWorldBossHPTiers))]
@@ -372,7 +535,8 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 			SELECT ?, ?, ?, ?, ?, 'active', ''
 			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND status = 'active')`
 	}
-	if _, err := service.db.ExecContext(ctx, query, id, worldID, name, hp, hp, worldID); err != nil {
+	res, err := service.db.ExecContext(ctx, query, id, worldID, name, hp, hp, worldID)
+	if err != nil {
 		// L4 唯一兜底：WHERE NOT EXISTS 是主护栏，partial unique index uq_world_boss_active 是硬兜底。
 		// 两个并发 INSERT 的 NOT EXISTS 子查询可能都见 0（彼此尚未提交）→ 都尝试插入 → 后者触发 UNIQUE 约束冲突。
 		// 这等价于「已有 active Boss」——视为正常兜底（类 INSERT IGNORE 语义），返回 nil、不外抛、不中断回合推进。
@@ -384,7 +548,52 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 	}
 	// 无论 RowsAffected 为 0（WHERE NOT EXISTS 挡下：已有 active Boss——手动投放或另一并发请求刚插入，正常兜底）
 	// 还是 1（本请求成功插入一头自治 Boss），都满足「单世界至多一头 active」不变量，皆为正常结果。
+	// 仅当本请求真正插入了一头（RowsAffected==1）才记 provenance（避免 no-op 兜底重复留痕）。
+	if affected, _ := res.RowsAffected(); affected == 1 {
+		// 记明本次升级的威胁度链依据（沉淀的 field_boss/elite 痕迹数 + FNV 派生的名/血档），append-only 留痕、不改任何状态字段。
+		// best-effort：留痕失败只吞错（Boss 已成功落库，绝不因「记依据失败」回滚或外抛）。
+		service.recordWorldBossProvenance(ctx, worldID, id, name, hp, emergedTraces)
+	}
 	return nil
+}
+
+// countThreatEmergedTraces 数某世界已沉淀的 field_boss/elite「威胁浮现」痕迹（events 表 reason_code=THREAT_EMERGED、world_id 命中）。
+// 这是 world_boss 自动升级的 provenance 门近似信号（无 threats 持久表时的可查替代）：≥1 即视作「该 region 威胁度已累积、
+// 沉淀过未解决的 field_boss/elite」，才允许把威胁度链升级到 world_boss。纯读、确定性、不含付费。
+func (service *Service) countThreatEmergedTraces(ctx context.Context, worldID string) (int, error) {
+	var n int
+	if err := service.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM events WHERE world_id = ? AND reason_code = ?`,
+		worldID, string(events.ReasonThreatEmerged)).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count threat emerged traces: %w", err)
+	}
+	return n, nil
+}
+
+// worldBossSpawnProvenanceKind 是世界Boss自动升级 provenance 在世界总线上的事件类型（append-only、owner-less、不进贡献账本）。
+// 它**不是** KindWorldBossStrike（settleWorldBoss 只按 strike 类读账本，故 provenance 不会污染分赃），也不是 DOWN 广播；
+// 是一条独立的「升级依据」留痕，供审计/复算「凭什么把威胁度升级到了 world_boss」。
+const worldBossSpawnProvenanceKind worldbus.EventKind = "WORLD_BOSS_SPAWN"
+
+// recordWorldBossProvenance 把一次世界Boss自动升级的「威胁度链依据」追加进世界总线（append-only、非状态变更、不经 Mutator）。
+// payload 记明 boss_id/名/血档 + 触发升级的 field_boss/elite 痕迹数（provenance：凭什么把威胁度升级到了 world_boss）。
+// 走世界总线而非 events 表：provenance 是**世界级、无具体 owner**的事件，events.actor_unit_id 有 units FK（空串过不了），
+// 世界总线 actor 可空（nullable）——与 DOWN 广播同口径。best-effort：吞错只 log，绝不阻断（Boss 已落库，留痕失败不回滚）。
+func (service *Service) recordWorldBossProvenance(ctx context.Context, worldID, bossID, name string, hp, emergedTraces int) {
+	if _, err := service.RecordCrossInteraction(ctx, worldID, "", bossID,
+		worldBossSpawnProvenanceKind, 5,
+		map[string]any{
+			"boss_id":      bossID,
+			"name":         name,
+			"hp_max":       hp,
+			"tier":         "world_boss",
+			"provenance":   "threat_escalation", // 升级依据：威胁度链（非凭空 FNV spawn）
+			"field_traces": emergedTraces,       // 触发升级时沉淀的 field_boss/elite 痕迹数
+			"auto":         true,                // 自动刷新（QUNXIANG_WORLD_BOSS_AUTO）
+		}); err != nil {
+		// best-effort：留痕失败不影响已落库的 Boss（绝不回滚、不外抛、不中断回合推进）。
+		slog.Warn("record world boss provenance failed (best-effort)", "world", worldID, "boss", bossID, "err", err)
+	}
 }
 
 // isDupKeyErr 判断一个 DB 错误是否为唯一约束冲突（partial unique index uq_world_boss_active 触发）。

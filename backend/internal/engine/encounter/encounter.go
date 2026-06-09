@@ -36,6 +36,73 @@ func ContributionScore(c Contribution) float64 {
 	return w.Damage*c.Damage + w.Tank*c.Tank + w.Role*c.Role + w.Risk*c.Risk + w.Clutch*c.Clutch
 }
 
+// --- 关键救场（Clutch）标记原语（设计文档 §5「关键救场」1.2 权重的数据来源）---
+//
+// 问题：Contribution.Clutch 字段在战斗循环里从不被填——它需要一个「事件→分值」的录入口，
+// 让「濒死反杀 / 救援濒死队友 / 终结一击」这类关键时刻真正进 Score（而非永远为 0）。
+// 这里提供纯函数 API：战斗循环（session/threat.go、dungeon_segment.go）在识别到对应事件时累加进 Clutch 分项。
+// 全部确定性、与付费无关（事件由 combat_roll 确定性判定，钱包/计费绝不产生 Clutch）。
+
+// ClutchKind 是一类关键救场事件（每类有固定折算分值，可叠加）。
+type ClutchKind string
+
+const (
+	// ClutchFinalBlow 终结一击：亲手把威胁打到 HP≤0 的那一下（最靠近它心脏的人）。
+	ClutchFinalBlow ClutchKind = "final_blow"
+	// ClutchRescueDown 救援濒死队友：在队友倒下/濒死时把其拉回安全（治疗/掩护/拽离）。
+	ClutchRescueDown ClutchKind = "rescue_down"
+	// ClutchNearDeathReversal 濒死反杀：自身 HP 已跌破撤退线却仍站住并扭转战局（不退反进的孤勇）。
+	ClutchNearDeathReversal ClutchKind = "near_death_reversal"
+)
+
+// ClutchValues 各类关键救场的折算分值（累加进 Contribution.Clutch，再乘 ContributionWeights.Clutch=1.2）。
+// 这些是「事件计数→分项」的折算基准：一次终结一击≈1 个标准救场单位。设计默认值，可调。
+var ClutchValues = struct{ FinalBlow, RescueDown, NearDeathReversal float64 }{
+	FinalBlow:         1.0,
+	RescueDown:        1.0,
+	NearDeathReversal: 1.2, // 濒死还能反杀比常规救场更险，折算略高
+}
+
+// ClutchValue 返回某类关键救场的折算分值（未知类型返回 0，安全降级）。
+func ClutchValue(kind ClutchKind) float64 {
+	switch kind {
+	case ClutchFinalBlow:
+		return ClutchValues.FinalBlow
+	case ClutchRescueDown:
+		return ClutchValues.RescueDown
+	case ClutchNearDeathReversal:
+		return ClutchValues.NearDeathReversal
+	default:
+		return 0
+	}
+}
+
+// MarkClutch 把一次关键救场事件累加进贡献分项的 Clutch 通道，返回更新后的 Contribution（纯函数、值进值出）。
+// 战斗循环每识别到一次 final_blow / rescue_down / near_death_reversal 即调用一次。
+// 多次救场自然叠加（一场仗里既终结一击又救了队友 → Clutch 累计），确定性、付费不进。
+func MarkClutch(c Contribution, kind ClutchKind) Contribution {
+	c.Clutch += ClutchValue(kind)
+	return c
+}
+
+// HadClutch 判断该贡献是否含任何关键救场（供 session 侧判「是否触发传家物升级待决策卡」的门，见 §5 闭环）。
+func HadClutch(c Contribution) bool {
+	return c.Clutch > 0
+}
+
+// IsNearDeathReversal 判断「当前这一下是否构成濒死反杀」的纯判定：
+// 自身归一化 HP 已低于撤退线（fleeFraction，如 0.25）却仍打出了有效输出（dealt>0）且未当场倒下（still alive）。
+// 战斗循环在角色攻击命中后用本判定决定是否 MarkClutch(ClutchNearDeathReversal)。确定性、无随机。
+func IsNearDeathReversal(selfHPFraction, fleeFraction float64, dealtDamage int, stillAlive bool) bool {
+	return stillAlive && dealtDamage > 0 && selfHPFraction < fleeFraction
+}
+
+// IsFinalBlow 判断「这一击是否构成终结一击」：本次伤害把威胁血量从 >0 打到 ≤0。
+// 战斗循环在扣完威胁 HP 后用本判定决定是否 MarkClutch(ClutchFinalBlow)。确定性、无随机。
+func IsFinalBlow(threatHPBefore, threatHPAfter int) bool {
+	return threatHPBefore > 0 && threatHPAfter <= 0
+}
+
 // Rarity 战利品稀有度。
 type Rarity string
 
@@ -198,6 +265,57 @@ func DegradePenalty(candidateLayer int, care float64, daysAlive int) int {
 // SoloAllowed 判断某威胁是否允许单人挑战（severity 超过 soloCap 时物理上要求组队）。
 func SoloAllowed(severity float64, soloCap float64) bool {
 	return severity <= soloCap
+}
+
+// --- 传家物升级判定（设计文档 §5「用某装备完成 Clutch/跨越关键命运节点 → 待决策卡刻成传家物」）---
+//
+// 当前缺口：IsLegacy 只在「角色阵亡时传承」路径被设；没有「角色在世时主动把陪她出生入死的装备升级为传家物」的入口。
+// 本判定回答「这件正在使用的装备是否够资格触发『要不要刻成传家物』的待决策卡」——
+// 真正落标记（IsLegacy/SoulBound）由 item.LegacyUpgrade 在玩家确认后执行（纯函数、本包不碰物品结构以免与 unit 包形成 import 环）。
+
+// LegacyUpgradeTrigger 是触发传家物升级评估的关键时刻类别。
+type LegacyUpgradeTrigger string
+
+const (
+	// TriggerClutch 用这件装备完成了一次关键救场（终结一击/救濒死队友/濒死反杀）。
+	TriggerClutch LegacyUpgradeTrigger = "clutch"
+	// TriggerFateNode 用这件装备跨越了一个关键命运节点（如挺过 Boss 决战/为羁绊之人挡下致命一击）。
+	TriggerFateNode LegacyUpgradeTrigger = "fate_node"
+)
+
+// LegacyUpgradeQuery 是「是否该弹出刻为传家物的待决策卡」的判定入参（纯前因，无随机、无钱包）。
+type LegacyUpgradeQuery struct {
+	Trigger       LegacyUpgradeTrigger
+	AlreadyLegacy bool // 已是传家物则无需再升级（避免重复弹卡）
+	HasOwner      bool // 必须有在世持有者（无主装备不进升级流）
+	BondTurns     int  // 该装备陪伴当前持有者的回合数（羁绊时长，越久越够格）
+	ClutchCount   int  // 该装备累计完成的关键救场次数（Clutch 事件计数）
+}
+
+// MinLegacyBondTurns 是触发传家物升级待决策卡的最小羁绊回合数（防一捡到手就因偶然 clutch 弹卡）。
+const MinLegacyBondTurns = 5
+
+// QualifiesForLegacyUpgrade 判定是否应弹出「要不要把它刻成传家物」的待决策卡（确定性、纯前因）。
+//   - 必须有在世持有者、尚非传家物；
+//   - Clutch 触发：至少 1 次关键救场 + 羁绊≥MinLegacyBondTurns（陪你出生入死过、且不是萍水相逢）；
+//   - 命运节点触发：跨越关键命运节点本身即够格（这类时刻天然稀有、有叙事重量），仍要求最小羁绊。
+//
+// 注意：本函数只决定「是否弹卡」；最终是否刻成传家物由玩家在待决策卡里确认，再由 item.LegacyUpgrade 落标记。
+func QualifiesForLegacyUpgrade(q LegacyUpgradeQuery) bool {
+	if q.AlreadyLegacy || !q.HasOwner {
+		return false
+	}
+	if q.BondTurns < MinLegacyBondTurns {
+		return false
+	}
+	switch q.Trigger {
+	case TriggerClutch:
+		return q.ClutchCount >= 1
+	case TriggerFateNode:
+		return true
+	default:
+		return false
+	}
 }
 
 func toContestants(ps []Participant) []arbitration.Contestant {

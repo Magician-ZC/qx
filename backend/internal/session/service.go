@@ -357,7 +357,7 @@ func (service *Service) createSinglePlayerWithMapScript(ctx context.Context, see
 	state := State{
 		ID:                   sessionID,
 		AccountID:            strings.TrimSpace(accountID), // 本局账户归属（匿名/单机局为空，账户级成本配额对其 no-op）；随 state_json 落库
-		MinorMode:            minorMode,                   // 未成年模式（compliance.Gate 裁定）：随 state_json 落库，关闭恋爱·生育、降露骨暴力
+		MinorMode:            minorMode,                    // 未成年模式（compliance.Gate 裁定）：随 state_json 落库，关闭恋爱·生育、降露骨暴力
 		Mode:                 mode,
 		RandomSeed:           seed,
 		PlayerFactionID:      "player",
@@ -896,9 +896,14 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		//   ② 自然衰老人格漂移 ApplyPersonalityDrift(aging)（personality_drift.go，单次每维 ≤0.03、单日每维 ≤0.10，确定性 FNV，不直改受保护字段）。
 		// 失败只吞错、不污染回合推进；与 hunger/memory-decay 同批，确定性可复现。
 		service.settleAutonomyAtDeploymentBoundary(ctx, &state, units)
-		service.settleConsentsAtBoundary(ctx, &state)            // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
-		service.refreshThreats(ctx, &state, units)               // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
-		service.surfaceCrossEventsAtBoundary(ctx, &state, units) // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
+		service.settleConsentsAtBoundary(ctx, &state)                                          // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
+		if n, err := service.degradeLayer3ConsentTimeoutsAtBoundary(ctx, &state); err != nil { // §6 层3 consent 超时降级：未应答→COMBAT_MAIMED 残废（绝不阵亡），best-effort
+			appendLog(&state, "consent", fmt.Sprintf("层3 consent 超时降级扫描失败：%v", err), "", "")
+		} else if n > 0 {
+			appendLog(&state, "consent", fmt.Sprintf("%d 名重伤者久未等到你的回应，活了下来，却落下了一辈子的残。", n), "", "")
+		}
+		service.refreshThreats(ctx, &state, units)                            // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
+		service.surfaceCrossEventsAtBoundary(ctx, &state, units)              // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
 		if n, err := service.ResolveDungeonTimeout(ctx, &state); err != nil { // 副本异步分段 charter 超时兜底（QUNXIANG_DUNGEON 默认关，best-effort；关时零行为）
 			appendLog(&state, "dungeon", fmt.Sprintf("副本超时兜底失败：%v", err), "", "")
 		} else if n > 0 {
@@ -907,13 +912,13 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		if _, err := service.ScanAndWorldizeInbound(ctx, &state, units); err != nil { // 双向世界化入向探针扇出（QUNXIANG_WORLDIZE_INBOUND 默认关，best-effort；关时 no-op）
 			appendLog(&state, "world", fmt.Sprintf("入向世界化扇出失败：%v", err), "", "")
 		}
-		if state.WorldID != "" {                                 // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
+		if state.WorldID != "" { // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
 			if err := service.maybeRefreshWorldBoss(ctx, state.WorldID); err != nil {
 				appendLog(&state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")
 			}
 		}
-		service.scanAndMatch(ctx, &state, units)                 // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
-		service.scanAndSocialize(ctx, &state, units)             // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
+		service.scanAndMatch(ctx, &state, units)                    // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
+		service.scanAndSocialize(ctx, &state, units)                // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
 		service.scanExclusiveContestsAtBoundary(ctx, &state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		appendSessionMetricsLog(&state)

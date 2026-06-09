@@ -201,10 +201,19 @@ func (service *Service) runDungeonFloorCore(ctx context.Context, run *dungeonRun
 			salt := fmt.Sprintf("dg_atk:%s:f%d:r%d", ms.rec.ID, floor, round)
 			if combatActionRoll(*run.state, *ms.rec, mob, salt) >= eliteMissChance {
 				dmg := eliteDamage(ms.rec.Status.Attack, threat.Defense)
+				mobHPBefore := mobHP
 				mobHP -= dmg
 				ms.dealt += dmg
 				ms.contrib.Damage += float64(dmg) // 跨层累计
 				floorRes.DamageDealt += dmg
+				// ① 关键救场（Clutch）进 Score（设计 §5「关键救场」1.2 权重的数据来源），Clutch 随 dungeonMemberSnapshot.Clutch 跨段持久化：
+				//   - 终结一击：这一击把本层威胁从 >0 打到 ≤0；
+				//   - 救援濒死队友：在仍有队友处于 down（倒下未离场）时打出有效输出（替倒地者顶住/反扑），算一次救场。
+				if encounter.IsFinalBlow(mobHPBefore, mobHP) {
+					ms.contrib = encounter.MarkClutch(ms.contrib, encounter.ClutchFinalBlow)
+				} else if dungeonHasDownedTeammate(run, ms.rec.ID) {
+					ms.contrib = encounter.MarkClutch(ms.contrib, encounter.ClutchRescueDown)
+				}
 			}
 		}
 		if mobHP <= 0 {
@@ -267,6 +276,20 @@ func (service *Service) runDungeonFloorCore(ctx context.Context, run *dungeonRun
 func (service *Service) dungeonAnyFled(run *dungeonRun) bool {
 	for _, ms := range run.members {
 		if ms.status == "fled" {
+			return true
+		}
+	}
+	return false
+}
+
+// dungeonHasDownedTeammate 判断除 selfID 外是否有队友已倒下（status=="down"）——救援濒死队友（ClutchRescueDown）的触发条件：
+// 在有队友倒地时仍打出有效输出，视作替倒地者顶住/反扑的一次关键救场。确定性、纯函数。
+func dungeonHasDownedTeammate(run *dungeonRun, selfID string) bool {
+	for _, ms := range run.members {
+		if ms.rec.ID == selfID {
+			continue
+		}
+		if ms.status == "down" {
 			return true
 		}
 	}
@@ -413,6 +436,14 @@ func (service *Service) settleDungeon(ctx context.Context, run *dungeonRun, resu
 			result.PenaltyLayer[ms.rec.ID] = layer
 		}
 
+		// ② 装备耐久（§6 层1 GEAR_DAMAGED）：苦战（陨落/撤退，非通关）后随身家伙折损——只对实际参战（taken/dealt 非零）者，
+		// pinned 传家宝豁免、耐久 floor=1 不破坏（best-effort）。rounds 取累计已打层的回合数（DefeatDurabilityLoss 内部封顶）。
+		if result.Outcome == "wiped" || result.Outcome == "fled" {
+			if ms.taken > 0 || ms.dealt > 0 {
+				service.degradeParticipantGear(ctx, run.state, ms.rec, dungeonGearThreat(run, result), result.Outcome != "fled", dungeonEngagedRounds(result))
+			}
+		}
+
 		card := dungeonMemberCard(result, ms, awardsByUnit[ms.rec.ID])
 		result.InboxCards[ms.rec.ID] = card
 
@@ -432,6 +463,21 @@ func (service *Service) settleDungeon(ctx context.Context, run *dungeonRun, resu
 		}
 	}
 	return nil
+}
+
+// dungeonGearThreat 为副本耐久折损留痕构造一个最小 Threat 标签（名/档），供 degradeParticipantGear 的 GEAR_DAMAGED payload。
+// 副本逐层 ad-hoc 生成无单一 threat，用稳定占位名「这座副本」；副本无 region 归属（RegionID 留空，与 elite 同口径）。
+func dungeonGearThreat(run *dungeonRun, result *DungeonResult) Threat {
+	return Threat{Name: "这座副本", Tier: ThreatTierDungeon}
+}
+
+// dungeonEngagedRounds 把整局副本的累计交战回合数（各层 Rounds 之和）作为耐久磨损的 rounds 入参（DefeatDurabilityLoss 内部封顶）。
+func dungeonEngagedRounds(result *DungeonResult) int {
+	rounds := 0
+	for _, fr := range result.FloorResults {
+		rounds += fr.Rounds
+	}
+	return rounds
 }
 
 const dungeonMinMeaningful = 1.0 // 贡献低于此值的纯蹭场者不进排他件排名（反白嫖），仍可分 common。

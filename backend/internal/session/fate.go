@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -66,6 +67,10 @@ type FateEvent struct {
 	// SourceIsStranger 标记事件来源是否为「陌生人/陌生地」（与 owner 无任何持久锚关联）。
 	// 与「未命中任何锚」共同构成 isZeroAnchorEvent 的判定——为破圈预算挑选「素不相识却撞进她命里」的种子事件。
 	SourceIsStranger bool
+	// LegacyItemID 是「传家物升级」待决策卡所绑定的待升级装备 ID（§5 Clutch→Legacy 闭环）。非空且本事件路由到待决策时，
+	// 随 payload.legacy_item_id 落库；玩家在该卡 confirm（urge 类）→ ResolveFateDecision 调 upgradeItemToLegacy 落 IsLegacy+SoulBound+Pinned。
+	// 留空=非传家物升级卡（绝大多数命运事件）。
+	LegacyItemID string
 }
 
 // FateRouting 是一条世界事件对某角色的命运路由结果。
@@ -292,6 +297,10 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	// 归因因果句随 payload 落库（§4.3 provenance 凭证 + 渲染管线）：非空才写，保持向后兼容（旧消费方忽略未知键）。
 	if cause := strings.TrimSpace(ev.AttributionZH); cause != "" {
 		payload["attribution_zh"] = cause
+	}
+	// 传家物升级待决策（§5 Clutch→Legacy 闭环）：绑定的待升级装备 ID 随 payload 落库，供 ResolveFateDecision 在 confirm 时反查并升级。
+	if legacyItemID := strings.TrimSpace(ev.LegacyItemID); legacyItemID != "" {
+		payload["legacy_item_id"] = legacyItemID
 	}
 	if route == relevance.RoutePending {
 		code = events.ReasonPendingDecision
@@ -740,6 +749,17 @@ func (service *Service) ResolveFateDecision(ctx context.Context, sessionID strin
 			}
 		}
 	}
+
+	// 5) 传家物升级闭环（§5 Clutch→Legacy）：本卡绑定了待升级装备 ID 且玩家选了「confirm（urge 类）」→ 把它刻成传家物
+	//    （upgradeItemToLegacy 落 IsLegacy+SoulBound+Pinned + ReasonLegacyBequeathed 留痕；此后 GateSurprise(sell_pinned)→Reject）。
+	//    let_her/acknowledge（婉拒/搁置）则不升级——是否刻成由玩家在此卡里点头。best-effort：升级失败只 log、不污染已落地的后果。
+	if strings.TrimSpace(meta.LegacyItemID) != "" && isUrgeResolve(resolveClass) {
+		if state := service.loadStateForFate(ctx, sessionID); state != nil {
+			if _, err := service.upgradeItemToLegacy(ctx, state, unitID, meta.LegacyItemID); err != nil {
+				slog.Warn("legacy upgrade on fate confirm failed (best-effort)", "unit", unitID, "item", meta.LegacyItemID, "err", err)
+			}
+		}
+	}
 	return consequenceErr
 }
 
@@ -954,6 +974,7 @@ type pendingDecisionMeta struct {
 	ReasonCode    events.ReasonCode // 底层事件 reason-code（判定是否不可逆类）
 	AttributionZH string            // 归因因果句（§4.3 provenance 强制凭证；空=无可解析前因）
 	Choices       []fateChoice      // 入箱时生成的情境化选项（id→后果类映射）
+	LegacyItemID  string            // 传家物升级卡绑定的待升级装备 ID（§5；空=非升级卡）
 }
 
 // pendingDecisionMeta 按 decisionID 查权威 PENDING_DECISION 事件，返回其归属单位（owner）及命运元数据。
@@ -979,6 +1000,7 @@ func (service *Service) pendingDecisionMeta(ctx context.Context, decisionID stri
 			Reason        string          `json:"reason"`
 			AttributionZH string          `json:"attribution_zh"`
 			Choices       []payloadChoice `json:"choices"`
+			LegacyItemID  string          `json:"legacy_item_id"`
 		}
 		_ = json.Unmarshal([]byte(payloadJSON), &payload)
 		if payload.DecisionID == decisionID { // LIKE 可能因 _/% 通配略微过宽，以精确比对为准
@@ -986,6 +1008,7 @@ func (service *Service) pendingDecisionMeta(ctx context.Context, decisionID stri
 				ReasonCode:    events.ReasonCode(payload.Reason),
 				AttributionZH: payload.AttributionZH,
 				Choices:       payloadChoicesToFateChoices(payload.Choices),
+				LegacyItemID:  payload.LegacyItemID,
 			}
 			return owner.String, meta, true, nil
 		}
@@ -1290,6 +1313,13 @@ type payloadChoice struct {
 //   - 其余（日常牵挂）：给「叮嘱她/由她做主/只是知悉」三选（urge/let_her/acknowledge）。
 func buildFateChoices(ev FateEvent, anchorKind string) []fateChoice {
 	switch {
+	case ev.ReasonCode == events.ReasonLegacyBequeathed && strings.TrimSpace(ev.LegacyItemID) != "":
+		// 传家物升级卡（§5 Clutch→Legacy）：confirm（刻成传家物）→ urge（驱动 upgradeItemToLegacy）；婉拒/暂搁→ let_her/acknowledge。
+		return []fateChoice{
+			{ID: "engrave", Label: "把它刻成传家之物", ResolveClass: "urge"},
+			{ID: "not_yet", Label: "暂且不必", ResolveClass: "let_her"},
+			{ID: "acknowledge", Label: "只是知悉", ResolveClass: "acknowledge"},
+		}
 	case fateReasonIsIrreversibleClass(ev.ReasonCode):
 		return []fateChoice{
 			{ID: "avenge", Label: "为TA讨一个公道", ResolveClass: "urge"},

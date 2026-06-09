@@ -324,7 +324,7 @@ func (service *Service) generateUnitDecision(
 	// 门控意外（engine/decision.GateSurprise，设计宪法 §5.3 红线）：突然恋爱/卖传家宝/叛变即使归因看似合理，
 	// 也必须有专属前因（关系积累/重压/忠诚崩坏）才允许落地；不足则优雅回退安全决策，绝不让无源戏剧性转折发生。
 	// 与归因强制同档（仅 enforcementActive 时阻断）；非门控动作零影响，影子模式下只计遥测不阻断。
-	if gated, isGated := gatedActionForChoice(choice); isGated {
+	if gated, isGated := gatedActionForChoice(actor, choice); isGated {
 		gate := service.evaluateSurpriseGate(ctx, actor, choice, gated)
 		surpriseGateTotal.Add(1)
 		// 注意：本函数内局部变量 `decision`（unitDecisionPayload）遮蔽了 decision 包，故经包级 helper surpriseGateAllowed 比较。
@@ -4078,15 +4078,18 @@ var defectIntentKeywords = []string{"投敌", "倒戈", "叛逃", "投靠敌", "
 
 // gatedActionForChoice 判断一个 LLM choice 是否属于需要专属前因的门控动作，并映射到 decision.GatedAction。
 // 仅识别能稳妥判定的三类：romance（原生恋爱动作）、sell_pinned（变卖/赠出传家宝级物品）、defect（叛变意图）。
-func gatedActionForChoice(choice unitDecisionChoicePayload) (decision.GatedAction, bool) {
+// actor 用于 sell_pinned 的第二条触发源：标的若是该角色实际持有、已升级为永久锚（IsLegacy&&SoulBound&&Pinned）的
+// **目录内**装备（如 long_sword 刻成传家物），isPermanentAnchorItem 的目录启发式会漏判——故同时查持有实例的真标记，
+// 落实「升级后即便 LLM 自治也卖不掉」（§5 闭环）。
+func gatedActionForChoice(actor *unit.Record, choice unitDecisionChoicePayload) (decision.GatedAction, bool) {
 	// 恋爱：原生 romance 动作即表白/确认伴侣（family 是已确认恋人后的共育，不在突然恋爱门控内）。
 	if choice.Action == DecisionActionRomance {
 		return decision.ActionRomance, true
 	}
-	// 卖/赠传家宝：trade 且为 sell/gift，且标的是「永久锚」级物品（父辈遗志/独有遗物）。
+	// 卖/赠传家宝：trade 且为 sell/gift，且标的是「永久锚」级物品——目录启发式（父辈遗志/独有遗物）或该角色实际持有的升级实例。
 	if choice.Action == DecisionActionTrade &&
 		(choice.TradeKind == TradeActionKindSell || choice.TradeKind == TradeActionKindGift) &&
-		isPermanentAnchorItem(choice.ItemID, choice.ItemName) {
+		(isPermanentAnchorItem(choice.ItemID, choice.ItemName) || actorHoldsPermanentAnchor(actor, choice.ItemID)) {
 		return decision.ActionSellPinned, true
 	}
 	// 叛变：无原生动作，靠**声明的行动意图**识别——**只扫 next_action**（该单位下一步要做什么），
@@ -4171,10 +4174,41 @@ func buildSurpriseGateInput(actor *unit.Record, choice unitDecisionChoicePayload
 		in.HasRelationDecay = attributionHasCauseKind(choice.Attribution, string(decision.CauseRelation))
 	}
 	if gated == decision.ActionSellPinned {
-		// 永久锚（父辈遗志类）绝不可卖：交给 GateSurprise 判 PINNED_PERMANENT。
-		in.ItemIsPermanentAnchor = isParentLegacyItem(choice.ItemID, choice.ItemName)
+		// 永久锚（父辈遗志类）绝不可卖：交给 GateSurprise 判 PINNED_PERMANENT。两条来源取或：
+		//   ① 目录外具名独有遗物（isParentLegacyItem，旧口径，无市场价/不可量产）；
+		//   ② 该角色实际持有的同 ID 装备已被刻成传家物（三标记 IsLegacy&&SoulBound&&Pinned 齐备，§5 升级闭环的落点）——
+		//      经 item.IsPermanentAnchor 判定，落实「升级后即便 LLM 自治也卖不掉」。
+		in.ItemIsPermanentAnchor = isParentLegacyItem(choice.ItemID, choice.ItemName) ||
+			actorHoldsPermanentAnchor(actor, choice.ItemID)
 	}
 	return in
+}
+
+// actorHoldsPermanentAnchor 判断该角色当前是否持有 itemID 对应、且已构成「永久锚」（IsLegacy&&SoulBound&&Pinned）的装备/背包物。
+// 任一同 ID 实例满足三标记即真（升级后的传家物 sell_pinned 硬门）。纯函数、无 DB、确定性；actor/itemID 空时安全 false。
+func actorHoldsPermanentAnchor(actor *unit.Record, itemID string) bool {
+	if actor == nil {
+		return false
+	}
+	itemID = strings.ToLower(strings.TrimSpace(itemID))
+	if itemID == "" {
+		return false
+	}
+	anchored := func(s unit.ItemStack) bool {
+		return strings.ToLower(strings.TrimSpace(s.ItemID)) == itemID &&
+			item.IsPermanentAnchor(item.LegacyFlags{IsLegacy: s.IsLegacy, SoulBound: s.SoulBound, Pinned: s.Pinned})
+	}
+	for _, s := range actor.Inventory.Equipment {
+		if anchored(s) {
+			return true
+		}
+	}
+	for _, s := range actor.Inventory.Backpack {
+		if anchored(s) {
+			return true
+		}
+	}
+	return false
 }
 
 // isParentLegacyItem 判断是否为「父辈遗志」级、绝对不可变卖的永久锚（比一般传家宝更硬）。

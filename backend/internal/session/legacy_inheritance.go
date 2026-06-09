@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 
+	"qunxiang/backend/internal/item"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -189,6 +190,92 @@ func legacyHeirTieKey(sessionID, deceasedID, heirID string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("legacy_heir:" + sessionID + ":" + deceasedID + ":" + heirID))
 	return h.Sum64()
+}
+
+// upgradeItemToLegacy 在角色在世时把其某件装备「刻成传家物」（设计 §5 闭环的落标记步骤）。
+// 触发链：用某装备完成 Clutch / 跨关键命运节点 → encounter.QualifiesForLegacyUpgrade 通过 → 弹「要不要刻成传家物」待决策卡
+// → 玩家确认 → 本函数把 item.LegacyUpgrade 落到对应 ItemStack（IsLegacy+SoulBound+Pinned），此后 GateSurprise(sell_pinned) Reject。
+//
+// 三条不变量与 inheritLegacyItems 一致：
+//  1. best-effort：失败吞错、绝不阻断主结算（调用方以 _ 忽略返回亦可）；
+//  2. 仅改 ItemStack 标记（JSON blob），经 units.Save 落库；绝不触碰受保护状态字段（无需 status.Mutator）；
+//  3. 确定性：纯标记写入，无随机。
+//
+// 定位优先级：先在装备栏（按 slot 升序）找首个匹配 ItemID 的物品，再退背包（按下标升序）。已是传家物则幂等 no-op（返回 false）。
+// 返回 (是否实际升级, error)；error 仅在 DB 读写失败时非空。
+func (service *Service) upgradeItemToLegacy(ctx context.Context, state *State, ownerID, itemID string) (bool, error) {
+	ownerID = strings.TrimSpace(ownerID)
+	itemID = strings.TrimSpace(itemID)
+	if service == nil || state == nil || service.units == nil || ownerID == "" || itemID == "" {
+		return false, nil
+	}
+
+	owner, err := service.units.GetByID(ctx, ownerID)
+	if err != nil {
+		return false, fmt.Errorf("load legacy upgrade owner %s: %w", ownerID, err)
+	}
+	if owner.Status.LifeState == unit.LifeStateDead {
+		return false, nil // 死者走 inheritLegacyItems，不在此主动升级
+	}
+
+	upgraded := false
+
+	// 1) 先在装备栏定位（按 slot 键升序，map 遍历无序 → 排序保确定性）。
+	slots := make([]string, 0, len(owner.Inventory.Equipment))
+	for slot := range owner.Inventory.Equipment {
+		slots = append(slots, slot)
+	}
+	sort.Strings(slots)
+	for _, slot := range slots {
+		stack := owner.Inventory.Equipment[slot]
+		if stack.ItemID != itemID {
+			continue
+		}
+		flags := item.LegacyFlags{IsLegacy: stack.IsLegacy, SoulBound: stack.SoulBound, Pinned: stack.Pinned}
+		if item.IsPermanentAnchor(flags) {
+			return false, nil // 已是永久锚，幂等 no-op
+		}
+		next := item.LegacyUpgrade(flags)
+		stack.IsLegacy, stack.SoulBound, stack.Pinned = next.IsLegacy, next.SoulBound, next.Pinned
+		owner.Inventory.Equipment[slot] = stack
+		upgraded = true
+		break
+	}
+
+	// 2) 装备栏没有则退背包定位（按下标升序，取首个匹配）。
+	if !upgraded {
+		for i := range owner.Inventory.Backpack {
+			stack := owner.Inventory.Backpack[i]
+			if stack.ItemID != itemID {
+				continue
+			}
+			flags := item.LegacyFlags{IsLegacy: stack.IsLegacy, SoulBound: stack.SoulBound, Pinned: stack.Pinned}
+			if item.IsPermanentAnchor(flags) {
+				return false, nil
+			}
+			next := item.LegacyUpgrade(flags)
+			stack.IsLegacy, stack.SoulBound, stack.Pinned = next.IsLegacy, next.SoulBound, next.Pinned
+			owner.Inventory.Backpack[i] = stack
+			upgraded = true
+			break
+		}
+	}
+
+	if !upgraded {
+		return false, nil // 没找到这件装备（已被消耗/转移/弄错 ID）——安全 no-op
+	}
+
+	if err := service.units.Save(ctx, owner); err != nil {
+		return false, fmt.Errorf("save legacy upgrade owner %s: %w", ownerID, err)
+	}
+
+	// 编年史 + 记忆留痕「把它刻成了传家物」（best-effort：失败不回滚已落库的标记）。
+	itemName := displayItemName(itemID)
+	chronicleText := fmt.Sprintf("我把陪我出生入死的 %s 刻成了传家之物，从此它认我、也只认我的血脉。", itemName)
+	_ = service.recordChronicleEntry(ctx, state.ID, ownerID, state.TurnState.Turn, "legacy_upgrade", chronicleText)
+	_ = service.storeMemoryAndSyncHighlights(ctx, &owner, state.TurnState.Turn, chronicleText, "legacy_upgrade", 3)
+	appendLog(state, "legacy_upgrade", fmt.Sprintf("%s 把 %s 刻成了传家之物。", owner.DisplayName(), itemName), ownerID, "")
+	return true, nil
 }
 
 // aliveUnitIDSet 返回本会话当前存活单位 id 集合（玩家/敌方/野人）。

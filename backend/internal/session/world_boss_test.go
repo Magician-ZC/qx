@@ -5,9 +5,12 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 
+	"qunxiang/backend/internal/engine/encounter"
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 	"qunxiang/backend/internal/worldbus"
@@ -261,6 +264,26 @@ func countActiveWorldBosses(t *testing.T, service *Service, worldID string) int 
 	return n
 }
 
+// seedFieldBossTrace 在某世界沉淀一条 field_boss/elite「威胁浮现」痕迹（events 表 THREAT_EMERGED + world_id），
+// 作为 world_boss 自动升级的 provenance 信号（②：world_boss 仅当该 region 已沉淀 ≥1 个 field_boss/elite 痕迹时才升级）。
+// 痕迹挂在一个真实 owner 单位上（与生产一致：field_boss/elite 的 THREAT_EMERGED 由参战角色产出；events.actor_unit_id 有 units FK）。
+func seedFieldBossTrace(t *testing.T, ctx context.Context, service *Service, worldID string) {
+	t.Helper()
+	owner := unit.BootstrapRecord(900, "s_trace", "player", "痕迹归属")
+	if err := service.units.Save(ctx, owner); err != nil {
+		t.Fatalf("保存痕迹归属单位失败: %v", err)
+	}
+	if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		OwnerUnitID: owner.ID,
+		Code:        events.ReasonThreatEmerged,
+		Category:    events.CategoryLifecycle,
+		Payload:     map[string]any{"tier": "field_boss"},
+		WorldID:     worldID,
+	}); err != nil {
+		t.Fatalf("沉淀 field_boss 痕迹失败: %v", err)
+	}
+}
+
 // 回归（修审计§8 已知低危 TOCTOU 竞态）：自动刷新路径并发 100 goroutine 同时调 maybeRefreshWorldBoss，
 // 必须恰好生成 1 头 active Boss（原子条件 INSERT ... WHERE NOT EXISTS），绝不出现多头（违反单世界至多一头）。
 // 早先「COUNT active → 无则 INSERT」两步实现下，多请求都见 0 → 都 INSERT → 会插多头；本测试正是该缺陷的护栏。
@@ -270,6 +293,7 @@ func TestWorldBossAutoRefreshConcurrentSpawnsAtMostOne(t *testing.T) {
 	service.db.SetMaxOpenConns(1) // 串行化底层写，让并发体现在 Go 层交错（考验原子条件 INSERT），避免 SQLITE_BUSY
 	ctx := context.Background()
 	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid) // ② provenance 门：先沉淀 field_boss 痕迹，自动升级才会发生
 
 	const goroutines = 100
 	var wg sync.WaitGroup
@@ -305,6 +329,7 @@ func TestWorldBossAutoRefreshIdempotentAndScoped(t *testing.T) {
 	_, _, service := newThreatTestService(t)
 	ctx := context.Background()
 	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid) // ② provenance 门：先沉淀 field_boss 痕迹
 
 	// 首次自动刷新：无 active → 生成一头。
 	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
@@ -325,6 +350,7 @@ func TestWorldBossAutoRefreshIdempotentAndScoped(t *testing.T) {
 
 	// 另一世界互不干扰：各自独立刷出一头。
 	wid2 := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid2) // ② provenance 门：第二世界也先沉淀痕迹
 	if err := service.maybeRefreshWorldBoss(ctx, wid2); err != nil {
 		t.Fatalf("第二世界自动刷新失败: %v", err)
 	}
@@ -415,6 +441,7 @@ func TestWorldBossAutoRefreshConcurrentConvergesToOne(t *testing.T) {
 	service.db.SetMaxOpenConns(1) // 串行化底层写，让并发体现在 Go 层交错，避免 SQLITE_BUSY
 	ctx := context.Background()
 	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid) // ② provenance 门：先沉淀 field_boss 痕迹
 
 	const goroutines = 60
 	var wg sync.WaitGroup
@@ -483,4 +510,230 @@ func TestWorldBossConcurrentSettleOnce(t *testing.T) {
 	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossDown); got != 1 {
 		t.Fatalf("并发下应恰有 1 条讨平广播，得到 %d", got)
 	}
+}
+
+// ---- ① 单人物理锁（设计 §7：world_boss severity>cap → 单人物理不解锁，必须组队）----
+
+// worldBossHP 读某 Boss 当前血量（测试断言「锁住时未扣血」用）。
+func worldBossHP(t *testing.T, service *Service, bossID string) int {
+	t.Helper()
+	var hp int
+	if err := service.db.QueryRowContext(context.Background(),
+		`SELECT hp_remaining FROM world_bosses WHERE id = ?`, bossID).Scan(&hp); err != nil {
+		t.Fatalf("查 Boss 血量失败: %v", err)
+	}
+	return hp
+}
+
+// 单人撞高 severity 世界Boss：StrikeWorldBossParty 声明单人 party → 物理锁高光卡、**不开打**（不扣血、不记账本）。
+func TestWorldBossSoloPartyPhysicallyLocked(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, err := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "r1")
+	if err != nil {
+		t.Fatalf("投放世界Boss失败: %v", err)
+	}
+	lone := bossStriker(t, ctx, repo, 201, "独行客", 40)
+
+	// 显式声明单人 party（仅含自己）→ 物理锁。
+	r, err := service.StrikeWorldBossParty(ctx, wid, bossID, lone, []string{lone.ID})
+	if err != nil {
+		t.Fatalf("单人出手不应报错（应被锁、返回高光卡）: %v", err)
+	}
+	if !r.SoloLocked {
+		t.Fatalf("单人撞高 severity 世界Boss 应被物理锁，得到 SoloLocked=%v", r.SoloLocked)
+	}
+	if r.Defeated || r.Damage != 0 {
+		t.Fatalf("物理锁不应开打：期望 defeated=false damage=0，得到 defeated=%v damage=%d", r.Defeated, r.Damage)
+	}
+	if r.SoloCard == "" {
+		t.Fatalf("物理锁应返回「这不是一个人能撼动的」高光卡，得到空")
+	}
+	// 关键不变量：未扣血（满血）、账本无该击（没真打）。
+	if hp := worldBossHP(t, service, bossID); hp != 200_000 {
+		t.Fatalf("物理锁不应扣血，期望满血 200000，得到 %d", hp)
+	}
+	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossStrike); got != 0 {
+		t.Fatalf("物理锁不应记账本，期望 0 条出手，得到 %d", got)
+	}
+}
+
+// 组队（≥2 成员）解锁：声明双人 party → 不锁，真打、扣血、记账本。
+func TestWorldBossGroupPartyUnlocks(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "r1")
+	a := bossStriker(t, ctx, repo, 211, "甲", 40)
+	b := bossStriker(t, ctx, repo, 212, "乙", 40)
+
+	// 双人 party → 解锁，正常出手。
+	r, err := service.StrikeWorldBossParty(ctx, wid, bossID, a, []string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("组队出手失败: %v", err)
+	}
+	if r.SoloLocked {
+		t.Fatalf("组队（≥2）应解锁单人门，得到 SoloLocked=true")
+	}
+	if r.Damage != 40 || r.HPRemaining != 200_000-40 {
+		t.Fatalf("组队应真打：期望 damage=40 hp=%d，得到 damage=%d hp=%d", 200_000-40, r.Damage, r.HPRemaining)
+	}
+	if got := countCrossKind(t, service, wid, worldbus.KindWorldBossStrike); got != 1 {
+		t.Fatalf("组队真打应记 1 条账本，得到 %d", got)
+	}
+}
+
+// 协作共享血池出手（StrikeWorldBoss，party 未声明=nil）不受单人物理锁约束：共享血池机制本身即协作语义。
+func TestWorldBossCooperativeStrikeNotSoloLocked(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
+	a := bossStriker(t, ctx, repo, 221, "甲", 40)
+
+	r, err := service.StrikeWorldBoss(ctx, wid, bossID, a)
+	if err != nil {
+		t.Fatalf("协作出手失败: %v", err)
+	}
+	if r.SoloLocked {
+		t.Fatalf("协作共享血池出手（party 未声明）不应触发单人物理锁")
+	}
+	if r.Damage != 40 {
+		t.Fatalf("协作出手应真打，期望 damage=40，得到 %d", r.Damage)
+	}
+}
+
+// 账本已沉淀别的出手者时，即便声明单人 party 的迟到者也解锁（这场围猎已是群体协力，不是孤身独闯）。
+func TestWorldBossSoloPartyUnlockedWhenLedgerHasOthers(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, _ := service.SpawnWorldBoss(ctx, wid, "存亡级古龙", 200_000, "")
+	a := bossStriker(t, ctx, repo, 231, "先驱", 40)
+	b := bossStriker(t, ctx, repo, 232, "后到", 40)
+
+	// 先驱以协作入口出手，账本里留下一名出手者。
+	if _, err := service.StrikeWorldBoss(ctx, wid, bossID, a); err != nil {
+		t.Fatalf("先驱出手失败: %v", err)
+	}
+	// 后到者即便声明单人 party：账本已有别人（先驱）→ 围猎已成群体 → 解锁。
+	r, err := service.StrikeWorldBossParty(ctx, wid, bossID, b, []string{b.ID})
+	if err != nil {
+		t.Fatalf("后到者出手失败: %v", err)
+	}
+	if r.SoloLocked {
+		t.Fatalf("账本已有别的出手者时，迟到的单人也应解锁（群体围猎），得到 SoloLocked=true")
+	}
+	if r.Damage != 40 {
+		t.Fatalf("解锁后应真打，期望 damage=40，得到 %d", r.Damage)
+	}
+}
+
+// isSoloParty / worldBossSeverity 的纯判定（确定性、付费不进）。
+func TestSoloPartyAndSeverityPure(t *testing.T) {
+	// party 未声明（nil/[]）→ 协作语义，非单人。
+	if isSoloParty("u1", nil) {
+		t.Fatalf("party 未声明应判协作（非单人）")
+	}
+	if isSoloParty("u1", []string{}) {
+		t.Fatalf("空 party 应判协作（非单人）")
+	}
+	// 仅含自己 / 自己重复 → 单人。
+	if !isSoloParty("u1", []string{"u1"}) {
+		t.Fatalf("party 仅含自己应判单人")
+	}
+	if !isSoloParty("u1", []string{"u1", "u1"}) {
+		t.Fatalf("party 自己重复仍应判单人")
+	}
+	// 含别人 → 组队。
+	if isSoloParty("u1", []string{"u1", "u2"}) {
+		t.Fatalf("party 含别的成员应判组队（非单人）")
+	}
+	// world_boss severity 恒 >cap（任何血量档）：单人门必触发。
+	for _, hp := range []int{1, 5, 120_000, 200_000, 600_000, maxWorldBossHP} {
+		sev := worldBossSeverity(hp)
+		if sev <= worldBossSeverityCap {
+			t.Fatalf("world_boss severity 应恒 >cap(%v)，hp=%d 得到 severity=%v", worldBossSeverityCap, hp, sev)
+		}
+		if encounter.SoloAllowed(sev, worldBossSeverityCap) {
+			t.Fatalf("world_boss(hp=%d severity=%v) 单人门应不解锁", hp, sev)
+		}
+	}
+	// severity 随血量单调不降（确定性）。
+	if worldBossSeverity(200_000) < worldBossSeverity(120_000) {
+		t.Fatalf("severity 应随血量单调不降")
+	}
+}
+
+// ---- ② 威胁度链升级 provenance（设计 §1：world_boss 仅当沉淀 ≥1 个 field_boss/elite 痕迹时才升级，不凭空刷）----
+
+// 无 provenance 信号（无任何 field_boss/elite 痕迹）→ 自动刷新不凭空 spawn（即便 flag 开）。
+func TestWorldBossAutoRefreshNoProvenanceNoSpawn(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	// 不沉淀任何 THREAT_EMERGED 痕迹 → 威胁度链无前因 → 不应凭空 spawn。
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("无 provenance 时应 no-op 且不报错，得到 %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 0 {
+		t.Fatalf("无 provenance 信号不应凭空 spawn，得到 %d 头", got)
+	}
+}
+
+// 有 field_boss 痕迹时才升级：沉淀 ≥1 个 THREAT_EMERGED 后自动刷新生成一头，并记 provenance 流程事件。
+func TestWorldBossAutoRefreshWithProvenanceSpawnsAndRecords(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid) // 沉淀一个 field_boss 痕迹（provenance 信号）
+
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("有 provenance 时自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("有 provenance 信号应升级生成恰 1 头，得到 %d", got)
+	}
+	// provenance 应被记入世界总线（kind=WORLD_BOSS_SPAWN + payload.provenance=threat_escalation）。
+	if got := countWorldBossProvenance(t, service, wid); got != 1 {
+		t.Fatalf("应恰记 1 条 world_boss 升级 provenance 留痕，得到 %d", got)
+	}
+
+	// 幂等：再调（已有 active）不新增 Boss、也不再重复记 provenance（RowsAffected==0 不留痕）。
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("幂等自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("已有 active 时不应新增，仍应为 1，得到 %d", got)
+	}
+	if got := countWorldBossProvenance(t, service, wid); got != 1 {
+		t.Fatalf("no-op 兜底不应重复记 provenance，仍应为 1，得到 %d", got)
+	}
+}
+
+// countWorldBossProvenance 数某世界总线上的 world_boss 升级 provenance 留痕（kind=WORLD_BOSS_SPAWN + provenance=threat_escalation）。
+func countWorldBossProvenance(t *testing.T, service *Service, worldID string) int {
+	t.Helper()
+	evs, err := worldbus.ListByWorldKind(context.Background(), service.db, worldID, worldBossSpawnProvenanceKind)
+	if err != nil {
+		t.Fatalf("读 provenance 总线失败: %v", err)
+	}
+	n := 0
+	for _, e := range evs {
+		var p struct {
+			Provenance string `json:"provenance"`
+			Tier       string `json:"tier"`
+		}
+		if raw, ok := e.Payload.(json.RawMessage); ok {
+			_ = json.Unmarshal(raw, &p)
+		}
+		if p.Provenance == "threat_escalation" && p.Tier == "world_boss" {
+			n++
+		}
+	}
+	return n
 }
