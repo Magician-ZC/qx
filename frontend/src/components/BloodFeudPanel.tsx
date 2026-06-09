@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listBloodFeuds } from "../session/api";
 import type { BloodFeudEntry } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 type Props = {
   sessionID: string;
@@ -49,7 +50,7 @@ const panelStyle: React.CSSProperties = {
   width: 320,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 40,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.94)",
   border: "1px solid rgba(180, 84, 58, 0.4)",
   borderRadius: 10,

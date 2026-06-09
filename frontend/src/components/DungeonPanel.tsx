@@ -11,6 +11,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { APIError, runDungeon } from "../session/api";
 import type { DungeonResult, EncounterAward } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 type Props = {
   // sessionID 当前会话 ID（端点路径用）。
@@ -92,7 +93,7 @@ const panelStyle: React.CSSProperties = {
   width: 380,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 41,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.95)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

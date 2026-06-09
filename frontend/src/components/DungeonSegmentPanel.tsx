@@ -12,6 +12,7 @@
    不与并发改 api.ts 的工作冲突。自包含内联样式，参照 DungeonPanel.tsx / WorldBossPanel.tsx 右侧浮层范式。 */
 
 import { useCallback, useState } from "react";
+import { zIndex } from "../zindex-tokens";
 
 // DungeonNextAction 与后端 session.DungeonNextAction 枚举对齐。
 export type DungeonNextAction =
@@ -339,7 +340,7 @@ const panelStyle: React.CSSProperties = {
   width: 380,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 41,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.95)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

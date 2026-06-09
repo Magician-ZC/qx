@@ -54,6 +54,7 @@ import DungeonSegmentPanel from "./components/DungeonSegmentPanel";
 import LiveOpsPanel from "./components/LiveOpsPanel";
 import { CharterEditor } from "./components/CharterEditor";
 import { OnboardingTour } from "./components/OnboardingTour";
+import { usePanelStack } from "./hooks/usePanelStack";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -518,8 +519,9 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
   const deploymentIntroShownKeyRef = useRef("");
   const [unitDetailPopoverOpen, setUnitDetailPopoverOpen] = useState(false);
   const [tileDetailPopoverOpen, setTileDetailPopoverOpen] = useState(false);
-  // 命运四槽面板：开关 + 聚焦单位（默认跟随当前选中单位）。
-  const [fatePanelOpen, setFatePanelOpen] = useState(false);
+  // 右侧浮层面板互斥栈：命运/来意/血仇/编年史/立约/充值/世界Boss/副本/副本分段共用单一「当前打开 id」，
+  // 同一时刻右侧最多显示一个面板，打开新面板自动关旧的，从根上消除多面板叠层重叠（见 hooks/usePanelStack）。
+  const { openPanelId: openRightPanelId, togglePanel: toggleRightPanel, closePanel: closeRightPanel } = usePanelStack();
   // elite/PvE 遭遇：进行中的单位与最近一次结果（用于展示在事件流/弹层）。
   const [eliteEncounterBusyUnitID, setEliteEncounterBusyUnitID] = useState("");
   const [eliteEncounterResult, setEliteEncounterResult] = useState<EliteEncounterResult | null>(null);
@@ -533,27 +535,14 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
   // 运营/dev 治理台 + 隐私擦除（developer 门控）。
   const [governancePanelOpen, setGovernancePanelOpen] = useState(false);
   const [privacyEraseOpen, setPrivacyEraseOpen] = useState(false);
-  // 商业化/合规浮层（玩家可见，常驻入口触发）。
-  const [billingPanelOpen, setBillingPanelOpen] = useState(false);
+  // 合规浮层（玩家可见，常驻入口触发）。商业化「充值」面板已并入右侧互斥栈（usePanelStack 的 "billing"）。
   const [compliancePanelOpen, setCompliancePanelOpen] = useState(false);
   // 合规 403 拦截横幅：被门拦时存后端 reason，渲染 ComplianceBlockedBanner 引导实名/告知宵禁/防沉迷。
   const [complianceBlockReason, setComplianceBlockReason] = useState<string | null>(null);
-  // 跨玩家同意收件箱浮层（针对当前选中角色）。
-  const [consentInboxOpen, setConsentInboxOpen] = useState(false);
-  // 血仇网络面板（针对当前选中角色，玩家可见——让 blood_feud 传播可感知）。
-  const [bloodFeudOpen, setBloodFeudOpen] = useState(false);
-  // 编年史时间线面板（针对当前选中角色的传记 / 整局命运总线；读侧低频，独立浮层、不进高频快照轮询）。
-  const [chronicleOpen, setChronicleOpen] = useState(false);
-  // 离线宪章·立约面板（替当前选中/指挥阵营角色立约：红线/长期目标/社交授权；玩家可见，会话作用域 REST）。
-  const [charterOpen, setCharterOpen] = useState(false);
-  // 世界 Boss 协作面板（需本局已接入世界 world_id；developer 门控的进阶玩法）。
-  const [worldBossOpen, setWorldBossOpen] = useState(false);
-  // 运营看板（cost-dashboard + leads-funnel，developer 门控）。
+  // 注：来意(consent)/血仇(bloodFeud)/编年史(chronicle)/立约(charter)/世界Boss(worldBoss)/
+  // 副本(dungeon)/副本分段(dungeonSegment) 七个右侧浮层已并入上方 usePanelStack 互斥栈，不再各持独立 open state。
+  // 运营看板（cost-dashboard + leads-funnel，developer 门控）。全屏模态，不进右侧互斥栈。
   const [opsDashboardOpen, setOpsDashboardOpen] = useState(false);
-  // 副本面板（多层 PvE，QUNXIANG_DUNGEON 默认关时后端报错→面板提示未启用）。
-  const [dungeonOpen, setDungeonOpen] = useState(false);
-  // 副本异步分段面板（逐段可中断、关键节点暂停问玩家；QUNXIANG_DUNGEON 默认关时后端报 409→面板提示未启用）。
-  const [dungeonSegmentOpen, setDungeonSegmentOpen] = useState(false);
   // Live-Ops 运营台（GM 世界事件注入 + 赛季 + 零和审计；developer 门控，均走 X-Ops-Token）。
   const [liveOpsOpen, setLiveOpsOpen] = useState(false);
   const [dialogueDraft, setDialogueDraft] = useState("");
@@ -2689,12 +2678,13 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
   ) : null;
 
   // billingPanelOverlay 是商业化面板浮层（充值/会员/权益），玩家可见，任意 return 内复用。
-  const billingPanelOverlay = billingPanelOpen ? (
+  // 经右侧互斥栈管理（"billing"）：与其它右侧浮层同一时刻至多显示一个。
+  const billingPanelOverlay = openRightPanelId === "billing" ? (
     <BillingPanel
       accountId={accountUser?.id ?? ""}
-      onClose={() => setBillingPanelOpen(false)}
+      onClose={() => closeRightPanel()}
       onRequireLogin={() => {
-        setBillingPanelOpen(false);
+        closeRightPanel();
         setStartMode("multiplayer");
         setMessage("请先注册/登录账号，再前往充值/会员。");
       }}
@@ -3295,46 +3285,46 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
                   <button className="action-button inline-action" onClick={() => handleFloatingPanelToggle("overview")}>概览</button>
                   <button
                     data-tour="fate"
-                    className={`action-button inline-action ${fatePanelOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setFatePanelOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "fate" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("fate")}
                     title="命运四槽：看你的人如今怎样、近来经历了什么、有没有事在等你拿主意"
                   >
                     命运
                   </button>
                   <button
-                    className={`action-button inline-action ${consentInboxOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setConsentInboxOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "consent" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("consent")}
                     disabled={!selectedUnitID}
                     title={selectedUnitID ? "来意：看有没有别处的人想与这位角色发生牵连，由你替她拿主意" : "先选中一个角色，再查看其『来意』收件箱"}
                   >
                     来意
                   </button>
                   <button
-                    className={`action-button inline-action ${bloodFeudOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setBloodFeudOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "bloodFeud" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("bloodFeud")}
                     disabled={!selectedUnitID}
                     title={selectedUnitID ? "血仇：查看这位角色背负的世仇关系网（含因牵连传播而来的间接之恨）" : "先选中一个角色，再查看其血仇网络"}
                   >
                     血仇
                   </button>
                   <button
-                    className={`action-button inline-action ${chronicleOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setChronicleOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "chronicle" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("chronicle")}
                     title={selectedUnitID ? "编年史：这位角色的传记时间线（斩杀/陨落/承继/传家…），可回到那一刻" : "编年史：本局的命运总线时间线，可回到那一刻"}
                   >
                     编年史
                   </button>
                   <button
-                    className={`action-button inline-action ${charterOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setCharterOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "charter" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("charter")}
                     title="离线宪章·立约：替你的人定下她绝不越的红线、一生奔赴的长期目标、你不在时她能自主的边界"
                   >
                     立约
                   </button>
                   <button
-                    className={`action-button inline-action ${billingPanelOpen ? "action-button-primary" : ""}`}
+                    className={`action-button inline-action ${openRightPanelId === "billing" ? "action-button-primary" : ""}`}
                     onClick={() => {
-                      setBillingPanelOpen((open) => !open);
+                      toggleRightPanel("billing");
                       void trackFunnel("open_billing");
                     }}
                     title="充值 / 会员 / 已购权益"
@@ -3349,15 +3339,15 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
                     组队
                   </button>
                   <button
-                    className={`action-button inline-action ${dungeonOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setDungeonOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "dungeon" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("dungeon")}
                     title="多层副本：勾选队员逐层推进，通关按贡献分赃、败北分级惩罚（需后端开启 QUNXIANG_DUNGEON）"
                   >
                     副本
                   </button>
                   <button
-                    className={`action-button inline-action ${dungeonSegmentOpen ? "action-button-primary" : ""}`}
-                    onClick={() => setDungeonSegmentOpen((open) => !open)}
+                    className={`action-button inline-action ${openRightPanelId === "dungeonSegment" ? "action-button-primary" : ""}`}
+                    onClick={() => toggleRightPanel("dungeonSegment")}
                     title="副本·分段：逐段可中断、关键节点暂停问你、离线超时见好就收（需后端开启 QUNXIANG_DUNGEON）"
                   >
                     副本·分段
@@ -3398,8 +3388,8 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
                   ) : null}
                   {developerMode ? (
                     <button
-                      className={`action-button inline-action ${worldBossOpen ? "action-button-primary" : ""}`}
-                      onClick={() => setWorldBossOpen((open) => !open)}
+                      className={`action-button inline-action ${openRightPanelId === "worldBoss" ? "action-button-primary" : ""}`}
+                      onClick={() => toggleRightPanel("worldBoss")}
                       disabled={!session?.world_id}
                       title={session?.world_id ? "世界 Boss：跨玩家共享血池协作 PvE（投放 / 出手 / 按贡献分赃）" : "本局未接入世界（world_id 为空），世界 Boss 不可用"}
                     >
@@ -3842,45 +3832,45 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
               </div>
             </aside>
           ) : null}
-          {showHUD && fatePanelOpen && session ? (
+          {showHUD && openRightPanelId === "fate" && session ? (
             <FatePanel
               sessionId={session.id}
               units={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
               initialUnitID={selectedUnitID}
-              onClose={() => setFatePanelOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 跨玩家同意收件箱：scoped 到当前选中角色（SessionSnapshot 无 world_id，故不传 worldId——组件会隐藏『惊动世界』按钮，收件箱仍可用）。*/}
-          {showHUD && consentInboxOpen && selectedUnitID ? (
+          {showHUD && openRightPanelId === "consent" && selectedUnitID ? (
             <ConsentInbox
               unitId={selectedUnitID}
               unitName={selectedUnit?.identity.name}
-              onClose={() => setConsentInboxOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 血仇网络面板：scoped 到当前选中角色，让 blood_feud 多跳传播对玩家可感知。*/}
-          {showHUD && bloodFeudOpen && session && selectedUnitID ? (
+          {showHUD && openRightPanelId === "bloodFeud" && session && selectedUnitID ? (
             <BloodFeudPanel
               sessionID={session.id}
               unitID={selectedUnitID}
               unitName={selectedUnit?.identity.name}
-              onClose={() => setBloodFeudOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 编年史时间线面板：选中角色 → 该角色传记；未选中 → 整局命运总线。读侧低频，依赖注入 api 的 getChronicleFeed/getChronicleMoment。*/}
-          {showHUD && chronicleOpen && session ? (
+          {showHUD && openRightPanelId === "chronicle" && session ? (
             <ChroniclePanel
               sessionID={session.id}
               unitID={selectedUnitID ?? undefined}
               unitName={selectedUnit?.identity.name}
               fetchChronicle={getChronicleFeed}
               resolveMoment={getChronicleMoment}
-              onClose={() => setChronicleOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 离线宪章·立约面板：替指挥阵营某角色立/改/撤约（红线/长期目标/社交授权），首选聚焦当前选中角色。
               REST 经 props 注入（getCharter/putCharter/deleteCharter，request 自带会话角色 token）。*/}
-          {showHUD && charterOpen && session && controlledUnits.length > 0 ? (
+          {showHUD && openRightPanelId === "charter" && session && controlledUnits.length > 0 ? (
             <CharterEditor
               sessionId={session.id}
               units={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
@@ -3888,15 +3878,15 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
               fetchCharter={getCharter}
               saveCharter={putCharter}
               deleteCharter={deleteCharter}
-              onClose={() => setCharterOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 世界 Boss 协作 PvE（developer 门控；需本局已接入世界 world_id）。*/}
-          {showHUD && developerMode && worldBossOpen && session?.world_id ? (
+          {showHUD && developerMode && openRightPanelId === "worldBoss" && session?.world_id ? (
             <WorldBossPanel
               worldID={session.world_id}
               attackerCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
-              onClose={() => setWorldBossOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 运营看板：跨会话成本 + 假门转化漏斗（developer 门控）。*/}
@@ -3914,20 +3904,20 @@ export function App({ battleSessionId, onExitToFate }: AppProps = {}) {
             />
           ) : null}
           {/* 多层副本（玩家可达；后端 QUNXIANG_DUNGEON 关时面板提示未启用）。*/}
-          {showHUD && dungeonOpen && session ? (
+          {showHUD && openRightPanelId === "dungeon" && session ? (
             <DungeonPanel
               sessionID={session.id}
               partyCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
-              onClose={() => setDungeonOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 副本异步分段（玩家可达；逐段可中断、关键节点暂停问玩家；后端 QUNXIANG_DUNGEON 关时面板提示未启用）。*/}
-          {showHUD && dungeonSegmentOpen && session ? (
+          {showHUD && openRightPanelId === "dungeonSegment" && session ? (
             <DungeonSegmentPanel
               sessionID={session.id}
               partyCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
               api={{ startDungeonAsync, runDungeonSegment, resumeDungeonSegment }}
-              onClose={() => setDungeonSegmentOpen(false)}
+              onClose={() => closeRightPanel()}
             />
           ) : null}
           {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}

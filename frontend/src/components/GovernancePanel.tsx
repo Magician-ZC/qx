@@ -25,13 +25,14 @@ import type {
   PrivacyEraseResult,
   RawEventEntry,
 } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 // ============ 共享样式基元（自包含，参照 FatePanel.tsx） ============
 
 const overlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  zIndex: 60,
+  zIndex: zIndex.fullscreenModal,
   background: "rgba(8, 9, 14, 0.62)",
   display: "flex",
   alignItems: "flex-start",

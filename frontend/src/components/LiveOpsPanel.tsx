@@ -8,6 +8,7 @@
    自包含内联样式（与 OpsDashboard.tsx 同一基元集），不 import api.ts/types.ts，零并发冲突。 */
 
 import { useCallback, useState } from "react";
+import { zIndex } from "../zindex-tokens";
 
 // ============ 注入的 API 契约（主控用 api.ts 新函数实现并透传） ============
 
@@ -91,7 +92,7 @@ export type LiveOpsPanelProps = {
 const overlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  zIndex: 61,
+  zIndex: zIndex.fullscreenModal,
   background: "rgba(8, 9, 14, 0.62)",
   display: "flex",
   alignItems: "flex-start",

@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ShareCardButton } from "./ShareCardButton";
 import { deathCard, biographyCard, type ShareCardOptions } from "../fate/shareCard";
+import { zIndex } from "../zindex-tokens";
 
 // ── 后端契约对齐（与 session.ChronicleEntry / MomentAnchor / ChronicleView / ChronicleFeed 的 json tag 一一对应）──
 // 这里就地声明以免改 session/types.ts（本面板只编辑自身文件）；字段口径以后端 json tag 为准。
@@ -92,7 +93,7 @@ const panelStyle: React.CSSProperties = {
   width: 340,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 40,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.94)",
   border: "1px solid rgba(201, 162, 39, 0.4)",
   borderRadius: 10,

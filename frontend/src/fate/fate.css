@@ -108,8 +108,14 @@
   margin: 8px 0 0;
 }
 
-/* 待决策（最显眼） */
+/* 待决策（最显眼）。
+   纵向 flex + gap 统一各段（标题/正文/倒计时条/接管战/情境选项/还有N件）的间距，
+   消除「倒计时条 FateCountdownBar 与接管战 BattleTakeoverButton 叠在卡上」的错位——
+   每段都是独立 flex 项，按 gap 自然分隔，不再依赖各自不一致的 margin。 */
 .fate-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   background: linear-gradient(180deg, #fff6e6, #f6e6c8);
   border: 1px solid rgba(160, 110, 50, 0.4);
   border-radius: 12px;
@@ -120,7 +126,7 @@
   font-size: 16px;
   line-height: 1.8;
   color: #4a3417;
-  margin: 6px 0 14px;
+  margin: 2px 0 4px;
 }
 .fate-actions {
   display: flex;
@@ -153,12 +159,15 @@
   color: #97825f;
 }
 
-/* 待决策倒计时条（拿主意还剩多久） */
+/* 待决策倒计时条（拿主意还剩多久）。
+   作为 .fate-pending flex 列的独立项，靠列的 gap 取间距，自身只留极小上下 margin，
+   并 align-self:flex-start 使药丸不被拉伸至整行。 */
 .fate-countdown {
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 2px 0 12px;
+  margin: 2px 0;
   padding: 4px 12px;
   border-radius: 999px;
   font-size: 12px;
@@ -208,6 +217,71 @@
   background: rgba(245, 232, 210, 0.7);
   font-style: italic;
 }
+
+/* 高光卡：纵向 flex + gap 把「叙事文 + 三键反馈 + 讲给别人听 + 分享图 + 接管战」逐行分隔，
+   消除原来无布局时各元素（含 compact ShareCardButton 裸按钮、BattleTakeoverButton）挤成一团/叠在一起。 */
+.fate-card-highlight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* 叙事文原为 <span>（行内），在 flex 列里转块级占满整行，与下方各行不再基线错位。 */
+.fate-card-text {
+  display: block;
+  width: 100%;
+}
+
+/* 高光卡三键轻反馈行（意料之中 / 有点意外但合理 / 太离谱）。
+   横向 flex + wrap，窄屏自动换行不溢出。 */
+.fate-react-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.fate-react-label {
+  font-size: 12px;
+  color: #97825f;
+  letter-spacing: 0.04em;
+}
+.fate-react-btn {
+  padding: 4px 10px;
+  border: 1px solid rgba(140, 100, 50, 0.35);
+  border-radius: 999px;
+  background: rgba(255, 252, 246, 0.85);
+  color: #6a4e26;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.fate-react-btn:hover {
+  background: #f0dcb8;
+}
+.fate-react-done {
+  font-size: 12px;
+  color: #9a8a68;
+  font-style: italic;
+}
+
+/* 「讲给别人听」文本分享按钮：与 compact 分享图按钮同行宽不同色，独立成行不挤压。 */
+.fate-share-btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border: 1px solid rgba(140, 95, 45, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 252, 245, 0.9);
+  color: #5a3f1c;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.fate-share-btn:hover {
+  background: #f0dcb8;
+}
 .fate-empty {
   font-size: 13px;
   color: #9a8a68;
@@ -245,6 +319,8 @@
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
+  /* z-index 对齐 zindex-tokens 契约：瞬态通知浮于内容之上但低于 topBar 控件（hud=14）。 */
+  z-index: 14;
   background: rgba(58, 42, 22, 0.92);
   color: #f5ecdc;
   padding: 10px 18px;
@@ -361,7 +437,41 @@
   position: fixed;
   top: 16px;
   right: 16px;
+  /* z-index 对齐 zindex-tokens 契约：固定的「换个账号登入」属顶部栏控件（topBar=50），
+     恒浮于四槽内容与卡片之上，不被任何卡的堆叠上下文遮挡。 */
+  z-index: 50;
   padding: 8px 14px;
   font-size: 12px;
   background: rgba(122, 82, 38, 0.85);
+}
+
+/* ── 窄屏响应式（≤480px）：避免固定控件与内容重叠、避免横向溢出 ──
+   1) 固定的「换个账号登入」浮于右上，play 相位下会盖住四槽顶部品牌区——
+      给 .fate-root 让出顶部安全区，使内容下移、不被压在固定按钮之下；
+   2) 收紧各卡左右内边距，并强制内容盒可收缩（min-width:0 + 内容换行），杜绝长串叙事文撑破视口。 */
+@media (max-width: 480px) {
+  .fate-shell {
+    padding: 20px 12px 56px;
+  }
+  .fate-root {
+    /* 让出固定 .fate-restart（top:16 高约 32）的高度，play 相位顶部内容不被遮挡。 */
+    padding-top: 36px;
+  }
+  .fate-status,
+  .fate-pending {
+    padding: 14px;
+  }
+  /* 待决策情境选项在窄屏单列铺满，按钮副标不被挤换行错位。 */
+  .fate-actions button {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+  /* 长叙事文/卡内容允许在窄容器内收缩换行，不撑破横轴。 */
+  .fate-card,
+  .fate-pending-text,
+  .fate-card-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }

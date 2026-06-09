@@ -13,6 +13,7 @@ import {
   surfaceCrossEvents,
 } from "../session/api";
 import type { ConsentRequest } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 type Props = {
   // unitId 是收件人（被请求方）角色 ID；同意请求按 target_unit_id 归集到她名下。
@@ -55,7 +56,7 @@ const panelStyle: React.CSSProperties = {
   width: 340,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 41,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.94)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

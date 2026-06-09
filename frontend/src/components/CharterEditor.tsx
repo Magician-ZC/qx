@@ -7,6 +7,7 @@
    祖魂语气：玩家是垂看后人、替她立约的先祖，措辞不出现「命令/操控」。自包含内联样式，不依赖 fate.css。*/
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { zIndex } from "../zindex-tokens";
 
 // CharterRedline 对齐后端 session.CharterRedline（id/text/severity）。
 // id 由后端 NormalizeCharter 派生/补齐；前端新建条目可留空，保存后读回即带稳定 id。
@@ -66,7 +67,7 @@ const panelStyle: React.CSSProperties = {
   width: 360,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 42,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.94)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

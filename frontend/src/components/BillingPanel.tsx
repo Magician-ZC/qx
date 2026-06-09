@@ -14,6 +14,7 @@ import {
   purchaseSKU,
 } from "../session/api";
 import type { BillingSKU, Entitlement } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 type Props = {
   // accountId 仅用于占位调用（后端实际从 Bearer token 取账户）；通常传当前登录用户 id 或空串。
@@ -52,7 +53,7 @@ const panelStyle: React.CSSProperties = {
   width: 360,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 41,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.95)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

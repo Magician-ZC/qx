@@ -9,6 +9,7 @@
    纯前端、依赖注入：onComplete 与锚点选择器经 props 传入，不直接 import api.ts。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { zIndex } from "../zindex-tokens";
 
 // 默认 localStorage 键名；可被 props.storageKey 覆盖（便于测试或多套引导并存）。
 const DEFAULT_STORAGE_KEY = "qx_onboarded";
@@ -122,7 +123,7 @@ function measureAnchor(selector?: string): AnchorRect | null {
 const overlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  zIndex: 9000,
+  zIndex: zIndex.tour,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",

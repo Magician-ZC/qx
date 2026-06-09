@@ -18,6 +18,7 @@ import {
 import { computeFateCountdown, formatFateCountdown } from "../fate/countdown";
 import { ShareCardButton } from "./ShareCardButton";
 import { highlightCard } from "../fate/shareCard";
+import { zIndex } from "../zindex-tokens";
 
 type FateUnitOption = {
   id: string;
@@ -90,7 +91,7 @@ const panelStyle: React.CSSProperties = {
   width: 320,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 40,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.94)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,

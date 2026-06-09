@@ -12,6 +12,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { APIError, spawnWorldBoss, strikeWorldBoss } from "../session/api";
 import type { EncounterAward, WorldBossStrikeResult } from "../session/types";
+import { zIndex } from "../zindex-tokens";
 
 type Props = {
   // worldID 当前世界 ID（spawn/strike 必需）。
@@ -55,7 +56,7 @@ const panelStyle: React.CSSProperties = {
   width: 380,
   maxHeight: "calc(100vh - 96px)",
   overflowY: "auto",
-  zIndex: 41,
+  zIndex: zIndex.rightPanel,
   background: "rgba(18, 20, 28, 0.95)",
   border: "1px solid rgba(217, 188, 115, 0.35)",
   borderRadius: 10,
