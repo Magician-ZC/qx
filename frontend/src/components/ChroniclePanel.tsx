@@ -10,6 +10,8 @@
    纯读、无副作用。中文 UI，复用既有 components 浮层风格（深底金描边、内联样式，仿 BloodFeudPanel）。*/
 
 import { useCallback, useEffect, useState } from "react";
+import { ShareCardButton } from "./ShareCardButton";
+import { deathCard, biographyCard, type ShareCardOptions } from "../fate/shareCard";
 
 // ── 后端契约对齐（与 session.ChronicleEntry / MomentAnchor / ChronicleView / ChronicleFeed 的 json tag 一一对应）──
 // 这里就地声明以免改 session/types.ts（本面板只编辑自身文件）；字段口径以后端 json tag 为准。
@@ -196,6 +198,18 @@ function viewKey(v: ChronicleView): string {
   return v.entry.id || `${v.entry.turn}-${v.entry.kind}`;
 }
 
+// buildEntryShareCard 把一条编年史条目化成可分享的图片卡：死亡条目用悼卡（death），其余用传记卡（biography）。
+// name 取传入的主角名（整局总览无主角名时用「群像」兜底）；副标带类型徽标 + 回合，正文用条目文案。
+function buildEntryShareCard(entry: ChronicleEntry, unitName: string | undefined): ShareCardOptions {
+  const who = unitName?.trim() || "群像";
+  const meta = metaForKind(entry.kind);
+  const subtitle = `${meta.label} · 第 ${entry.turn} 回合`;
+  if (entry.kind === "death") {
+    return deathCard({ name: who, epitaph: entry.text, lineage: subtitle });
+  }
+  return biographyCard({ name: who, biography: entry.text, subtitle });
+}
+
 // ChroniclePanel 编年史时间线浮层：倒序展示某局 / 某角色的编年史条目，逐条可「回到那一刻」。
 export function ChroniclePanel({
   sessionID,
@@ -335,6 +349,8 @@ export function ChroniclePanel({
                     。
                   </div>
                 ) : null}
+                {/* 图片卡分享：陨落条目制悼卡（death），其余制传记卡（biography），供截图传播。*/}
+                <ShareCardButton compact card={buildEntryShareCard(view.entry, unitName)} />
               </div>
             );
           })}

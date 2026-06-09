@@ -16,6 +16,8 @@ import {
   type FateCard,
 } from "../session/api";
 import { computeFateCountdown, formatFateCountdown } from "../fate/countdown";
+import { ShareCardButton } from "./ShareCardButton";
+import { highlightCard } from "../fate/shareCard";
 
 type FateUnitOption = {
   id: string;
@@ -536,6 +538,12 @@ export function FatePanel({ sessionId, units, initialUnitID, onClose }: Props) {
               >
                 讲给别人听
               </button>
+              {/* 图片卡分享（文本复制保留在上方）：把这段高光手绘成竖版 PNG，截图传播更易扩散。*/}
+              <ShareCardButton
+                compact
+                card={highlightCard({ title: status?.name ?? "她", narrative: c.narrative })}
+                onShared={() => void trackFunnel("share_initiated", { source: "fate_highlight_image" })}
+              />
             </div>
           );
         })

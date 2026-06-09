@@ -34,6 +34,9 @@ import {
   fetchArbitrationAudit,
   getChronicleFeed,
   getChronicleMoment,
+  getCharter,
+  putCharter,
+  deleteCharter,
 } from "./session/api";
 import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
 import type { FieldBossResult } from "./session/types";
@@ -49,6 +52,8 @@ import { OpsDashboard } from "./components/OpsDashboard";
 import DungeonPanel from "./components/DungeonPanel";
 import DungeonSegmentPanel from "./components/DungeonSegmentPanel";
 import LiveOpsPanel from "./components/LiveOpsPanel";
+import { CharterEditor } from "./components/CharterEditor";
+import { OnboardingTour } from "./components/OnboardingTour";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -503,6 +508,8 @@ export function App() {
   const [bloodFeudOpen, setBloodFeudOpen] = useState(false);
   // 编年史时间线面板（针对当前选中角色的传记 / 整局命运总线；读侧低频，独立浮层、不进高频快照轮询）。
   const [chronicleOpen, setChronicleOpen] = useState(false);
+  // 离线宪章·立约面板（替当前选中/指挥阵营角色立约：红线/长期目标/社交授权；玩家可见，会话作用域 REST）。
+  const [charterOpen, setCharterOpen] = useState(false);
   // 世界 Boss 协作面板（需本局已接入世界 world_id；developer 门控的进阶玩法）。
   const [worldBossOpen, setWorldBossOpen] = useState(false);
   // 运营看板（cost-dashboard + leads-funnel，developer 门控）。
@@ -3163,6 +3170,7 @@ export function App() {
                   </div>
                   <button className="action-button inline-action" onClick={() => handleFloatingPanelToggle("overview")}>概览</button>
                   <button
+                    data-tour="fate"
                     className={`action-button inline-action ${fatePanelOpen ? "action-button-primary" : ""}`}
                     onClick={() => setFatePanelOpen((open) => !open)}
                     title="命运四槽：看你的人如今怎样、近来经历了什么、有没有事在等你拿主意"
@@ -3191,6 +3199,13 @@ export function App() {
                     title={selectedUnitID ? "编年史：这位角色的传记时间线（斩杀/陨落/承继/传家…），可回到那一刻" : "编年史：本局的命运总线时间线，可回到那一刻"}
                   >
                     编年史
+                  </button>
+                  <button
+                    className={`action-button inline-action ${charterOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setCharterOpen((open) => !open)}
+                    title="离线宪章·立约：替你的人定下她绝不越的红线、一生奔赴的长期目标、你不在时她能自主的边界"
+                  >
+                    立约
                   </button>
                   <button
                     className={`action-button inline-action ${billingPanelOpen ? "action-button-primary" : ""}`}
@@ -3737,6 +3752,19 @@ export function App() {
               fetchChronicle={getChronicleFeed}
               resolveMoment={getChronicleMoment}
               onClose={() => setChronicleOpen(false)}
+            />
+          ) : null}
+          {/* 离线宪章·立约面板：替指挥阵营某角色立/改/撤约（红线/长期目标/社交授权），首选聚焦当前选中角色。
+              REST 经 props 注入（getCharter/putCharter/deleteCharter，request 自带会话角色 token）。*/}
+          {showHUD && charterOpen && session && controlledUnits.length > 0 ? (
+            <CharterEditor
+              sessionId={session.id}
+              units={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
+              initialUnitID={selectedUnitID}
+              fetchCharter={getCharter}
+              saveCharter={putCharter}
+              deleteCharter={deleteCharter}
+              onClose={() => setCharterOpen(false)}
             />
           ) : null}
           {/* 世界 Boss 协作 PvE（developer 门控；需本局已接入世界 world_id）。*/}
@@ -5730,6 +5758,15 @@ export function App() {
           ) : null}
         </section>
       </main>
+      {/* 新手首屏「第一分钟」引导：进入会话后首次显示（组件内部用 localStorage qx_onboarded 判重，已看过不再弹）。
+          锚点 [data-tour='fate']/[data-tour='intervene'] 命中则聚光，未命中退化为纯居中卡，最小侵入。*/}
+      {session ? (
+        <OnboardingTour
+          onComplete={(reason) => {
+            void trackFunnel("onboarding_tour", { source: reason });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

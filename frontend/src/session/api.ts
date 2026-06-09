@@ -1110,6 +1110,58 @@ export async function listBloodFeuds(sessionID: string, unitID: string): Promise
   return data.feuds ?? [];
 }
 
+// ---- 离线宪章（offline_charter）：单个单位「玩家不在场时据此自治」的三段长效授权读写（会话作用域）----
+// 字段对齐后端 session.OfflineCharter / CharterRedline 的 json tag。request 自动带会话角色 token（与 feuds 读一致）。
+
+// CharterRedlineDTO 对齐后端 session.CharterRedline（id 由后端 NormalizeCharter 补齐/派生）。
+export type CharterRedlineDTO = {
+  id?: string;
+  text: string;
+  severity?: string;
+};
+// OfflineCharterDTO 对齐后端 session.OfflineCharter 三段（全 omitempty，未设立时各段缺省）。
+export type OfflineCharterDTO = {
+  long_term_goals?: string[];
+  redlines?: CharterRedlineDTO[];
+  social_mandates?: string[];
+};
+
+// getCharter 读某单位现有离线宪章；exists=false 表示从未立约（区分「显式空宪章」与「未设置」）。纯读。
+export async function getCharter(
+  sessionID: string,
+  unitID: string,
+): Promise<{ charter: OfflineCharterDTO; exists: boolean }> {
+  const data = await request<{ charter?: OfflineCharterDTO; exists?: boolean }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/charter`,
+  );
+  return { charter: data.charter ?? {}, exists: Boolean(data.exists) };
+}
+
+// putCharter 设立/覆盖某单位离线宪章（PUT），返回后端规范化后的宪章（带补齐的红线 id、裁空白条目）。
+export async function putCharter(
+  sessionID: string,
+  unitID: string,
+  charter: OfflineCharterDTO,
+): Promise<OfflineCharterDTO> {
+  const data = await request<{ charter?: OfflineCharterDTO }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/charter`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(charter),
+    },
+  );
+  return data.charter ?? {};
+}
+
+// deleteCharter 撤销某单位整份离线宪章（DELETE，写 CHARTER_UPDATED 留痕）。
+export async function deleteCharter(sessionID: string, unitID: string): Promise<void> {
+  await request<{ ok?: boolean }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/charter`,
+    { method: "DELETE" },
+  );
+}
+
 // ---- Ops 看板（运营态，X-Ops-Token）----
 
 // fetchCostDashboard 读运营成本/单位经济仪表盘（最近 days 天，默认 30；days<=0 视为全量）。后端裸返回 CostDashboardData。

@@ -15,6 +15,8 @@ import {
   type FateCard,
 } from "../session/api";
 import { computeFateCountdown, formatFateCountdown } from "./countdown";
+import { ShareCardButton } from "../components/ShareCardButton";
+import { highlightCard } from "./shareCard";
 
 type Props = {
   sessionId: string;
@@ -50,6 +52,25 @@ function cardText(payload: Record<string, unknown>): string {
   return String(payload.narrative ?? "她那边，出了点事。");
 }
 
+// 情境化 choice 按钮的内联样式（叠在 fate.css 的 `.fate-actions button` 基础态之上，仅补「label 叠倾向提示」的纵向排版）。
+// 不依赖新 CSS 类（本文件只编辑 FateView.tsx，无法改 fate.css），故用内联样式保证副标渲染正确。
+const fateChoiceBtnStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+  textAlign: "center",
+  lineHeight: 1.35,
+};
+const fateChoiceLabelStyle: React.CSSProperties = {
+  fontWeight: 600,
+};
+const fateChoiceHintStyle: React.CSSProperties = {
+  fontSize: 11,
+  opacity: 0.72,
+  fontWeight: 400,
+};
+
 // 高光卡三键反馈的事件名（设计 GDD §8 核心乐趣度量：玩家一点即埋点，供后端算「惊喜命中率 / OOC 率」）。
 // expected=意料之中、surprise=有点意外但合理（命中惊喜）、ooc=太离谱（疑似失格）。
 const fateReactEventName = {
@@ -58,6 +79,39 @@ const fateReactEventName = {
   ooc: "fate_react_ooc",
 } as const;
 type FateReactKind = keyof typeof fateReactEventName;
+
+// resolveClassHint 把后端 choice 的 resolve_class（基础后果类）译成一句可见的「倾向/后果提示」副标。
+// 后端 buildFateChoices 已用情境化 label 表达「点什么」，这里补一行「点了倾向哪边、会怎样」，
+// 让独立 #fate 客户端的待决策从「固定三键」升级为「情境化 Copilot 选项 + 透明后果」。
+// 未知 resolve_class（理论上不会出现）返回空串，副标不渲染，绝不阻断点选。
+function resolveClassHint(resolveClass: string): string {
+  switch (resolveClass.trim()) {
+    case "urge":
+      return "你出手干预 · 她多半会照办，但代价归你担";
+    case "let_her":
+      return "放手由她 · 她按自己的心意走，后果她自负";
+    case "acknowledge":
+      return "只是知悉 · 你不插手，记下这一笔便好";
+    default:
+      return "";
+  }
+}
+
+// parsePayloadChoices 从 WS fate_inbox 原始 payload 里防御性解出 choices 数组（与 feed 的 FateChoiceOut 同形）。
+// payload 是不裁字段的透传体，choices 多半缺席；缺席/非法时返回 undefined，待决策卡回落通用三键。
+function parsePayloadChoices(raw: unknown): { id: string; label: string; resolve_class: string }[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .map((c) => {
+      const o = (c ?? {}) as Record<string, unknown>;
+      const id = String(o.id ?? "").trim();
+      const label = String(o.label ?? "").trim();
+      if (!id || !label) return null;
+      return { id, label, resolve_class: String(o.resolve_class ?? "").trim() };
+    })
+    .filter((c): c is { id: string; label: string; resolve_class: string } => c !== null);
+  return out.length > 0 ? out : undefined;
+}
 
 // fateCardKey 给一张高光卡取稳定标识：优先 decision_id，否则对 narrative 做短哈希（FNV-1a 32bit → base36）。
 // 与埋点 props.card 同源，确保去重 Set 与后端聚合用同一标识。
@@ -120,6 +174,8 @@ export function FateView({ sessionId, unitId }: Props) {
         const route = String(payload.route ?? "");
         // WS payload 通常不含 expires_at/countdown_hours（后端只推 occurred_at 或更少）；
         // 有就透传，没有则留空，由 computeFateCountdown 按 occurred_at + 48h 兜底。
+        // choices 同理：WS 多半不带（情境化选项随 feed 返回），带了就透传以便即时上 Copilot 选项，
+        // 不带则待决策卡回落通用三键（首屏 refresh 拉 feed 时仍会拿到完整 choices）。
         const card: FateCard = {
           kind: route === "pending" ? "pending" : "highlight",
           decision_id: payload.decision_id ? String(payload.decision_id) : undefined,
@@ -128,6 +184,7 @@ export function FateView({ sessionId, unitId }: Props) {
           expires_at: payload.expires_at ? String(payload.expires_at) : undefined,
           countdown_hours:
             typeof payload.countdown_hours === "number" ? payload.countdown_hours : undefined,
+          choices: parsePayloadChoices(payload.choices),
         };
         setCards((prev) => [card, ...prev]);
       },
@@ -235,17 +292,41 @@ export function FateView({ sessionId, unitId }: Props) {
           <div className="fate-slot-title">有件关乎她的事，在等你拿个主意</div>
           <p className="fate-pending-text">{pending[0].narrative}</p>
           <FateCountdownBar card={pending[0]} />
-          <div className="fate-actions">
-            <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "let_her", "由她去")}>
-              由她去（信她）
-            </button>
-            <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "urge", "疾呼拦住")}>
-              疾呼拦住她
-            </button>
-            <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "acknowledge", "默默看着")}>
-              默默看着
-            </button>
-          </div>
+          {/* 情境化 Copilot 选项：后端 buildFateChoices 按事件类型/红线锚/关系生成贴合此刻的 label
+              （追讨/求和/认账、刻成传家物/暂且不必、还手/隐忍…），resolve 传该 choice.id，
+              后端 resolveFateChoiceClass 再把情境 id 折回基础后果类。每个选项补一行倾向/后果提示。
+              feed 未带 choices 时（旧后端 / WS 推送只有 route）回落通用三键，保持向后兼容。 */}
+          {pending[0].choices && pending[0].choices.length > 0 ? (
+            <div className="fate-actions">
+              {pending[0].choices.map((c) => {
+                const hint = resolveClassHint(c.resolve_class);
+                return (
+                  <button
+                    key={c.id}
+                    style={fateChoiceBtnStyle}
+                    title={hint || c.label}
+                    disabled={resolving === pending[0].decision_id}
+                    onClick={() => onResolve(pending[0].decision_id ?? "", c.id, c.label)}
+                  >
+                    <span style={fateChoiceLabelStyle}>{c.label}</span>
+                    {hint && <span style={fateChoiceHintStyle}>{hint}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="fate-actions">
+              <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "let_her", "由她去")}>
+                由她去（信她）
+              </button>
+              <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "urge", "疾呼拦住")}>
+                疾呼拦住她
+              </button>
+              <button disabled={resolving === pending[0].decision_id} onClick={() => onResolve(pending[0].decision_id ?? "", "acknowledge", "默默看着")}>
+                默默看着
+              </button>
+            </div>
+          )}
           {pending.length > 1 && <div className="fate-more">还有 {pending.length - 1} 件事在等你</div>}
         </section>
       )}
@@ -286,6 +367,12 @@ export function FateView({ sessionId, unitId }: Props) {
               >
                 讲给别人听
               </button>
+              {/* 图片卡分享（文本复制保留在上方）：把这段高光手绘成竖版 PNG，截图传播更易扩散。*/}
+              <ShareCardButton
+                compact
+                card={highlightCard({ title: status?.name ?? "她", narrative: c.narrative })}
+                onShared={() => void trackFunnel("share_initiated", { source: "fate_highlight_image" })}
+              />
             </div>
           );
         })}
