@@ -2001,6 +2001,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"feed": items})
 	})
+	// 「让世界往前走」：推主世界 session 一拍（部署→异步执行一轮自治+边界结算+生活 beat）。供前端按钮/轮询。
+	// best-effort：推进失败仍 200 返回 advancing=false（前端据此知道这拍没推动，可重试）；已在执行中返回 advancing=true。
+	// 前端拿到 advancing=true 后轮询 GET /api/sessions/:id（ExecutionInProgress 翻 false=这拍跑完）+ 刷新 fate feed。
+	router.POST("/api/fate/sessions/:sessionId/advance", func(c *gin.Context) {
+		advancing, err := newSessionService().AdvanceFateWorld(c.Request.Context(), c.Param("sessionId"))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"advancing": false, "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"advancing": advancing})
+	})
 	// 世仇清单：列出某角色当前怀有的强敌意关系（blood_feud 传播的可观测面，前端/调试用）。纯读。
 	// 关系四轴敌意图是敏感读面：必须按 :id 会话作用域 + 指挥阵营鉴权（与其它 /api/sessions/:id 读一致），
 	// 且校验 :unitId 确属该会话，否则任意调用方可拿任意 unitId 跨会话拉取其完整敌意网络（含对象名）。

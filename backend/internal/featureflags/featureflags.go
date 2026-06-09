@@ -158,6 +158,7 @@ var knownGameplayFlags = []FlagSpec{
 	{Name: "QUNXIANG_WORLD_BOSS_AUTO", Description: "世界 Boss 自动刷新（按世界确定性投放可多人协作消耗的世界 Boss）；默认关。", DefaultOn: false},
 
 	// —— 命运 / 跨玩家关联 / 世界化 —— //
+	{Name: "QUNXIANG_FATE_AUTOTICK", Description: "命运世界自动 tick（后台低频扫 world_default 活跃主世界角色各推一拍自治生活）；默认关，关时玩家手动托梦/按钮推进。", DefaultOn: false},
 	{Name: "QUNXIANG_SERENDIPITY", Description: "破圈预算（每日≤1 件零锚来源事件升档进高光卡作新锚种子）；默认关。", DefaultOn: false},
 	{Name: "QUNXIANG_WORLDIZE_INBOUND", Description: "入向世界化扇出（玩家做出会激起涟漪的事时反查谁的锚被点亮）；默认关。", DefaultOn: false},
 	{Name: "QUNXIANG_AUTO_MATCH", Description: "野外同行自动撮合（确定性四因子撮合并绑社会客体）；默认关。", DefaultOn: false},

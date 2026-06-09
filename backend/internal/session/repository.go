@@ -277,6 +277,38 @@ func (repository *Repository) FindMainWorldSessionID(ctx context.Context, accoun
 	return sessionID, true, nil
 }
 
+// ListMainWorldSessionIDs 列出某世界（world_default）下所有账号绑定的主世界 session ID（命运开盒后台 ticker 的扫描源）。
+// 走 (account_id, world_id) 复合索引按 world_id 过滤、要求 account_id 非空（NULL/匿名/单机局不进列表）；绝不扫 state_json blob。
+// worldID 为空直接返回空列表（不会误扫匿名局）。供 RunFateAutoTickLoop 在 flag 开启时逐 session 推一拍。
+func (repository *Repository) ListMainWorldSessionIDs(ctx context.Context, worldID string) ([]string, error) {
+	worldID = strings.TrimSpace(worldID)
+	if repository == nil || repository.db == nil || worldID == "" {
+		return nil, nil
+	}
+	rows, err := repository.db.QueryContext(
+		ctx,
+		`
+		SELECT id FROM single_player_sessions
+		WHERE world_id = ? AND account_id IS NOT NULL AND account_id <> ''
+		ORDER BY updated_at DESC
+		`,
+		worldID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list main-world sessions (world=%s): %w", worldID, err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan main-world session id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // parseTimestamp 兼容解析 RFC3339Nano/RFC3339 时间字符串。
 func parseTimestamp(value string) (time.Time, error) {
 	timestamp, err := time.Parse(time.RFC3339Nano, value)

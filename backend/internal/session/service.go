@@ -1087,6 +1087,9 @@ func (service *Service) ClearUnitCharterForSession(ctx context.Context, sessionI
 // best-effort 对被接管单位施加一次「intervention」成因的人格漂移（personality_drift.go）——玩家的介入会潜移默化改变她。
 // 漂移失败/读不到回合一律吞错，绝不影响接管事件本身的落库（接管是真实动作、漂移是旁路增益）。
 // 返回接管事件 ID（与 RecordPlayerIntervention 一致），供前端关联回响。
+//
+// 命运开盒「托梦→她去经历一段」：记录托梦后 best-effort 调 AdvanceFateWorld 推主世界一拍——托梦内容已经
+// loadRecentPlayerActions 喂进 generateUnitDecision 的 order_echo，advance 后她会带着托梦去自治。推进失败吞错不崩托梦。
 func (service *Service) RecordPlayerInterventionWithDrift(ctx context.Context, sessionID, unitID, summary string) (string, error) {
 	id, err := service.RecordPlayerIntervention(ctx, sessionID, unitID, summary)
 	if err != nil {
@@ -1100,6 +1103,8 @@ func (service *Service) RecordPlayerInterventionWithDrift(ctx context.Context, s
 		}
 	}
 	_, _ = service.ApplyPersonalityDrift(ctx, sessionID, unitID, DriftReasonIntervention, turn)
+	// 托梦触发推进（命运开盒核心循环）：给她托个梦 → 让她带着托梦去经历一拍。best-effort：吞错绝不阻断托梦本身。
+	_, _ = service.AdvanceFateWorld(ctx, sessionID)
 	return id, nil
 }
 
@@ -1956,6 +1961,12 @@ func (service *Service) resolveExecution(ctx context.Context, state *State, unit
 			}
 			if !service.asyncExecution {
 				service.emitActionNarrationBestEffort(ctx, state, byID, actor, compliance.Final, actionLogStart)
+			}
+			// 命运开盒「生活 beat」（关键：让 feed「她近来经历的」有内容）：主世界玩家角色这一拍的自治经历低调进命运 feed。
+			// 仅本回合首动作（actionIndex==1）surface 一条，避免一回合多 AP 刷屏；仅主世界玩家角色（非 NPC）。best-effort、不阻断主循环。
+			// 同步/异步两路都经此处（与 emitActionNarrationBestEffort 不同——生活 beat 在两种执行模式下都要写进 feed）。
+			if actorState.actionIndex == 1 {
+				service.surfaceLifeBeatBestEffort(ctx, state, actor, compliance.Final)
 			}
 			if err := service.rememberUnitWithSource(ctx, actor, state.TurnState.Turn, compliance.Final.Memory, memorySource, memoryImportanceBoost); err != nil {
 				return err

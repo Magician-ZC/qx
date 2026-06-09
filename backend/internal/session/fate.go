@@ -559,10 +559,11 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 	}
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT reason_code, payload_json, occurred_at FROM events
-		WHERE actor_unit_id = ? AND reason_code IN (?, ?, ?, ?)
+		WHERE actor_unit_id = ? AND reason_code IN (?, ?, ?, ?, ?)
 		ORDER BY occurred_at DESC LIMIT ?`,
 		unitID, string(events.ReasonInboxHighlight), string(events.ReasonPendingDecision),
-		string(events.ReasonEchoLink), string(events.ReasonSerendipityNewAnchor), limit)
+		string(events.ReasonEchoLink), string(events.ReasonSerendipityNewAnchor),
+		string(events.ReasonLifeBeat), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query fate feed: %w", err)
 	}
@@ -594,6 +595,9 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 			item.Choices = payloadChoicesToOut(payload.Choices)
 		case string(events.ReasonEchoLink):
 			item.Kind = "echo"
+		case string(events.ReasonLifeBeat):
+			// 生活 beat：低调展示「她近来经历的一拍日常」，与待决策（需玩家拿主意）/高光（值得一看）区分。
+			item.Kind = "life_beat"
 		default:
 			item.Kind = "highlight"
 		}

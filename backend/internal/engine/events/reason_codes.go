@@ -194,6 +194,11 @@ const (
 	ReasonCrossConsentPending  ReasonCode = "CROSS_CONSENT_PENDING"  // 跨玩家高后果交互挂起，等离线 A 的角色自治回应
 	ReasonCrossConsentTimeout  ReasonCode = "CROSS_CONSENT_TIMEOUT"  // 跨玩家同意超时（按档失效/宪章兜底回应）
 	ReasonCrossDerived         ReasonCode = "CROSS_DERIVED"          // 跨玩家事件沿关系图衍生到第三方（你信任的人被偷袭了）
+
+	// 命运开盒「生活 beat」（大世界页游核心循环）：主世界玩家角色在执行期自治走过的一拍日常
+	// （她做了什么/去哪/遇见谁/心情），被低调 surface 进命运 feed，让「她近来经历的」始终有内容。
+	// 流程事件（经 EmitProcessEvent，CategoryLifecycle，不改保护字段）；与 PENDING_DECISION 待决策区分（仅 feed 展示、不入收件箱）。
+	ReasonLifeBeat ReasonCode = "LIFE_BEAT"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -319,6 +324,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossConsentPending, Category: CategoryLifecycle, DisplayName: "待她回应", DefaultReasonText: "有人对她做了件大事，等她的命来回应", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonCrossConsentTimeout, Category: CategoryLifecycle, DisplayName: "未及回应", DefaultReasonText: "她的命没来得及回应，那桩事自有了结", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
+		{Code: ReasonLifeBeat, Category: CategoryLifecycle, DisplayName: "她的日常", DefaultReasonText: "她又走过了寻常的一段日子", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 4},
 	}
 }
 

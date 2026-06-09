@@ -180,6 +180,22 @@ func main() {
 		close(runnerDone)
 	}()
 
+	// 命运世界自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认关，关时每次唤醒只查一次 flag 即返回、零行为）：
+	// 开启时低频（默认 60s，QUNXIANG_FATE_AUTOTICK_SECONDS 可调）扫 world_default 活跃主世界角色，各推一拍自治生活。
+	// 专用长生命 Service：异步执行（与生产 router 一致，AdvanceFateWorld 才会起后台执行一轮）+ 广播器（生活 beat/快照 WS 实时推送）+
+	// 归因强制（与生产一致）。成本：每拍 1 次 LLM 自治决策，低频 + best-effort + flag 默认关 控成本。随 ctx 取消优雅退出。
+	fateTickDone := make(chan struct{})
+	go func() {
+		fateSvc := session.NewServiceWithColdStore(db, aiService, coldStore)
+		fateSvc.SetAsyncExecution(true)
+		fateSvc.SetBroadcaster(hub)
+		fateSvc.SetAttributionEnforcement(true)
+		fateSvc.SetReflexShortCircuit(envBoolDefault("QUNXIANG_REFLEX_SHORTCIRCUIT", true))
+		interval := time.Duration(envIntDefault("QUNXIANG_FATE_AUTOTICK_SECONDS", 60)) * time.Second
+		fateSvc.RunFateAutoTickLoop(ctx, interval)
+		close(fateTickDone)
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("backend listening", "addr", cfg.HTTPAddr, "db_driver", cfg.DBDriver, "sqlite_path", cfg.SQLitePath)
@@ -201,6 +217,13 @@ func main() {
 		case <-runnerDone:
 		case <-time.After(10 * time.Second):
 			logger.Warn("region-runner did not stop in time")
+		}
+
+		// 等命运 tick 循环优雅退出（ctx 已取消，下一次 select 即返回；有界等待防卡死）。
+		select {
+		case <-fateTickDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("fate auto-tick did not stop in time")
 		}
 
 		logger.Info("backend stopped")
