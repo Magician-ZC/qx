@@ -899,6 +899,14 @@ func (service *Service) AdvancePhase(ctx context.Context, sessionID string) (Sna
 		service.settleConsentsAtBoundary(ctx, &state)            // consent 异步同意：超时兜底 expire + 宪章授权自治同意（best-effort）
 		service.refreshThreats(ctx, &state, units)               // 野外威胁刷新（默认 surface-only；QUNXIANG_AUTO_PVE 开时可升级开打，best-effort）
 		service.surfaceCrossEventsAtBoundary(ctx, &state, units) // 跨玩家事件投递（读出侧触发，best-effort，仅 WorldID 非空时生效）
+		if n, err := service.ResolveDungeonTimeout(ctx, &state); err != nil { // 副本异步分段 charter 超时兜底（QUNXIANG_DUNGEON 默认关，best-effort；关时零行为）
+			appendLog(&state, "dungeon", fmt.Sprintf("副本超时兜底失败：%v", err), "", "")
+		} else if n > 0 {
+			appendLog(&state, "dungeon", fmt.Sprintf("%d 处副本因你久未归来，依先前叮嘱见好就收了。", n), "", "")
+		}
+		if _, err := service.ScanAndWorldizeInbound(ctx, &state, units); err != nil { // 双向世界化入向探针扇出（QUNXIANG_WORLDIZE_INBOUND 默认关，best-effort；关时 no-op）
+			appendLog(&state, "world", fmt.Sprintf("入向世界化扇出失败：%v", err), "", "")
+		}
 		if state.WorldID != "" {                                 // 共享世界 Boss 自动刷新（QUNXIANG_WORLD_BOSS_AUTO 默认关，best-effort；函数内已二次 guard）
 			if err := service.maybeRefreshWorldBoss(ctx, state.WorldID); err != nil {
 				appendLog(&state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")

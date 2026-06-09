@@ -160,19 +160,30 @@ func (service *Service) RunDungeon(ctx context.Context, state *State, unitIDs []
 // runDungeonFloor 跑通一层遭遇。返回该层结果与 terminal（""=继续；"fled"/"wiped"=终止整局）。
 // 难度由确定性 FNV(sessionID+turn+floor) 与层深共同决定，末层是更强的 floor boss。
 func (service *Service) runDungeonFloor(ctx context.Context, run *dungeonRun, floor int) (DungeonFloorResult, string, error) {
-	isBoss := floor == run.floors
 	threat := scaledDungeonFloor(run.state, run.members, floor, run.floors)
+	// 同步核心：从满血、第 1 回合一次性跑完本层（不持久化中间态）；异步分段路径复用同一核心、传入续跑的 mobHP/startRound。
+	return service.runDungeonFloorCore(ctx, run, floor, threat, threat.HPPool, 1)
+}
+
+// runDungeonFloorCore 是单层消耗战的**可续跑核心**（同步核心与异步分段共用）。
+// 入参 mobHP/startRound 支持断点续跑：异步分段把上次留库的 boss_hp_remaining/floor_round 喂进来，敌血不重置、回合不回退。
+// 返回该层结果（其中 floorRes.Rounds 是本层累计到的回合数）与 terminal（""=继续；"fled"/"wiped"=终止整局）。
+// 确定性：salt 仅含 floor/round/unitID，与 mobHP 的起点无关——从满血一次跑完，与分段断点续跑得到逐字节一致的结果。
+func (service *Service) runDungeonFloorCore(ctx context.Context, run *dungeonRun, floor int, threat Threat, mobHP int, startRound int) (DungeonFloorResult, string, error) {
+	isBoss := floor == run.floors
 	floorRes := DungeonFloorResult{Floor: floor, IsBoss: isBoss, ThreatName: threat.Name, Outcome: "wiped"}
+	if startRound < 1 {
+		startRound = 1
+	}
 
 	// 关键：combat_roll 把 target.ID 写进 FNV，故 mob 必须用**稳定**身份（session+floor），不能用 threat.ID 里的随机 UUID，
 	// 否则同会话同回合两次副本的掷骰会发散、破坏确定性可复现（threat.ID 的 UUID 只用于 loot key/事件 Location 标签）。
 	mob := unit.Record{ID: fmt.Sprintf("dgmob:%s:f%d", run.state.ID, floor)}
 	mob.Status.Attack = threat.Attack
 	mob.Status.Defense = threat.Defense
-	mobHP := threat.HPPool
 	turn := run.state.TurnState.Turn
 
-	for round := 1; round <= eliteMaxRounds; round++ {
+	for round := startRound; round <= eliteMaxRounds; round++ {
 		floorRes.Rounds = round
 
 		anyActive := false

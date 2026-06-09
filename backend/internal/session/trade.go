@@ -378,7 +378,30 @@ func (service *Service) resolveRequestedPurchase(
 		buyer.ID,
 		seller.ID,
 	)
+
+	// 锚自动 upsert（设计 耦合 §1.3）：交易成交即把买卖双方互为 debt_grudge_love 锚——一桩买卖结下的人情/关系
+	// 是她日后会惦记的弦，喂 relevance.Score。best-effort：吞错只记日志，绝不阻断交易主链路（已成交）。
+	service.bestEffortLitTradeDebtAnchor(ctx, state, buyer, seller, definition.DisplayName)
 	return true
+}
+
+// tradeDebtAnchorWeight 是交易债务锚的默认权重（一桩成交结下的关系，权重中性偏轻——非满权的红线/血脉）。
+const tradeDebtAnchorWeight = 0.5
+
+// bestEffortLitTradeDebtAnchor 为成交的买卖双方互落一根 debt_grudge_love 锚（双向）。best-effort：任一方失败只记日志，
+// 绝不回滚已成交的交易、不阻断主链路。
+func (service *Service) bestEffortLitTradeDebtAnchor(ctx context.Context, state *State, buyer, seller *unit.Record, itemName string) {
+	if service == nil || buyer == nil || seller == nil {
+		return
+	}
+	buyerLabel := fmt.Sprintf("与 %s 的交易（购入%s）", seller.DisplayName(), itemName)
+	sellerLabel := fmt.Sprintf("与 %s 的交易（售出%s）", buyer.DisplayName(), itemName)
+	if err := service.UpsertDebtAnchor(ctx, state.ID, buyer.ID, seller.ID, tradeDebtAnchorWeight, buyerLabel); err != nil {
+		appendLog(state, "trade_debt_anchor_failed", fmt.Sprintf("%s 的交易债务锚落定失败：%v", buyer.DisplayName(), err), buyer.ID, seller.ID)
+	}
+	if err := service.UpsertDebtAnchor(ctx, state.ID, seller.ID, buyer.ID, tradeDebtAnchorWeight, sellerLabel); err != nil {
+		appendLog(state, "trade_debt_anchor_failed", fmt.Sprintf("%s 的交易债务锚落定失败：%v", seller.DisplayName(), err), seller.ID, buyer.ID)
+	}
 }
 
 // resolveRequestedSwap 尝试按上下文执行“双方互换首个可交易物品”。

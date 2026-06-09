@@ -9,11 +9,22 @@ import (
 	"fmt"
 	"math"
 
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/relevance"
 	"qunxiang/backend/internal/storage/dbdialect"
 )
 
 const anchorDefaultHalfLifeDays = 14.0
+
+// geoAnchorHalfLifeDays 是「所在地」geo 锚的半衰期（设计 §1.1：地理牵挂随离开而淡，3 天半衰）。
+const geoAnchorHalfLifeDays = 3.0
+
+// legacyAnchorHalfLife<=0 表示「血脉/传家物」legacy 锚永不衰减（与 relevance.Anchor 约定一致：传承是恒久的弦）。
+const legacyAnchorHalfLife = 0.0
+
+// anchorRefDensitySaturation 控制反向锚密度饱和速度：以 ref 为锚的角色权重和 Σ(weight·RelativeImportance) 达此值时密度≈0.63。
+// 与 anchorDensitySaturation 同口径（正/反向密度量纲一致），让「她在乎多少」与「多少人在乎她」可比。
+const anchorRefDensitySaturation = 1.5
 
 // anchorDensitySaturation 控制锚密度饱和速度：Σ(weight·RelativeImportance) 达此值时密度≈0.63、约 2 倍时≈0.86。
 const anchorDensitySaturation = 1.5
@@ -50,7 +61,9 @@ func (service *Service) UpsertAnchor(ctx context.Context, characterID string, ki
 	if weight > 1 {
 		weight = 1
 	}
-	if halfLifeDays <= 0 {
+	// halfLifeDays 语义：**0 = 永不衰减**（红线/血脉/目标这类恒久的弦，与 relevance.Anchor「HalfLifeDays<=0 不衰减」一致）；
+	// 仅**负值**视为「未指定」回落默认半衰。此前把 0 也当未指定折成默认 14，会让本该恒久的锚悄悄衰减——已修正为保留 0。
+	if halfLifeDays < 0 {
 		halfLifeDays = anchorDefaultHalfLifeDays
 	}
 	query := `
@@ -70,6 +83,121 @@ func (service *Service) UpsertAnchor(ctx context.Context, characterID string, ki
 		return fmt.Errorf("upsert anchor: %w", err)
 	}
 	return nil
+}
+
+// ===== §1.3 锚自动 upsert：业务自然时刻的「牵挂落定」生产调用方（主控在对应业务点调用）=====
+//
+// 这四个导出 helper 把 UpsertAnchor 包成「带语义 + 留痕」的业务钩子：在关系/目标/债务/地理/血脉变更的自然时刻
+// （贸易成交/结盟/进入新 region/血脉绑定）由主控调用，落锚的同时写一条 ReasonAnchorLit 流程事件留痕——
+// 让「某个人、某件事自此成了她心上的一根线」可审计、可被入向反查命中。**best-effort**：upsert 失败即返回错误
+// 由调用方决定是否记 log，但 emitAnchorLit 留痕失败绝不回滚已落的锚（留痕是辅助）。付费不进（纯关系/事件驱动）。
+
+// UpsertGoalAnchor 在「目标确立/推进」时落一根 goal 锚（设计 §1.1：当前目标，半衰由调用方按目标时效给，默认不衰减）。
+// ref 约定用 "goal:"+characterID（与 SeedVillage 一致，保证幂等覆盖同一人的当前目标）。
+func (service *Service) UpsertGoalAnchor(ctx context.Context, sessionID, characterID, goalRef string, weight float64, label string) error {
+	if goalRef == "" {
+		goalRef = "goal:" + characterID
+	}
+	if err := service.UpsertAnchor(ctx, characterID, relevance.Goal, goalRef, weight, label, 0); err != nil {
+		return err
+	}
+	service.emitAnchorLit(ctx, sessionID, characterID, relevance.Goal, goalRef, label)
+	return nil
+}
+
+// UpsertDebtAnchor 在「贸易成交/结盟/欠下人情或仇怨」时落一根 debt_grudge_love 锚（设计 §1.3 白名单的债务源）。
+// halfLife 默认走关系锚半衰（relationAnchorHalfLife），债/仇/情会随时间淡去但比泛泛关系更久驻心。
+func (service *Service) UpsertDebtAnchor(ctx context.Context, sessionID, characterID, counterpartID string, weight float64, label string) error {
+	if err := service.UpsertAnchor(ctx, characterID, relevance.DebtGrudgeLove, counterpartID, weight, label, relationAnchorHalfLife); err != nil {
+		return err
+	}
+	service.emitAnchorLit(ctx, sessionID, characterID, relevance.DebtGrudgeLove, counterpartID, label)
+	return nil
+}
+
+// UpsertGeoAnchor 在「进入新 region」时落一根 geo 锚（设计 §1.1：所在地，半衰 3 天——离开后地理牵挂渐淡）。
+// ref 用 regionID；重复进同一区幂等刷新权重与 updated_at（让 TimeDecay 从最近一次驻留起算）。
+func (service *Service) UpsertGeoAnchor(ctx context.Context, sessionID, characterID, regionID string, weight float64, label string) error {
+	if err := service.UpsertAnchor(ctx, characterID, relevance.Geo, regionID, weight, label, geoAnchorHalfLifeDays); err != nil {
+		return err
+	}
+	service.emitAnchorLit(ctx, sessionID, characterID, relevance.Geo, regionID, label)
+	return nil
+}
+
+// UpsertLegacyAnchor 在「血脉绑定/继承传家物」时落一根 legacy 锚（设计 §1.1：传家物/血脉，永不衰减）。
+// ref 用血脉/传家物的稳定 ID（如后代 unitID 或物品 ID）。这是恒久的弦，halfLife=0。
+func (service *Service) UpsertLegacyAnchor(ctx context.Context, sessionID, characterID, legacyRef string, weight float64, label string) error {
+	if err := service.UpsertAnchor(ctx, characterID, relevance.Legacy, legacyRef, weight, label, legacyAnchorHalfLife); err != nil {
+		return err
+	}
+	service.emitAnchorLit(ctx, sessionID, characterID, relevance.Legacy, legacyRef, label)
+	return nil
+}
+
+// emitAnchorLit 写一条 ReasonAnchorLit 流程事件留痕（「牵挂落定」）。best-effort：失败只吞错、绝不回滚已落的锚、不阻断业务。
+func (service *Service) emitAnchorLit(ctx context.Context, sessionID, characterID string, kind relevance.AnchorKind, ref, label string) {
+	if service == nil || service.db == nil || characterID == "" {
+		return
+	}
+	// RelatedUnitID 故意留空（EmitProcessEvent 会回落为 owner=characterID，一定是真实单位）——anchor_ref 可能是
+	// goal:xxx / regionID / legacyRef 这类**非单位**引用，直接塞进 target_unit_id 会触发 events 表的 FK 约束失败。
+	// ref 完整写进 payload.anchor_ref 即可被检索，不丢信息。
+	_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+		SessionID:   sessionID,
+		OwnerUnitID: characterID,
+		Code:        events.ReasonAnchorLit,
+		Category:    events.CategoryFate,
+		Payload: map[string]any{
+			"anchor_kind": string(kind),
+			"anchor_ref":  ref,
+			"label":       label,
+		},
+	})
+}
+
+// AnchorDensityByRef 反向查「多少角色以 ref 为锚（且为指定 kind）」的归一密度 ∈ [0,1]（设计 §1.5 NPC 锚加权预算的输入）。
+// 用反向索引 idx_relevance_anchors_ref(anchor_ref, anchor_kind) 聚合所有指向 ref 的锚权重，按 relevance.RelativeImportance
+// 加权求和，再经饱和函数压进 [0,1]。语义：一个 NPC/地方被越多角色当作「她在乎的人/地方」指向，密度越高——威胁/事件
+// 越该聚焦到她身上（§1.5「世界事件自然聚焦在她在乎的人和地方」）。kind 为空时跨所有类别聚合（任意指向 ref 的锚都算）。
+// best-effort：db 缺失/查询失败返回 0（退化为「无人在乎」=噪声世界自消化，保守不夸大）。确定性、付费无关。
+func (service *Service) AnchorDensityByRef(ctx context.Context, ref string, kind relevance.AnchorKind) float64 {
+	if service == nil || service.db == nil || ref == "" {
+		return 0
+	}
+	query := `SELECT anchor_kind, weight FROM relevance_anchors WHERE anchor_ref = ?`
+	args := []any{ref}
+	if kind != "" {
+		query += ` AND anchor_kind = ?`
+		args = append(args, string(kind))
+	}
+	rows, err := service.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	var sum float64
+	for rows.Next() {
+		var k string
+		var weight float64
+		if err := rows.Scan(&k, &weight); err != nil {
+			return 0
+		}
+		if weight <= 0 {
+			continue
+		}
+		if weight > 1 {
+			weight = 1
+		}
+		sum += weight * relevance.RelativeImportance(relevance.AnchorKind(k))
+	}
+	if err := rows.Err(); err != nil {
+		return 0
+	}
+	if sum <= 0 {
+		return 0
+	}
+	return 1 - math.Exp(-sum/anchorRefDensitySaturation)
 }
 
 // loadPersistentAnchors 读某角色已落库的相关性锚（含非关系锚）。

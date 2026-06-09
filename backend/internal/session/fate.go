@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -60,6 +61,11 @@ type FateEvent struct {
 	// 形如「她突然抛下一切，因为她向往自由」）。非空时会被并入命运卡文本，让玩家一眼看到「凭什么会这样」。
 	// 留空则跳过（不是所有世界事件都带归因）。
 	AttributionZH string
+	// SourceRegionID 是事件来源地（陌生 region 时驱动「破圈预算」升档，§1.5）。零值=未知/本地。
+	SourceRegionID string
+	// SourceIsStranger 标记事件来源是否为「陌生人/陌生地」（与 owner 无任何持久锚关联）。
+	// 与「未命中任何锚」共同构成 isZeroAnchorEvent 的判定——为破圈预算挑选「素不相识却撞进她命里」的种子事件。
+	SourceIsStranger bool
 }
 
 // FateRouting 是一条世界事件对某角色的命运路由结果。
@@ -245,6 +251,16 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 	if route == relevance.RoutePending && service.pendingBudgetExhausted(ctx, owner.ID) {
 		route = relevance.RouteHighlight
 	}
+	// 破圈预算（§1.5「破圈」）：每个自然日强制让 ≤1 件「零锚来源」低权事件升一档进高光卡，作为新锚的种子——
+	// 让一处没去过的地方、一个素不相识的人有机会意外撞进她的命里，对冲「相关性闭环只反复触达老熟人/老地方」。
+	// 仅在该事件本会被自治丢弃（RouteAutonomous）、且确属零锚来源、且当天破圈配额未用尽时触发；升一档后标
+	// serendipity，落 ReasonSerendipityNewAnchor。flag 默认关（QUNXIANG_SERENDIPITY），关时零行为。
+	serendipity := false
+	if route == relevance.RouteAutonomous && serendipityEnabled() &&
+		isZeroAnchorEvent(ev, owner, anchorKind) && !service.serendipityBudgetExhausted(ctx, owner.ID) {
+		route = relevance.RouteHighlight
+		serendipity = true
+	}
 	out := FateRouting{Route: route, Relevance: fateScore}
 	if route == relevance.RouteAutonomous {
 		return out, nil
@@ -252,6 +268,10 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 
 	out.Card = fateCard(ev, route, anchorKind)
 	code := events.ReasonInboxHighlight
+	// 破圈升档的卡用 ReasonSerendipityNewAnchor 留痕（与普通高光区分；它是「新锚种子」，供后续锚化消费）。
+	if serendipity {
+		code = events.ReasonSerendipityNewAnchor
+	}
 	payload := map[string]any{
 		"narrative":         out.Card,
 		"relevance":         fateScore, // 命运分（三因子相乘后的最终分，用于路由）
@@ -261,6 +281,13 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 		"source_actor":      ev.ActorID,
 		"source_target":     ev.TargetID,
 		"reason":            string(ev.ReasonCode),
+	}
+	// 破圈来源地随 payload 落库，供「新锚锚化」消费（哪个陌生 region/陌生人撞进了她的命里）。
+	if serendipity {
+		payload["serendipity"] = true
+		if r := strings.TrimSpace(ev.SourceRegionID); r != "" {
+			payload["source_region"] = r
+		}
 	}
 	// 归因因果句随 payload 落库（§4.3 provenance 凭证 + 渲染管线）：非空才写，保持向后兼容（旧消费方忽略未知键）。
 	if cause := strings.TrimSpace(ev.AttributionZH); cause != "" {
@@ -276,10 +303,17 @@ func (service *Service) SurfaceFateEvent(ctx context.Context, sessionID string, 
 			payload["choices"] = fateChoicesToPayload(choices)
 		}
 	}
+	// 关联单位：默认指向事件 target。但破圈事件的 target 是「陌生人」（不在 units 表）——直接落 target_unit_id 会
+	// 触发 FK 约束失败；故破圈路径不设 RelatedUnitID（陌生人/陌生地信息已在 payload.source_actor/source_region），
+	// 让 EmitProcessEvent 回落 owner，绝不让破圈写卡因外键失败而炸。
+	relatedUnitID := ev.TargetID
+	if serendipity {
+		relatedUnitID = ""
+	}
 	if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
 		SessionID:     sessionID,
 		OwnerUnitID:   owner.ID,
-		RelatedUnitID: ev.TargetID,
+		RelatedUnitID: relatedUnitID,
 		Code:          code,
 		Category:      events.CategoryFate,
 		Payload:       payload,
@@ -326,6 +360,63 @@ func (service *Service) pendingBudgetExhausted(ctx context.Context, ownerID stri
 		return false // best-effort：查询失败不阻断路由，保守放行
 	}
 	return count >= fatePendingDailyBudget
+}
+
+// ===== §1.5 破圈预算（serendipity）：每日强制 ≤1 件零锚来源事件升档进高光卡作新锚种子 =====
+
+// serendipityDailyBudget 是每个自然日（每 owner）破圈升档的硬上限：≤1 件——只放一道窄缝，避免「破圈」反噬成噪声。
+const serendipityDailyBudget = 1
+
+// serendipityEnabled 读 QUNXIANG_SERENDIPITY（true/1/yes/on 视为开），默认关 → 破圈逻辑零行为（与既有 flag 风格一致）。
+func serendipityEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QUNXIANG_SERENDIPITY"))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// isZeroAnchorEvent 判断一条事件对某 owner 是否为「零锚来源」种子候选（自包含、不跨 agent 依赖 worldize_inbound.go）：
+//   - 未命中任何锚：anchorKind 为空（eventRelevanceWithAnchor 没点亮任何持久/关系/红线锚）；
+//   - 来源是陌生人：事件 actor/target 都不是 owner 自己（她自己的事不是「破圈」），且事件显式标了 SourceIsStranger
+//     或带了非空 SourceRegionID（陌生 region）——即「素不相识的人/没去过的地方」。
+//
+// 纯函数、确定性、可测。她自己的事（ActorID/TargetID==owner）一律不算破圈（那是自身命运，不是新锚）。
+func isZeroAnchorEvent(ev FateEvent, owner *unit.Record, anchorKind string) bool {
+	if owner == nil {
+		return false
+	}
+	if ev.ActorID == owner.ID || ev.TargetID == owner.ID {
+		return false // 自身事件不是「破圈」
+	}
+	if strings.TrimSpace(anchorKind) != "" {
+		return false // 命中了某锚 → 非零锚
+	}
+	return ev.SourceIsStranger || strings.TrimSpace(ev.SourceRegionID) != ""
+}
+
+// serendipityBudgetExhausted 判断某 owner 当天（UTC 自然日）的破圈升档配额是否已用尽（≥serendipityDailyBudget）。
+// 计数 ReasonSerendipityNewAnchor 当日事件数——与 pendingBudgetExhausted 同一套 [dayStart,nextDay) 字符串区间过滤，
+// 确定性、双驱动安全、不依赖 SQL 日期函数。出错保守返回 true（不冒进升档，宁可少破圈、不噪声）。
+func (service *Service) serendipityBudgetExhausted(ctx context.Context, ownerID string) bool {
+	if service == nil || service.db == nil || ownerID == "" {
+		return true
+	}
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	lo := dayStart.Format(time.RFC3339Nano)
+	hi := dayStart.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	var count int
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM events
+		 WHERE actor_unit_id = ? AND reason_code = ? AND occurred_at >= ? AND occurred_at < ?`,
+		ownerID, string(events.ReasonSerendipityNewAnchor), lo, hi,
+	).Scan(&count); err != nil {
+		return true // best-effort：查询失败时不冒进升档（与 pending 配额「放行」相反，破圈宁缺毋滥）
+	}
+	return count >= serendipityDailyBudget
 }
 
 // OpenFateInbox 返回某角色未被处理的待决策（命运收件箱），每条带过期倒计时（M2 防轰炸②）。
@@ -413,9 +504,10 @@ func (service *Service) OpenFateFeed(ctx context.Context, unitID string, limit i
 	}
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT reason_code, payload_json, occurred_at FROM events
-		WHERE actor_unit_id = ? AND reason_code IN (?, ?, ?)
+		WHERE actor_unit_id = ? AND reason_code IN (?, ?, ?, ?)
 		ORDER BY occurred_at DESC LIMIT ?`,
-		unitID, string(events.ReasonInboxHighlight), string(events.ReasonPendingDecision), string(events.ReasonEchoLink), limit)
+		unitID, string(events.ReasonInboxHighlight), string(events.ReasonPendingDecision),
+		string(events.ReasonEchoLink), string(events.ReasonSerendipityNewAnchor), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query fate feed: %w", err)
 	}

@@ -155,6 +155,24 @@ const (
 	ReasonCrossContestWin  ReasonCode = "CROSS_CONTEST_WIN"  // 跨玩家排他争夺中胜出（arbitration 留痕）
 	ReasonCrossContestLose ReasonCode = "CROSS_CONTEST_LOSE" // 跨玩家排他争夺中落败
 	ReasonCrossBetrayal    ReasonCode = "CROSS_BETRAYAL"     // 跨玩家黑吃黑/背刺（流程广播，可被血仇传播取材）
+
+	// 双向世界化 + NPC 锚加权预算（设计 事件耦合 §1.3/§1.5）。均为流程事件（经 EmitProcessEvent，不改保护字段）。
+	// WORLDIZE_OUTBOUND：玩家角色的某行为被世界化为探针，去反查并点亮他人的锚（出向，付费不增传播半径）。
+	ReasonWorldizeOutbound ReasonCode = "WORLDIZE_OUTBOUND"
+	// PROPAGATION_INBOUND：他人行为反查命中了本角色的某根锚，落一条入向探针进命运收件箱（§1.3）。
+	ReasonPropagationInbound ReasonCode = "PROPAGATION_INBOUND"
+	// ANCHOR_LIT：一根相关性锚被新建/强化（§1.1 在关系/目标/债仇变更时 upsert 锚后留痕）。
+	ReasonAnchorLit ReasonCode = "ANCHOR_LIT"
+	// ANCHOR_WEIGHTED_EVENT：后台 NPC 事件因玩家锚密度加权被掷中重大事件（§1.5，威胁/事件天然聚焦她在乎的人和地方）。
+	ReasonAnchorWeightedEvent ReasonCode = "ANCHOR_WEIGHTED_EVENT"
+	// SERENDIPITY_NEW_ANCHOR：破圈预算——零锚来源（陌生人/新地）的低权事件被升档进高光卡，作新锚种子防信息茧房（§1.5）。
+	ReasonSerendipityNewAnchor ReasonCode = "SERENDIPITY_NEW_ANCHOR"
+
+	// 副本异步分段推进（设计 PvE威胁系统 §3）。流程事件。
+	// DUNGEON_SEGMENT_PAUSE：异步副本在关键节点（floor boss 首次接触/濒死撤退抉择/岔路深入）暂停进收件箱待决策。
+	ReasonDungeonSegmentPause ReasonCode = "DUNGEON_SEGMENT_PAUSE"
+	// DUNGEON_CHARTER_TIMEOUT：玩家离线超时，副本按离线宪章兜底续命（自动见好就收/撤离），绝不致死。
+	ReasonDungeonCharterTimeout ReasonCode = "DUNGEON_CHARTER_TIMEOUT"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -251,6 +269,17 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossContestWin, Category: CategoryLifecycle, DisplayName: "夺得头筹", DefaultReasonText: "几方角力，那份归属最终落到了她这一边", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonCrossContestLose, Category: CategoryLifecycle, DisplayName: "争而未得", DefaultReasonText: "几方角力，那份归属终究没落到她手里", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCrossBetrayal, Category: CategoryLifecycle, DisplayName: "黑吃黑", DefaultReasonText: "本该共担的人，临头却反咬了一口", StatDomains: []string{}, ImportanceMin: 6, ImportanceMax: 9},
+
+		// —— 双向世界化 + NPC 锚加权预算（事件耦合 §1.3/§1.5）——
+		{Code: ReasonWorldizeOutbound, Category: CategoryFate, DisplayName: "行迹外延", DefaultReasonText: "她做下的这件事，在别人心里也激起了涟漪", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonPropagationInbound, Category: CategoryFate, DisplayName: "命运牵连", DefaultReasonText: "旁人的一桩事，恰好牵动了她在乎的人或物", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 7},
+		{Code: ReasonAnchorLit, Category: CategoryFate, DisplayName: "牵挂落定", DefaultReasonText: "某个人、某件事，自此成了她心上的一根线", StatDomains: []string{}, ImportanceMin: 2, ImportanceMax: 5},
+		{Code: ReasonAnchorWeightedEvent, Category: CategoryFate, DisplayName: "命数所钟", DefaultReasonText: "祸福偏要落在她最在意的人和地方", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonSerendipityNewAnchor, Category: CategoryFate, DisplayName: "萍水相逢", DefaultReasonText: "一个素不相识的人、一处没去过的地方，意外撞进了她的命里", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
+
+		// —— 副本异步分段推进（PvE威胁系统 §3）——
+		{Code: ReasonDungeonSegmentPause, Category: CategoryLifecycle, DisplayName: "秘境暂歇", DefaultReasonText: "深处的岔口拦住了她的脚步，得拿个主意", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
+		{Code: ReasonDungeonCharterTimeout, Category: CategoryLifecycle, DisplayName: "依嘱收手", DefaultReasonText: "你没回来，她照着早先的叮嘱，见好就收了", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 	}
 }
 

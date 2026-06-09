@@ -551,3 +551,84 @@ CREATE TABLE IF NOT EXISTS propagation_log (
 CREATE INDEX IF NOT EXISTS idx_propagation_log_session ON propagation_log(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_propagation_log_origin ON propagation_log(origin_event_id);
 CREATE INDEX IF NOT EXISTS idx_propagation_log_to ON propagation_log(to_unit);
+
+-- ============================================================================
+-- 设计闭环新增表（2026-06-09 多 agent 收尾：副本异步分段 / Live-Ops 赛季 / 锚反向索引）
+-- ============================================================================
+
+-- 副本异步分段态（设计 PvE威胁系统 §3「副本=异步可推进的一段专注遭遇」）。
+-- 一次副本运行切成 N 段（每段=1 floor），按节奏推进、可在关键节点暂停进收件箱待决策、离线超时按宪章兜底。
+-- members_state_json 含队员 HP/贡献快照（跨段恢复）；boss_hp_remaining/floor_round 支持断点续跑敌血不重置；
+-- awards_accumulated_json 累计已清层战利品（撤退/败时直接用）；left_at 标记玩家离线时刻（charter 超时续命计时）。
+CREATE TABLE IF NOT EXISTS dungeon_segments (
+  id TEXT PRIMARY KEY,
+  dungeon_run_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  unit_ids_json TEXT NOT NULL DEFAULT '[]',
+  floors INTEGER NOT NULL DEFAULT 1,
+  floor INTEGER NOT NULL DEFAULT 1,
+  entered_turn INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'in_progress',
+  members_state_json TEXT NOT NULL DEFAULT '[]',
+  boss_hp_remaining INTEGER NOT NULL DEFAULT 0,
+  floor_round INTEGER NOT NULL DEFAULT 0,
+  awards_accumulated_json TEXT NOT NULL DEFAULT '[]',
+  pause_reason TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  left_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dungeon_segments_session ON dungeon_segments(session_id, state);
+CREATE INDEX IF NOT EXISTS idx_dungeon_segments_run ON dungeon_segments(dungeon_run_id);
+
+-- Live-Ops 赛季（设计 产品方案PRD §8「无 live-ops 即慢性死亡」）。一赛季绑定一个世界、有 burn-in 活史窗口、
+-- 内容母题库指针；finalize 时触发传承回流（角色→名人堂、传家物→继承人、活角色→下季"前世"背景）。
+CREATE TABLE IF NOT EXISTS seasons (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ends_at TEXT NOT NULL DEFAULT '',
+  burn_in_started_at TEXT NOT NULL DEFAULT '',
+  burn_in_ended_at TEXT NOT NULL DEFAULT '',
+  content_theme_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seasons_world ON seasons(world_id, status);
+
+-- 赛季内容母题库（哪些决策事件母题/出身/地标在该赛季活跃）。
+CREATE TABLE IF NOT EXISTS season_content_themes (
+  id TEXT PRIMARY KEY,
+  season_id TEXT NOT NULL,
+  decisive_event_ids TEXT NOT NULL DEFAULT '[]',
+  title_ids TEXT NOT NULL DEFAULT '[]',
+  landmark_names TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_season_content_season ON season_content_themes(season_id);
+
+-- GM 世界事件注入审计（每次 GM 后台注入世界事件留全量可仲裁审计：谁、何时、注入了什么）。append-only。
+CREATE TABLE IF NOT EXISTS gm_events_audit (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  cross_event_id TEXT NOT NULL DEFAULT '',
+  world_tick INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gm_events_audit_world ON gm_events_audit(world_id, created_at);
+
+-- relevance_anchors 反向索引（设计 §1.5 NPC 锚加权预算需「查所有以 X 为锚的角色」做锚密度计算）。
+CREATE INDEX IF NOT EXISTS idx_relevance_anchors_ref ON relevance_anchors(anchor_ref, anchor_kind);
+
+-- world_bosses「每世界至多一头 active」硬约束（评审 L4：NOT EXISTS 在 MySQL gap-lock 下理论可双插；
+-- SQLite partial unique index 给默认驱动一道硬兜底——第二并发 INSERT 必触唯一冲突，由 world_boss.go best-effort 收敛）。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id) WHERE status='active';

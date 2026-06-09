@@ -27,6 +27,7 @@ import (
 	"qunxiang/backend/internal/engine/status"
 	"qunxiang/backend/internal/engine/turns"
 	"qunxiang/backend/internal/item"
+	"qunxiang/backend/internal/liveops"
 	"qunxiang/backend/internal/session"
 	"qunxiang/backend/internal/socialobject"
 	"qunxiang/backend/internal/storage/dbdialect"
@@ -205,6 +206,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		return service
 	}
+
+	// Live-Ops 平台层（GM 世界事件注入 / 赛季骨架 / 零和审计）。无条件构造（仅持 *sql.DB）；端点套 opsTokenGuard。
+	// 三个依赖经 httpapi 适配器注入：
+	//   - HallArchiver：复用 session 既有名人堂归档（赛季收尾回流存活角色），每次新建轻量 Service。
+	//   - PaidResolver：保守默认恒 false（审计退化为单组，绝不误报 P2W；unit→account 映射是 documented residual）。
+	//   - Broadcaster：经 ws.Hub best-effort 广播世界级轻通知（hub 为 nil 时仅 log）。
+	liveopsSvc := liveops.NewService(deps.Store).
+		WithArchiver(liveopsHallArchiver{newServiceFn: newSessionService}).
+		WithPaidResolver(defaultPaidResolver()).
+		WithBroadcaster(liveopsBroadcaster{hub: hub})
+
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID == "" {
@@ -409,6 +421,122 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, report)
+	})
+
+	// ---- Live-Ops 运营手柄（GM 世界事件注入 / 赛季骨架 / 零和审计），全部 opsTokenGuard ----
+	// 设计 docs/产品方案PRD.md §8。写均走 append-only 表、永不改写历史；审计只观测付费态、绝不进 Score。
+
+	// GM 世界事件注入：往某活世界投一条权威跨事件（天灾/外敌/丰年…），全量留可仲裁审计。
+	router.POST("/api/ops/worlds/:worldId/events", opsTokenGuard(), func(c *gin.Context) {
+		var body struct {
+			Kind       string         `json:"kind"`
+			Importance int            `json:"importance"`
+			ActorID    string         `json:"actor_id"`
+			TargetID   string         `json:"target_id"`
+			RegionID   string         `json:"region_id"`
+			Payload    map[string]any `json:"payload"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// CreatedBy 用 ops 令牌指纹身份；当前 ops 鉴权不透出操作者身份，统一记 "ops"（审计可见「这是运营注入」）。
+		createdBy := strings.TrimSpace(c.GetHeader(opsTokenHeader))
+		if createdBy != "" {
+			createdBy = "ops-token"
+		} else {
+			createdBy = "ops"
+		}
+		result, err := liveopsSvc.EmitWorldEvent(c.Request.Context(), liveops.GMEvent{
+			WorldID:    c.Param("worldId"),
+			Kind:       body.Kind,
+			ActorID:    body.ActorID,
+			TargetID:   body.TargetID,
+			RegionID:   body.RegionID,
+			Importance: body.Importance,
+			CreatedBy:  createdBy,
+			Payload:    body.Payload,
+		})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
+
+	// 创建赛季：建一个新世界 + 落 seasons 行（可选挂内容母题）。
+	router.POST("/api/ops/seasons", opsTokenGuard(), func(c *gin.Context) {
+		var body struct {
+			Name           string `json:"name"`
+			WorldName      string `json:"world_name"`
+			ContentThemeID string `json:"content_theme_id"`
+			MaxPopulation  int    `json:"max_population"`
+			RegionSeed     string `json:"region_seed"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		season, err := liveopsSvc.CreateSeason(c.Request.Context(), liveops.CreateSeasonInput{
+			Name:           body.Name,
+			WorldName:      body.WorldName,
+			ContentThemeID: body.ContentThemeID,
+			MaxPopulation:  body.MaxPopulation,
+			RegionSeed:     body.RegionSeed,
+		})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"season": season})
+	})
+
+	// 收尾赛季：存活角色回流名人堂 + 世界封存 + status=finalized + 广播。
+	router.POST("/api/ops/seasons/:id/finalize", opsTokenGuard(), func(c *gin.Context) {
+		result, err := liveopsSvc.FinalizeSeason(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
+
+	// 零和监控审计：扫某世界 [turn_start, turn_end] 区间的仲裁结局，按付费态分组算胜率、判 P2W 红线。
+	router.GET("/api/ops/worlds/:worldId/arbitration-audit", opsTokenGuard(), func(c *gin.Context) {
+		turnStart := 0
+		turnEnd := 0
+		if raw := strings.TrimSpace(c.Query("turn_start")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				turnStart = v
+			}
+		}
+		if raw := strings.TrimSpace(c.Query("turn_end")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				turnEnd = v
+			}
+		}
+		report, err := liveopsSvc.AuditArbitration(c.Request.Context(), c.Param("worldId"), turnStart, turnEnd)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"report": report})
+	})
+
+	// GM 注入审计清单：列出某世界的 GM 注入审计（最新在前），?limit= 限条数（缺省 100）。
+	router.GET("/api/ops/worlds/:worldId/gm-audit", opsTokenGuard(), func(c *gin.Context) {
+		limit := 0
+		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				limit = v
+			}
+		}
+		entries, err := liveopsSvc.ListAudit(c.Request.Context(), c.Param("worldId"), limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"entries": entries})
 	})
 
 	// 假门预实验留资端点（W0 验证）：POST /api/leads + GET /api/ops/leads-funnel。
@@ -1582,10 +1710,18 @@ func NewRouter(deps Dependencies) *gin.Engine {
 
 	// 命运收件箱：读未决待决策 / 处理一条待决策（祖魂语气的命运层，设计宪法 §4.6）。
 	router.GET("/api/fate/inbox/:unitId", func(c *gin.Context) {
-		items, err := newSessionService().OpenFateInbox(c.Request.Context(), c.Param("unitId"))
+		unitID := c.Param("unitId")
+		items, err := newSessionService().OpenFateInbox(c.Request.Context(), unitID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		// 牵挂回访埋点（修四维之一恒 0）：玩家专程回看某角色的命运收件箱是低频「回访」读路径。
+		// best-effort：吞错只记日志，绝不阻断响应。**不可**挂在高频轮询的 GET /api/sessions/:id 上（会污染回访口径）。
+		// userID 软解析（未登录传空串）；sessionID 此读路径无路径作用域，传空（actorID=unitID 已足够标定回访对象）。
+		userID := softAccountID(deps.Accounts, c)
+		if visitErr := analytics.EmitReturnVisit(c.Request.Context(), deps.Store, unitID, "", userID); visitErr != nil && deps.Logger != nil {
+			deps.Logger.Debug("emit return visit failed", "unit_id", unitID, "err", visitErr)
 		}
 		c.JSON(http.StatusOK, gin.H{"inbox": items})
 	})
@@ -1783,6 +1919,88 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"dungeon": result})
+	})
+
+	// ---- 副本异步分段推进（设计 PvE威胁系统.md §3-5）。与同步 /dungeon 同鉴权档（无 ops_token）。 ----
+	// flag QUNXIANG_DUNGEON 关时各入口返回 ErrDungeonDisabled → 路由统一当 409 透出（前端据「未启用」识别）。
+	dungeonStatusFor := func(err error) int {
+		if err == session.ErrDungeonDisabled {
+			return http.StatusConflict
+		}
+		return http.StatusBadRequest
+	}
+
+	// 创建副本异步推进首段。
+	router.POST("/api/sessions/:id/dungeon/segments", func(c *gin.Context) {
+		var body struct {
+			UnitIDs []string `json:"unit_ids"`
+			Floors  int      `json:"floors"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		seg, err := newSessionService().StartDungeonAsync(c.Request.Context(), c.Param("id"), body.UnitIDs, body.Floors)
+		if err != nil {
+			c.JSON(dungeonStatusFor(err), gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"segment": gin.H{
+			"segment_id": seg.ID,
+			"floors":     seg.Floors,
+			"floor":      seg.Floor,
+			"state":      seg.State,
+		}})
+	})
+
+	// 推进当前段一层（按 segmentId 加载段并 RunDungeonSegment）。
+	router.POST("/api/sessions/:id/dungeon/segments/:segmentId/run", func(c *gin.Context) {
+		result, err := newSessionService().RunDungeonSegmentByID(c.Request.Context(), c.Param("id"), c.Param("segmentId"))
+		if err != nil {
+			c.JSON(dungeonStatusFor(err), gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
+
+	// 玩家回来据选择续跑/见好就收（按 sessionID 载 state + ResumePausedDungeonSegment）。
+	router.POST("/api/sessions/:id/dungeon/segments/:segmentId/resume", func(c *gin.Context) {
+		var body struct {
+			Choice string `json:"choice"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().ResumeDungeonSegmentByID(c.Request.Context(), c.Param("id"), c.Param("segmentId"), body.Choice)
+		if err != nil {
+			c.JSON(dungeonStatusFor(err), gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
+
+	// 段状态视图（绝不裸露数值血量）。不存在 → 404。
+	router.GET("/api/sessions/:id/dungeon/segments/:segmentId/status", func(c *gin.Context) {
+		status, err := newSessionService().DungeonSegmentStatusView(c.Request.Context(), c.Param("id"), c.Param("segmentId"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if status == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "dungeon segment not found"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": status})
+	})
+
+	// 标记玩家离场（开始 charter 超时计时，供主控在玩家断线/挂起时调用）。
+	router.POST("/api/sessions/:id/dungeon/segments/:segmentId/leave", func(c *gin.Context) {
+		if err := newSessionService().MarkDungeonSegmentLeft(c.Request.Context(), c.Param("id"), c.Param("segmentId")); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	// ---- 多世界 / 跨玩家世界总线 ----

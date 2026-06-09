@@ -44,16 +44,18 @@ const (
 	defaultAmbientBudgetUSD  = 1.0 // SetLLMClient 收到 <=0 预算时夹到此安全正值（money guardrail 失败安全，绝不退化成无上限）
 )
 
-const ambientDecisionSystemPrompt = "你是《群像》大世界里一个角色在战斗之外的日常自主意识。只在 forage、rest、socialize、reflect 四个日常动作中选一个最贴合她当下状态的，返回 JSON。"
+const ambientDecisionSystemPrompt = "你是《群像》大世界里一个角色在战斗之外的日常自主意识。结合她当下的主导渴望、最近触发的记忆与候选日常的倾向分，只在 forage、rest、socialize、reflect 四个日常动作中选一个最贴合的，并用一句话说明前因（reasoning），返回 JSON。"
 
 // ambientDecisionSchema 约束 LLM 只能产出四个已注册动作之一（gojsonschema 强校验，越界即被 ai.Service 拒绝）。
+// reasoning 字段（必填、≤60 字）让 LLM 把选择前因显式化（动机栈消费：选择须有可解释依据，呼应归因「意外但合理」原则的离线轻量版）；
+// 当前仅作遥测/可解释性，不持久化、不拦截（离线日常动作空间平淡、无 OOC 风险，见本文件顶部说明）。
 var ambientDecisionSchema = []byte(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["action"],
+  "required": ["action", "reasoning"],
   "properties": {
     "action": {"type": "string", "enum": ["forage", "rest", "socialize", "reflect"]},
-    "reason": {"type": "string", "maxLength": 80}
+    "reasoning": {"type": "string", "maxLength": 60}
   }
 }`)
 
@@ -104,23 +106,31 @@ func (r *Runner) addLLMCost(result ai.CompletionResult) {
 	}
 }
 
-// chooseAmbientAction 选离线动作：仅 HOT 单位、LLM 已注入且预算未耗尽 → LLM 决；否则零成本反射（real-3）。
-// LLM 任何失败（错误/解析/越界）→ 回退反射，绝不中断循环。返回的动作随后照常过饱和短路 + applyAction。
+// chooseAmbientAction 选离线动作（动机栈消费版）：
+//  1. 先跑 decideAmbientContextual 生成确定性打分候选（L1 护栏 → 需求强度 → L3 记忆偏置 → 野心乘权 → 降序）——**始终**算，
+//     既给 HOT-LLM 路径当 prompt 上下文，又当所有非 LLM/失败路径的 fallback（首选候选即「最强渴望」）。
+//  2. 仅 HOT 单位、LLM 已注入且预算未耗尽 → 把候选作上下文喂 LLM 决；否则直接返回候选首选（**非固定反射**，已含野心/记忆偏置）。
+//  3. LLM 任何失败（错误/解析/越界）→ 回退候选首选（同样优于固定反射）。绝不中断循环。
+//
+// flag 关时（野心乘权 flag QUNXIANG_AMBITION_SCORING 默认关）候选排序退化为纯需求强度序，首选与扩链前 decideAmbientReflex
+// 的语义一致——不破坏既有行为。返回的动作随后照常过饱和短路 + applyAction。
 func (r *Runner) chooseAmbientAction(ctx context.Context, record unit.Record, tier scheduler.Tier) ambientAction {
+	candidates := decideAmbientContextual(record)
+	fallback := topAmbientAction(candidates)
 	if r.llm == nil || tier != scheduler.TierHot || !r.llmBudgetAllows() {
-		return decideAmbientReflex(record)
+		return fallback
 	}
-	act, err := r.ambientLLMDecide(ctx, record)
+	act, err := r.ambientLLMDecide(ctx, record, candidates)
 	if err != nil {
 		atomic.AddInt64(&r.st.llmFallbacks, 1)
-		return decideAmbientReflex(record)
+		return fallback // 失败回退候选首选（含野心/记忆偏置），优于固定反射
 	}
 	atomic.AddInt64(&r.st.llmCalls, 1)
 	return act
 }
 
-// ambientLLMDecide 调一次 LLM 选动作并校验落在四个已注册动作内；调用即计费。
-func (r *Runner) ambientLLMDecide(ctx context.Context, record unit.Record) (ambientAction, error) {
+// ambientLLMDecide 调一次 LLM 选动作并校验落在四个已注册动作内；调用即计费。candidates 是动机栈打分候选（注入 prompt 作上下文）。
+func (r *Runner) ambientLLMDecide(ctx context.Context, record unit.Record, candidates []ambientCandidate) (ambientAction, error) {
 	// 整个决策的硬上限：派生 ctx 把跨 provider/endpoint 故障链的总耗时夹在 ambientLLMTimeout 内（单次 HTTP 另用更小的
 	// req.Timeout）；否则一次决策可在多 provider×多 endpoint 链上累积到数分钟、长占 worker。Run 取消时此 ctx 立即生效、worker 即时退出。
 	callCtx, cancel := context.WithTimeout(ctx, ambientLLMTimeout)
@@ -130,9 +140,9 @@ func (r *Runner) ambientLLMDecide(ctx context.Context, record unit.Record) (ambi
 		SchemaName:     "region_ambient_decision",
 		ResponseSchema: ambientDecisionSchema,
 		SystemPrompt:   ambientDecisionSystemPrompt,
-		UserPrompt:     buildAmbientPrompt(record),
+		UserPrompt:     buildAmbientPrompt(record, candidates),
 		Temperature:    0.4,
-		MaxTokens:      80,
+		MaxTokens:      120, // 增量上限：动机栈上下文 + reasoning 字段，控在 ≤120
 		Timeout:        ambientPerAttemptTimeout,
 		Metadata:       map[string]string{"unit_id": record.ID, "source": "region_runner_ambient"},
 	})
@@ -158,8 +168,14 @@ func parseAmbientAction(output json.RawMessage) (ambientAction, error) {
 	return act, nil
 }
 
-// buildAmbientPrompt 用单位当下状态拼一段极简上下文（控成本：MaxTokens 80）。
-func buildAmbientPrompt(record unit.Record) string {
+// buildAmbientPrompt 用单位当下状态 + 动机栈上下文拼提示词（控成本：MaxTokens 120，增量 ≤120 token）。
+// 在原极简状态行之外注入三段动机栈信号（设计：M7.3-real 动机栈消费 / 大世界沙盘 §4）：
+//   - 当前最强渴望（候选首选的野心标签 Dominant）：让 LLM 知道这角色的内在主导驱动（如「敛财」「复仇」），措辞与机械打分一致。
+//   - 最近触发的记忆（top1，截断 30 字）：让选择带可解释前因（呼应「意外但合理」的离线轻量版）。
+//   - 候选日常与倾向分（finalScore 降序，至多 3 条）：把确定性打分结果摆给 LLM 作锚，避免它漂到与机械偏置相悖的随意选择。
+//
+// candidates 为空时退化为原极简 prompt（失败安全）。所有注入段都从已读 record 派生，零额外 DB/LLM。
+func buildAmbientPrompt(record unit.Record, candidates []ambientCandidate) string {
 	name := record.Identity.Name
 	if name == "" {
 		name = "她"
@@ -168,8 +184,87 @@ func buildAmbientPrompt(record unit.Record) string {
 	if mood == "" {
 		mood = "平静"
 	}
-	return fmt.Sprintf(
-		"角色：%s。此刻在战斗之外。饥饿 %d/100（越低越饿），士气 %.2f（0-1，越高越振奋），心情「%s」。在 forage(觅食)/rest(休息)/socialize(社交)/reflect(独处反思) 里，她最想做哪件日常事？",
+	prompt := fmt.Sprintf(
+		"角色：%s。此刻在战斗之外。饥饿 %d/100（越低越饿），士气 %.2f（0-1，越高越振奋），心情「%s」。",
 		name, record.Status.Hunger, record.Status.Morale, mood,
 	)
+
+	// 当前最强渴望（野心主导标签）：从六维野心取引力最高的行为标签，告诉 LLM 这角色的内在主导驱动。
+	if dominant := dominantDesireLabel(record); dominant != "" {
+		prompt += "她的主导渴望：" + dominant + "。"
+	}
+
+	// 最近触发的记忆（top1，≤30 字）：给选择一个可解释的前因锚。
+	if mem := topMemoryTrigger(record); mem != "" {
+		prompt += "最近触发的记忆：" + mem + "。"
+	}
+
+	// 候选日常与倾向分（已降序）：把确定性打分摆给 LLM 当锚。
+	if line := candidateTendencyLine(candidates); line != "" {
+		prompt += "候选日常与倾向分（越高越倾向）：" + line + "。"
+	}
+
+	prompt += "在 forage(觅食)/rest(休息)/socialize(社交)/reflect(独处反思) 里，她最想做哪件日常事？并用一句话说明前因。"
+	return prompt
+}
+
+// dominantDesireLabel 把单位野心引力最高的行为标签翻成一个中文渴望词；无明显野心 / flag 关时返回 ""（不注入）。
+// 标签语义对齐 ambient_decision.go 的 ambitionDimensionTags（镜像 session）；纯查表、确定性。
+func dominantDesireLabel(record unit.Record) string {
+	tag := dominantAmbitionTag(record)
+	switch tag {
+	case "conquer":
+		return "攻伐扩张"
+	case "revenge":
+		return "复仇雪耻"
+	case "hoard":
+		return "敛财囤积"
+	case "nurture":
+		return "养育血脉"
+	case "train":
+		return "精进技艺"
+	case "explore":
+		return "闯荡求索"
+	case "bond":
+		return "经营人脉"
+	default:
+		return "" // 无明显野心（全 0）→ 不注入主导渴望，保持 prompt 精简
+	}
+}
+
+// topMemoryTrigger 取最近一条记忆 highlight 并截断到 ≤30 字（rune 计），控 token；无记忆返回 ""。
+func topMemoryTrigger(record unit.Record) string {
+	highlights := unit.RecentHighlights(record, 1)
+	if len(highlights) == 0 {
+		return ""
+	}
+	return truncateRunes(highlights[len(highlights)-1], 30)
+}
+
+// candidateTendencyLine 把候选（已降序）拼成「socialize:0.91 / rest:0.60 / forage:0.50」一行，至多取前 3 条控 token。
+func candidateTendencyLine(candidates []ambientCandidate) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	limit := len(candidates)
+	if limit > 3 {
+		limit = 3
+	}
+	line := ""
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			line += " / "
+		}
+		line += fmt.Sprintf("%s:%.2f", candidates[i].action, candidates[i].finalScore)
+	}
+	return line
+}
+
+// truncateRunes 按 rune 截断到至多 n 个字符（避免在多字节 UTF-8 中间切断）；超长加省略号。
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }

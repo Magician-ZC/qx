@@ -250,6 +250,201 @@ func TestWorldBossLedgerNotTruncated(t *testing.T) {
 	}
 }
 
+// countActiveWorldBosses 数某世界当前 status='active' 的世界Boss行数。
+func countActiveWorldBosses(t *testing.T, service *Service, worldID string) int {
+	t.Helper()
+	var n int
+	if err := service.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM world_bosses WHERE world_id = ? AND status = 'active'`, worldID).Scan(&n); err != nil {
+		t.Fatalf("数 active Boss 失败: %v", err)
+	}
+	return n
+}
+
+// 回归（修审计§8 已知低危 TOCTOU 竞态）：自动刷新路径并发 100 goroutine 同时调 maybeRefreshWorldBoss，
+// 必须恰好生成 1 头 active Boss（原子条件 INSERT ... WHERE NOT EXISTS），绝不出现多头（违反单世界至多一头）。
+// 早先「COUNT active → 无则 INSERT」两步实现下，多请求都见 0 → 都 INSERT → 会插多头；本测试正是该缺陷的护栏。
+func TestWorldBossAutoRefreshConcurrentSpawnsAtMostOne(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1") // 开自动刷新 flag（默认关）
+	_, _, service := newThreatTestService(t)
+	service.db.SetMaxOpenConns(1) // 串行化底层写，让并发体现在 Go 层交错（考验原子条件 INSERT），避免 SQLITE_BUSY
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	const goroutines = 100
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		t.Fatalf("并发自动刷新不应报错（best-effort），首个错误: %v", firstErr)
+	}
+	// 关键不变量：恰好一头 active Boss——既不能 0（flag 已开、世界存在，应生成一头），也绝不能 >1（TOCTOU 多头）。
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("并发自动刷新后应恰有 1 头 active Boss，得到 %d（>1 即 TOCTOU 多头缺陷）", got)
+	}
+}
+
+// 自动刷新具有幂等性：已有 active Boss（含手动投放）时再调不应新增；不同世界互不干扰。
+func TestWorldBossAutoRefreshIdempotentAndScoped(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	// 首次自动刷新：无 active → 生成一头。
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("首次自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("首次自动刷新应生成恰 1 头，得到 %d", got)
+	}
+	// 再调多次：已有 active → 原子条件 INSERT 被 WHERE NOT EXISTS 挡下，不新增、不报错。
+	for i := 0; i < 5; i++ {
+		if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+			t.Fatalf("幂等自动刷新失败: %v", err)
+		}
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("已有 active Boss 时自动刷新不应新增，仍应为 1，得到 %d", got)
+	}
+
+	// 另一世界互不干扰：各自独立刷出一头。
+	wid2 := mustCreateWorld(t, ctx, service)
+	if err := service.maybeRefreshWorldBoss(ctx, wid2); err != nil {
+		t.Fatalf("第二世界自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid2); got != 1 {
+		t.Fatalf("第二世界应独立生成恰 1 头，得到 %d", got)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("第一世界不应被第二世界刷新影响，仍应为 1，得到 %d", got)
+	}
+}
+
+// flag 默认关时自动刷新整方法 no-op：零 DB 写、不生成任何 Boss。
+func TestWorldBossAutoRefreshDisabledNoOp(t *testing.T) {
+	// 不设 QUNXIANG_WORLD_BOSS_AUTO（默认关）；显式清空以隔离外部环境。
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("flag 关时应 no-op 且不报错，得到 %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 0 {
+		t.Fatalf("flag 关时不应生成任何 Boss，得到 %d", got)
+	}
+}
+
+// 回归（L4 唯一兜底）：partial unique index uq_world_boss_active 是硬兜底——同一世界第二头 active Boss 的裸 INSERT
+// 必触发 UNIQUE 约束冲突，且该错误必被 isDupKeyErr 识别（maybeRefreshWorldBoss 据此把并发双插的冲突收敛为正常兜底）。
+func TestWorldBossActiveUniqueIndexRejectsSecond(t *testing.T) {
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	// 第一头 active（裸 INSERT，无 NOT EXISTS 守护）——成功。
+	if _, err := service.SpawnWorldBoss(ctx, wid, "甲龙", 100, ""); err != nil {
+		t.Fatalf("首头投放失败: %v", err)
+	}
+	// 第二头 active 同世界——partial unique index 必拒，返回 UNIQUE 约束冲突。
+	_, err := service.SpawnWorldBoss(ctx, wid, "乙龙", 100, "")
+	if err == nil {
+		t.Fatalf("同世界第二头 active 应被 uq_world_boss_active 拒绝（硬兜底失效）")
+	}
+	// 该错误必被 isDupKeyErr 识别——这是 maybeRefreshWorldBoss 把冲突当「已有 active 正常兜底」的判据。
+	if !isDupKeyErr(err) {
+		t.Fatalf("唯一冲突错误应被 isDupKeyErr 识别，得到: %v", err)
+	}
+	// 不变量：仍恰好一头 active（第二头被拒、未落库）。
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("唯一冲突后仍应恰一头 active，得到 %d", got)
+	}
+}
+
+// isDupKeyErr 的纯判定：UNIQUE/constraint/duplicate 子串命中（大小写不敏感）即判 dup-key；普通错误不误判。
+func TestIsDupKeyErr(t *testing.T) {
+	for _, s := range []string{
+		"UNIQUE constraint failed: world_bosses.world_id",
+		"Error 1062: Duplicate entry 'w1' for key 'uq_world_boss_active'",
+		"some CONSTRAINT violation",
+	} {
+		if !isDupKeyErr(errorString(s)) {
+			t.Fatalf("应判为 dup-key：%q", s)
+		}
+	}
+	for _, s := range []string{"connection refused", "no such table", ""} {
+		if isDupKeyErr(errorString(s)) {
+			t.Fatalf("不应判为 dup-key：%q", s)
+		}
+	}
+	if isDupKeyErr(nil) {
+		t.Fatalf("nil 不应判为 dup-key")
+	}
+}
+
+// errorString 是测试用的简易 error（避免引 errors 仅为构造字符串错误）。
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
+// 回归（L4 唯一兜底）：并发自动刷新被收敛为「恰好一头 active」，且任一并发请求绝不因唯一冲突外抛错误。
+// SQLite 是单写者模型，写被串行化（SetMaxOpenConns(1) 避免 SQLITE_BUSY 噪声）：此时 NOT EXISTS 主护栏先挡下后到者，
+// 收敛为一头、无错。唯一冲突（partial unique index）的硬兜底分支由 TestWorldBossActiveUniqueIndexRejectsSecond
+// （真实 UNIQUE 错误）+ TestIsDupKeyErr（错误识别）确定性覆盖——maybeRefreshWorldBoss 据此把 dup-key 当正常兜底吞掉。
+// 本测试守的是端到端不变量：无论走 NOT EXISTS 还是唯一冲突兜底，并发后恒「恰好一头 active、零外抛」。
+func TestWorldBossAutoRefreshConcurrentConvergesToOne(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	service.db.SetMaxOpenConns(1) // 串行化底层写，让并发体现在 Go 层交错，避免 SQLITE_BUSY
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+
+	const goroutines = 60
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 唯一冲突/已有 active 必须被吞为正常兜底——绝不外抛（best-effort，绝不中断回合推进）。
+	if firstErr != nil {
+		t.Fatalf("并发自动刷新应被收敛为正常兜底、不外抛，首个错误: %v", firstErr)
+	}
+	// 关键不变量：恰好一头 active（既不 0、也绝不 >1）。
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("并发自动刷新后应恰一头 active，得到 %d", got)
+	}
+}
+
 func TestWorldBossConcurrentSettleOnce(t *testing.T) {
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()

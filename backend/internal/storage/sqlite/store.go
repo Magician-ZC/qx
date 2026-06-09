@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +91,26 @@ func Open(path string) (*sql.DB, error) {
 	if err := dbmigrate.EnsureColumns(ctx, db, "product_events", dbmigrate.ProductEventAnalyticsColumns); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// 设计闭环新增表（副本异步分段 / Live-Ops 赛季 / GM 审计）：存量旧库幂等补建。
+	for _, t := range dbmigrate.DesignClosureTables {
+		if err := dbmigrate.EnsureTable(ctx, db, t.SQLite, t.MySQL); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	// 评审修复补列：dungeon_segments.entered_turn（L1 续跑确定性）、gm_events_audit.world_tick（L3 审计排序）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "dungeon_segments", dbmigrate.DungeonSegmentEnteredTurnColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := dbmigrate.EnsureColumns(ctx, db, "gm_events_audit", dbmigrate.GmEventsAuditTickColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// world_bosses 单世界至多一头 active 的硬兜底（L4，best-effort：存量重复 active 行致建索引失败时吞错，NOT EXISTS 仍守）。
+	if _, err := db.ExecContext(ctx, dbmigrate.WorldBossActiveUniqueIndexSQLite); err != nil {
+		log.Printf("ensure world_boss active unique index best-effort failed: %v", err)
 	}
 
 	return db, nil

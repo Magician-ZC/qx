@@ -487,3 +487,72 @@ CREATE TABLE IF NOT EXISTS propagation_log (
   INDEX idx_propagation_log_origin (origin_event_id),
   INDEX idx_propagation_log_to (to_unit)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- 设计闭环新增表（2026-06-09 多 agent 收尾：副本异步分段 / Live-Ops 赛季 / 锚反向索引）
+-- ============================================================================
+
+-- 副本异步分段态（PvE威胁系统 §3）。
+CREATE TABLE IF NOT EXISTS dungeon_segments (
+  id VARCHAR(191) PRIMARY KEY,
+  dungeon_run_id VARCHAR(191) NOT NULL,
+  session_id VARCHAR(191) NOT NULL,
+  unit_ids_json TEXT NOT NULL,
+  floors INT NOT NULL DEFAULT 1,
+  floor INT NOT NULL DEFAULT 1,
+  entered_turn INT NOT NULL DEFAULT 0,
+  state VARCHAR(48) NOT NULL DEFAULT 'in_progress',
+  members_state_json MEDIUMTEXT NOT NULL,
+  boss_hp_remaining INT NOT NULL DEFAULT 0,
+  floor_round INT NOT NULL DEFAULT 0,
+  awards_accumulated_json TEXT NOT NULL,
+  pause_reason VARCHAR(64) NOT NULL DEFAULT '',
+  started_at VARCHAR(64) NOT NULL DEFAULT '',
+  left_at VARCHAR(64) NULL,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_dungeon_segments_session (session_id, state),
+  INDEX idx_dungeon_segments_run (dungeon_run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Live-Ops 赛季（产品方案PRD §8）。
+CREATE TABLE IF NOT EXISTS seasons (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  name VARCHAR(191) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  started_at VARCHAR(64) NOT NULL DEFAULT '',
+  ends_at VARCHAR(64) NOT NULL DEFAULT '',
+  burn_in_started_at VARCHAR(64) NOT NULL DEFAULT '',
+  burn_in_ended_at VARCHAR(64) NOT NULL DEFAULT '',
+  content_theme_id VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_seasons_world (world_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 赛季内容母题库。
+CREATE TABLE IF NOT EXISTS season_content_themes (
+  id VARCHAR(191) PRIMARY KEY,
+  season_id VARCHAR(191) NOT NULL,
+  decisive_event_ids TEXT NOT NULL,
+  title_ids TEXT NOT NULL,
+  landmark_names TEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_season_content_season (season_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- GM 世界事件注入审计。
+CREATE TABLE IF NOT EXISTS gm_events_audit (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  event_kind VARCHAR(64) NOT NULL,
+  cross_event_id VARCHAR(191) NOT NULL DEFAULT '',
+  world_tick INT NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL,
+  created_by VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_gm_events_audit_world (world_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- relevance_anchors 反向索引（§1.5 锚密度计算）。
+CREATE INDEX idx_relevance_anchors_ref ON relevance_anchors(anchor_ref, anchor_kind);

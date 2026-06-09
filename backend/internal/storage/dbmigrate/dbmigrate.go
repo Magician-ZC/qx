@@ -131,6 +131,158 @@ CREATE TABLE IF NOT EXISTS relevance_anchors (
   INDEX idx_relevance_anchors_char (character_unit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// —— 设计闭环新增表（2026-06-09）：副本异步分段 / Live-Ops 赛季 / GM 审计。
+// schema.sql 的 fresh 库已含这些表；以下供存量旧库经 EnsureTable 幂等补建（CREATE TABLE IF NOT EXISTS 双驱动安全）。
+
+// DungeonSegmentsTable* 副本异步分段态（PvE威胁系统 §3）。列严格对齐 session/dungeon_segment.go 的 INSERT/SELECT。
+const DungeonSegmentsTableSQLite = `
+CREATE TABLE IF NOT EXISTS dungeon_segments (
+  id TEXT PRIMARY KEY,
+  dungeon_run_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  unit_ids_json TEXT NOT NULL DEFAULT '[]',
+  floors INTEGER NOT NULL DEFAULT 1,
+  floor INTEGER NOT NULL DEFAULT 1,
+  entered_turn INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'in_progress',
+  members_state_json TEXT NOT NULL DEFAULT '[]',
+  boss_hp_remaining INTEGER NOT NULL DEFAULT 0,
+  floor_round INTEGER NOT NULL DEFAULT 0,
+  awards_accumulated_json TEXT NOT NULL DEFAULT '[]',
+  pause_reason TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  left_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const DungeonSegmentsTableMySQL = `
+CREATE TABLE IF NOT EXISTS dungeon_segments (
+  id VARCHAR(191) PRIMARY KEY,
+  dungeon_run_id VARCHAR(191) NOT NULL,
+  session_id VARCHAR(191) NOT NULL,
+  unit_ids_json TEXT NOT NULL,
+  floors INT NOT NULL DEFAULT 1,
+  floor INT NOT NULL DEFAULT 1,
+  entered_turn INT NOT NULL DEFAULT 0,
+  state VARCHAR(48) NOT NULL DEFAULT 'in_progress',
+  members_state_json MEDIUMTEXT NOT NULL,
+  boss_hp_remaining INT NOT NULL DEFAULT 0,
+  floor_round INT NOT NULL DEFAULT 0,
+  awards_accumulated_json TEXT NOT NULL,
+  pause_reason VARCHAR(64) NOT NULL DEFAULT '',
+  started_at VARCHAR(64) NOT NULL DEFAULT '',
+  left_at VARCHAR(64) NULL,
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_dungeon_segments_session (session_id, state),
+  INDEX idx_dungeon_segments_run (dungeon_run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// SeasonsTable* Live-Ops 赛季（产品方案PRD §8）。
+const SeasonsTableSQLite = `
+CREATE TABLE IF NOT EXISTS seasons (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ends_at TEXT NOT NULL DEFAULT '',
+  burn_in_started_at TEXT NOT NULL DEFAULT '',
+  burn_in_ended_at TEXT NOT NULL DEFAULT '',
+  content_theme_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const SeasonsTableMySQL = `
+CREATE TABLE IF NOT EXISTS seasons (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  name VARCHAR(191) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  started_at VARCHAR(64) NOT NULL DEFAULT '',
+  ends_at VARCHAR(64) NOT NULL DEFAULT '',
+  burn_in_started_at VARCHAR(64) NOT NULL DEFAULT '',
+  burn_in_ended_at VARCHAR(64) NOT NULL DEFAULT '',
+  content_theme_id VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  updated_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_seasons_world (world_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// SeasonContentThemesTable* 赛季内容母题库。
+const SeasonContentThemesTableSQLite = `
+CREATE TABLE IF NOT EXISTS season_content_themes (
+  id TEXT PRIMARY KEY,
+  season_id TEXT NOT NULL,
+  decisive_event_ids TEXT NOT NULL DEFAULT '[]',
+  title_ids TEXT NOT NULL DEFAULT '[]',
+  landmark_names TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const SeasonContentThemesTableMySQL = `
+CREATE TABLE IF NOT EXISTS season_content_themes (
+  id VARCHAR(191) PRIMARY KEY,
+  season_id VARCHAR(191) NOT NULL,
+  decisive_event_ids TEXT NOT NULL,
+  title_ids TEXT NOT NULL,
+  landmark_names TEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_season_content_season (season_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// GmEventsAuditTable* GM 世界事件注入审计（append-only）。
+const GmEventsAuditTableSQLite = `
+CREATE TABLE IF NOT EXISTS gm_events_audit (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  cross_event_id TEXT NOT NULL DEFAULT '',
+  world_tick INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const GmEventsAuditTableMySQL = `
+CREATE TABLE IF NOT EXISTS gm_events_audit (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  event_kind VARCHAR(64) NOT NULL,
+  cross_event_id VARCHAR(191) NOT NULL DEFAULT '',
+  world_tick INT NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL,
+  created_by VARCHAR(191) NOT NULL DEFAULT '',
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_gm_events_audit_world (world_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
+// DesignClosureTables 汇总本波新增表的双驱动 DDL，供 store.go 一次性幂等补建。
+var DesignClosureTables = []struct{ SQLite, MySQL string }{
+	{DungeonSegmentsTableSQLite, DungeonSegmentsTableMySQL},
+	{SeasonsTableSQLite, SeasonsTableMySQL},
+	{SeasonContentThemesTableSQLite, SeasonContentThemesTableMySQL},
+	{GmEventsAuditTableSQLite, GmEventsAuditTableMySQL},
+}
+
+// DungeonSegmentEnteredTurnColumn 给 dungeon_segments 补 entered_turn（评审 L1：副本踏入回合钉死，
+// 使 combat_roll 骰序与玩家何时回来无关——续跑确定性不随 live Turn 漂移）。供存量库（本波早些时候建过无此列）幂等补列。
+var DungeonSegmentEnteredTurnColumn = []Column{
+	{Name: "entered_turn", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "INT NOT NULL DEFAULT 0"},
+}
+
+// GmEventsAuditTickColumn 给 gm_events_audit 补 world_tick（评审 L3：ListAudit 按权威单调 world_tick 排序，
+// 取代不稳定的秒级/空串 created_at，使运营复核视图与 cross_events 注入序严格一致）。
+var GmEventsAuditTickColumn = []Column{
+	{Name: "world_tick", SQLiteType: "INTEGER NOT NULL DEFAULT 0", MySQLType: "INT NOT NULL DEFAULT 0"},
+}
+
+// WorldBossActiveUniqueIndexSQLite 是「每世界至多一头 active boss」的 SQLite partial unique index
+// （评审 L4：给默认驱动一道硬兜底，NOT EXISTS 之外再加唯一冲突拦截）。best-effort 执行：
+// 存量库已有重复 active 行时建索引会失败——吞错即可（NOT EXISTS 仍是主护栏）。MySQL 无 partial index，
+// 不在此补（gap-lock 理论竞态属 flag-off 低危 documented residual）。
+const WorldBossActiveUniqueIndexSQLite = `CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id) WHERE status='active'`
+
 // ProductEventAnalyticsColumns 给 product_events 补北极星/A-B 口径列（全可空 TEXT，与游戏状态解耦）：
 // user_id（按用户聚合留存/北极星）、ab_bucket（A-B 实验分桶）、client_ts（客户端原始时间戳，校时漂移分析）、
 // app_version（按版本切片）。nullable —— 兼容历史无这些维度的旧埋点；列已存在则 EnsureColumns 安全跳过。

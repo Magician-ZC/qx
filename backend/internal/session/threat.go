@@ -9,10 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/google/uuid"
 
+	"qunxiang/backend/internal/engine/decision"
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/status"
@@ -481,12 +483,19 @@ func (service *Service) settleFieldBoss(ctx context.Context, state *State, threa
 	goldByUnit := map[string]int{}
 	if result.Victory {
 		key := fmt.Sprintf("%s|fieldboss|%s|%d", state.ID, threat.ID, turn)
-		for _, a := range encounter.AllocateLoot(key, threat.Loot, participants, fieldBossMinMeaningful) {
+		allAwards := encounter.AllocateLoot(key, threat.Loot, participants, fieldBossMinMeaningful)
+		for _, a := range allAwards {
 			awardsByUnit[a.UnitID] = append(awardsByUnit[a.UnitID], a)
 			if a.ItemID == "gold" {
 				goldByUnit[a.UnitID] += a.Quantity
 			}
 		}
+		// H2：排他件(boss_relic 等)若有 ≥2 争夺者，给胜/败方各留可审计零和争夺事件（仅 WorldID 非空时；best-effort）。
+		scoreByUnit := make(map[string]float64, len(participants))
+		for _, p := range participants {
+			scoreByUnit[p.UnitID] = p.Score
+		}
+		service.recordExclusiveContestOutcomes(ctx, state.ID, state.WorldID, turn, allAwards, scoreByUnit)
 	}
 
 	for _, ms := range members {
@@ -574,6 +583,91 @@ func eliteOutcomeWeight(outcome string) (int, float64) {
 	}
 }
 
+// recordExclusiveContestOutcomes 在排他件经 arbitration 决出归属后，给胜者/败者各留一条可审计的零和争夺事件
+// （H2 producer 侧补缺：排他仲裁胜负不落库 → 审计 queryOutcomes 假阴）。约定（与 liveops 审计闭合）：
+//   - 胜者发 events.ReasonCrossContestWin、每个败者发 events.ReasonCrossContestLose；
+//   - 必须显式设 Scope.WorldID / Scope.Tick——否则被审计的 world_id/tick 过滤掉（必须项）。
+//   - **仅当一件排他件有 ≥2 个合格争夺者**时才发（AllocateLoot 会给排他件的胜者发 AwardWon、其余争夺者发
+//     AwardConsolation；单参与者只有 AwardWon、无 consolation → 无争夺、不发）。
+//   - 反 P2W：payload 只记 actor+score（参与人数），**绝不含 wallet/billing/付费档**。
+//   - worldID 为空（未接入多世界）→ 不发（审计按 world 检索，无世界归属即无意义；与既有 contest.go 同口径）。
+//   - best-effort：吞错只 log，绝不阻断主结算。
+//
+// scoreByUnit 提供每个争夺者的 arbitration Score（贡献分），写进 payload 供审计/复算（只记贡献、非付费）。
+func (service *Service) recordExclusiveContestOutcomes(
+	ctx context.Context, sessionID string, worldID string, tick int,
+	awards []encounter.Award, scoreByUnit map[string]float64,
+) {
+	if service == nil || service.db == nil || worldID == "" {
+		return // 未接入多世界 → 审计无从检索，不发（零状态变化）
+	}
+	// 按排他件聚合：胜者(AwardWon) + 败者(AwardConsolation)。Common 件(AwardShare)不是排他争夺，跳过。
+	type contestGroup struct {
+		winner string
+		losers []string
+	}
+	groups := map[string]*contestGroup{}
+	order := make([]string, 0)
+	for _, a := range awards {
+		switch a.Reason {
+		case encounter.AwardWon:
+			g := groups[a.ItemID]
+			if g == nil {
+				g = &contestGroup{}
+				groups[a.ItemID] = g
+				order = append(order, a.ItemID)
+			}
+			g.winner = a.UnitID
+		case encounter.AwardConsolation:
+			g := groups[a.ItemID]
+			if g == nil {
+				g = &contestGroup{}
+				groups[a.ItemID] = g
+				order = append(order, a.ItemID)
+			}
+			g.losers = append(g.losers, a.UnitID)
+		}
+	}
+
+	for _, itemID := range order {
+		g := groups[itemID]
+		// 单参与者（只有 winner、无 loser）= 无争夺 → 不发。
+		if g.winner == "" || len(g.losers) == 0 {
+			continue
+		}
+		// 胜者留痕。
+		if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+			SessionID:   sessionID,
+			OwnerUnitID: g.winner,
+			Code:        events.ReasonCrossContestWin,
+			Category:    events.CategoryLifecycle,
+			Payload: map[string]any{
+				"item": itemID, "score": scoreByUnit[g.winner], "contenders": len(g.losers) + 1,
+			},
+			WorldID: worldID,
+			Tick:    tick,
+		}); err != nil {
+			slog.Warn("record cross contest win failed (best-effort)", "unit", g.winner, "item", itemID, "err", err)
+		}
+		// 每个败者各留一条。
+		for _, loser := range g.losers {
+			if _, err := events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
+				SessionID:   sessionID,
+				OwnerUnitID: loser,
+				Code:        events.ReasonCrossContestLose,
+				Category:    events.CategoryLifecycle,
+				Payload: map[string]any{
+					"item": itemID, "score": scoreByUnit[loser], "contenders": len(g.losers) + 1,
+				},
+				WorldID: worldID,
+				Tick:    tick,
+			}); err != nil {
+				slog.Warn("record cross contest lose failed (best-effort)", "unit", loser, "item", itemID, "err", err)
+			}
+		}
+	}
+}
+
 // grantEliteLoot 按贡献分配掉落（单人=独享），货币类经 Mutator 落 Wallet 并留痕；排他件记入结果（入库为后续）。
 func (service *Service) grantEliteLoot(ctx context.Context, state *State, actor *unit.Record, threat Threat, score float64, result *EliteEncounterResult) error {
 	if len(threat.Loot) == 0 {
@@ -582,6 +676,11 @@ func (service *Service) grantEliteLoot(ctx context.Context, state *State, actor 
 	key := fmt.Sprintf("%s|elite|%s|%d", state.ID, threat.ID, state.TurnState.Turn)
 	awards := encounter.AllocateLoot(key, threat.Loot, []encounter.Participant{{UnitID: actor.ID, Score: score}}, 0)
 	result.Awards = awards
+
+	// H2：单人 elite 仅一名参与者、无排他争夺（AllocateLoot 不产 consolation）→ recordExclusiveContestOutcomes 自然不发。
+	// 仍调用以保持「凡排他归属皆走同一留痕口径」的一致性（无争夺即零状态变化）。
+	service.recordExclusiveContestOutcomes(ctx, state.ID, state.WorldID, state.TurnState.Turn,
+		awards, map[string]float64{actor.ID: score})
 
 	gold := 0
 	for _, a := range awards {
@@ -611,11 +710,30 @@ func (service *Service) grantEliteLoot(ctx context.Context, state *State, actor 
 }
 
 // applyDefeatPenalty 失败惩罚经后果分级闸降级（elite 候选层=1，恒落「可恢复」：士气重挫），经 Mutator 留痕。
+//
+// §4.3 provenance 强制接 PvE（与 fate.go:ResolveFateDecision 的不可逆 provenance 守门同构）：层2/层3 的「高代价/不可逆」
+// 后果落地前，要求该角色携带**可解析前因链**（人格/记忆/红线/关系/压力之一）；无源则强制降到层1——绝不无源致残/致死。
+// 层3 的「不可逆」额外仍受既有牵挂×在世天数硬锁（PenaltyCap）约束，层3 落地前还须再过 consent 降级路径（见 defeatLayerAfterConsent）。
 func (service *Service) applyDefeatPenalty(ctx context.Context, state *State, actor *unit.Record, threat Threat) (int, error) {
 	candidate := candidateDefeatLayer(threat.Tier)
 	// 后果分级闸用**真实牵挂**：深牵挂+陪伴久的角色才可能挨更重的后果；萍水相逢的被硬锁在「可恢复」。
 	care := service.ComputeAttachment(ctx, actor.ID, actor.Status.Loyalty, state.TurnState.Turn)
 	layer := encounter.DegradePenalty(candidate, care, state.TurnState.Turn)
+
+	// §4.3 provenance 闸：候选层≥2（高代价/不可逆）才校验前因——构造前因快照，无可解析前因即强制降到层1。
+	provenanceZH := ""
+	if candidate >= 2 {
+		snap := service.buildDefeatProvenanceSnapshot(ctx, *state, actor)
+		if snapshotHasResolvableCause(snap) {
+			provenanceZH = deriveDefeatProvenance(snap, threat) // 可追溯凭证（写进命运卡 payload）
+		} else if layer >= 2 {
+			layer = 1 // 无源 → 绝不无源致残/致死，硬降到「可恢复」
+		}
+	}
+	// 层3「不可逆」落地前再过 consent 降级路径（best-effort，consent 不通过则继续降级）。
+	if layer >= 3 {
+		layer = service.defeatLayerAfterConsent(ctx, state, actor, layer)
+	}
 
 	res, err := service.applyEliteMutation(ctx, status.Mutation{
 		UnitID:     actor.ID,
@@ -630,7 +748,140 @@ func (service *Service) applyDefeatPenalty(ctx context.Context, state *State, ac
 		return layer, fmt.Errorf("apply defeat penalty: %w", err)
 	}
 	*actor = res.Record
+
+	// provenance 凭证随命运卡可追溯落地（§4.3）：把该败北的「为什么会挨到层≥2」作为归因句路由进收件箱命运卡的尾注。
+	// best-effort：失败只记 log、绝不影响惩罚结算（SurfaceFateEvent 在 ResolveEliteEncounter/settleFieldBoss 后另调）。
+	if provenanceZH != "" {
+		service.recordDefeatProvenance(ctx, state.ID, actor, threat, layer, provenanceZH)
+	}
 	return layer, nil
+}
+
+// buildDefeatProvenanceSnapshot 复用决策归因的生产链路（人格/压力/记忆/红线/关系）为败北后果构造前因快照。
+// 与 prepareAttribution 同源（buildDecisionAttributionContext），保证「PvE 后果的前因」与「LLM 决策的前因」同一套真相源。
+func (service *Service) buildDefeatProvenanceSnapshot(ctx context.Context, state State, actor *unit.Record) decision.Snapshot {
+	snap, _ := service.buildDecisionAttributionContext(ctx, state, actor)
+	return snap
+}
+
+// deriveDefeatProvenance 在前因快照非空时派生一句可追溯的败北归因（≤40 字，纯函数、无 LLM）。
+// 每一节都取自真实数据（命中的前因类别 + 威胁名），绝不凭空编戏剧性——对齐 §5「意外但合理」的代码强制。
+func deriveDefeatProvenance(snap decision.Snapshot, threat Threat) string {
+	cause := dominantProvenanceCauseZH(snap)
+	if cause == "" {
+		return ""
+	}
+	return fmt.Sprintf("她栽在那头%s手里，%s", threat.Name, cause)
+}
+
+// recordDefeatProvenance 把败北的 provenance 凭证作为一条命运事件路由进该角色收件箱（高光/待决策含归因尾注）。
+// best-effort：吞错只记 log，绝不阻断惩罚结算（载具是既有 SurfaceFateEvent，重要度按惩罚层升高）。
+func (service *Service) recordDefeatProvenance(ctx context.Context, sessionID string, actor *unit.Record, threat Threat, layer int, provenanceZH string) {
+	importance := 4 + layer // 层越高越牵动（层1=5、层2=6、层3=7）
+	emotion := -0.3 - 0.2*float64(layer)
+	if _, err := service.SurfaceFateEvent(ctx, sessionID, actor, FateEvent{
+		ActorID:       actor.ID,
+		TargetID:      actor.ID,
+		ReasonCode:    events.ReasonEmotionTrauma,
+		Importance:    importance,
+		EmotionWeight: emotion,
+		Summary:       fmt.Sprintf("她败给了那头%s", threat.Name),
+		AttributionZH: provenanceZH, // 可追溯前因句，进命运卡 payload.attribution_zh
+	}); err != nil {
+		slog.Warn("record defeat provenance failed (best-effort)", "unit", actor.ID, "err", err)
+	}
+}
+
+// defeatLayerAfterConsent 是层3「不可逆」落地前的 consent 降级路径占位（§4.3：层3 须过既有 consent 降级）。
+// 现状：单人 elite/field-boss 不会产出层3（候选层最高 2），故该路径恒等返回；接 dungeon/world-boss（候选=3）后，
+// 这里据该角色的同意档（consent_gate）决定是否把层3 降到层2——best-effort，consent 不可达即保守降级（绝不无同意施加不可逆）。
+func (service *Service) defeatLayerAfterConsent(ctx context.Context, state *State, actor *unit.Record, layer int) int {
+	_ = ctx
+	_ = state
+	_ = actor
+	// 当前未接 consent_gate 的 PvE 不可逆同意档：保守把层3 降到层2（绝不在没有显式同意路径时落地不可逆败北后果）。
+	if layer >= 3 {
+		return 2
+	}
+	return layer
+}
+
+// ---- §4.3 PvE 后果 provenance 闸：前因可解析判定与归因句派生 ----
+
+// provenance 显著度阈值（与 engine/decision 的 ValidateAttribution 同源，保证「PvE 后果前因」与「LLM 决策前因」一把尺）。
+const (
+	defeatTraitSignificance = 0.25 // |trait-0.5| ≥ 此值才算显著前因（同 decision.traitSignificance）
+	defeatMemImportanceMin  = 6    // 记忆重要度 ≥ 此值才算可锚前因（同 decision.memImportanceMin）
+	defeatRelAxisMin        = 0.3  // 关系轴归一绝对值 ≥ 此值才算可锚前因（同 decision.relAxisMin）
+)
+
+// snapshotHasResolvableCause 判断一个前因快照里**是否存在至少一条可解析前因**（人格显著/可锚记忆/任一红线/
+// 显著关系/任一现实压力/任一玩家动作）。这是「无源戏剧性后果判 OOC」的代码强制（§5）——纯函数、确定性、可测。
+func snapshotHasResolvableCause(snap decision.Snapshot) bool {
+	for _, v := range snap.Traits {
+		if absFloat(v-0.5) >= defeatTraitSignificance {
+			return true
+		}
+	}
+	for _, m := range snap.Memories {
+		if m.Importance >= defeatMemImportanceMin {
+			return true
+		}
+	}
+	if len(snap.Redlines) > 0 {
+		return true
+	}
+	for _, r := range snap.Relations {
+		if absFloat(r.Trust) >= defeatRelAxisMin || absFloat(r.Affection) >= defeatRelAxisMin ||
+			absFloat(r.Fear) >= defeatRelAxisMin || absFloat(r.Rivalry) >= defeatRelAxisMin {
+			return true
+		}
+	}
+	p := snap.Pressure
+	// 只认**战前既有**的现实压力（Hunger/Fatigue/Debt）。Injury/Threat 会被本次战斗自产——
+	// applyDefeatPenalty 用战后残血 actor 构快照，down/fled 败北时残血必致 Injury=true、撞见威胁必致 Threat=true，
+	// 若认这两位则 provenance 闸对最常见的 down/fled 被「战斗自身造成的伤势」自满足而恒判有前因（橡皮图章），
+	// 「无源→降层1」分支永不触发。故排除这两个可能自产的压力位，杜绝无源致残/致死。
+	if p.Hunger || p.Fatigue || p.Debt {
+		return true
+	}
+	return len(snap.PlayerActionEventIDs) > 0
+}
+
+// dominantProvenanceCauseZH 把前因快照里最重的一类可解析前因翻成一句「凭什么会败到这一步」的引子（≤约 20 字）。
+// 顺序优先：红线 > 现实压力 > 关系 > 显著人格 > 可锚记忆（越「硬」的前因越优先解释败北）。无前因返回空串。确定性、纯函数。
+func dominantProvenanceCauseZH(snap decision.Snapshot) string {
+	if len(snap.Redlines) > 0 {
+		return "这一仗本就踩着她不肯退的红线"
+	}
+	p := snap.Pressure
+	// 与 snapshotHasResolvableCause 一把尺：Injury/Threat 可能由本次战斗自产，不作可解析前因（避免橡皮图章），
+	// 仅认战前既有的 Hunger/Fatigue/Debt。
+	switch {
+	case p.Hunger:
+		return "饿着肚子上阵，力气先垮了"
+	case p.Fatigue:
+		return "连日奔劳，她早已力竭"
+	case p.Debt:
+		return "压在身上的事太多，她分了神"
+	}
+	for _, r := range snap.Relations {
+		if absFloat(r.Trust) >= defeatRelAxisMin || absFloat(r.Affection) >= defeatRelAxisMin ||
+			absFloat(r.Fear) >= defeatRelAxisMin || absFloat(r.Rivalry) >= defeatRelAxisMin {
+			return "她心里挂着人，不敢拼到尽头"
+		}
+	}
+	for _, v := range snap.Traits {
+		if absFloat(v-0.5) >= defeatTraitSignificance {
+			return "这正是她的性子使然"
+		}
+	}
+	for _, m := range snap.Memories {
+		if m.Importance >= defeatMemImportanceMin {
+			return "她想起了从前那桩事，手一软"
+		}
+	}
+	return ""
 }
 
 func lootBlurb(awards []encounter.Award) string {

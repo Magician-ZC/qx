@@ -25,6 +25,13 @@ import {
   talkToUnit,
   trackFunnel,
   emitClientAnalytics,
+  startDungeonAsync,
+  runDungeonSegment,
+  resumeDungeonSegment,
+  injectWorldEvent,
+  createSeason,
+  finalizeSeason,
+  fetchArbitrationAudit,
 } from "./session/api";
 import type { BattleMapSizeID, EliteEncounterResult } from "./session/api";
 import type { FieldBossResult } from "./session/types";
@@ -37,6 +44,8 @@ import WorldBossPanel from "./components/WorldBossPanel";
 import { BloodFeudPanel } from "./components/BloodFeudPanel";
 import { OpsDashboard } from "./components/OpsDashboard";
 import DungeonPanel from "./components/DungeonPanel";
+import DungeonSegmentPanel from "./components/DungeonSegmentPanel";
+import LiveOpsPanel from "./components/LiveOpsPanel";
 import { DefianceCard, hasDefianceTrace, parseDefianceTrace, stripDefianceTrace } from "./components/DefianceCard";
 import type {
   CompletionAttempt,
@@ -495,6 +504,10 @@ export function App() {
   const [opsDashboardOpen, setOpsDashboardOpen] = useState(false);
   // 副本面板（多层 PvE，QUNXIANG_DUNGEON 默认关时后端报错→面板提示未启用）。
   const [dungeonOpen, setDungeonOpen] = useState(false);
+  // 副本异步分段面板（逐段可中断、关键节点暂停问玩家；QUNXIANG_DUNGEON 默认关时后端报 409→面板提示未启用）。
+  const [dungeonSegmentOpen, setDungeonSegmentOpen] = useState(false);
+  // Live-Ops 运营台（GM 世界事件注入 + 赛季 + 零和审计；developer 门控，均走 X-Ops-Token）。
+  const [liveOpsOpen, setLiveOpsOpen] = useState(false);
   const [dialogueDraft, setDialogueDraft] = useState("");
   const [latestDialogueReply, setLatestDialogueReply] = useState("");
   const [terrainCatalog, setTerrainCatalog] = useState<TerrainDefinition[]>([]);
@@ -3192,6 +3205,13 @@ export function App() {
                     副本
                   </button>
                   <button
+                    className={`action-button inline-action ${dungeonSegmentOpen ? "action-button-primary" : ""}`}
+                    onClick={() => setDungeonSegmentOpen((open) => !open)}
+                    title="副本·分段：逐段可中断、关键节点暂停问你、离线超时见好就收（需后端开启 QUNXIANG_DUNGEON）"
+                  >
+                    副本·分段
+                  </button>
+                  <button
                     className="action-button inline-action"
                     onClick={() => setReportDialogOpen(true)}
                     title="举报不当内容（可针对当前选中角色）"
@@ -3214,6 +3234,15 @@ export function App() {
                       title="运营看板：跨会话 LLM 成本 / fallback 率 / 假门转化漏斗（需 X-Ops-Token）"
                     >
                       运营看板
+                    </button>
+                  ) : null}
+                  {developerMode ? (
+                    <button
+                      className={`action-button inline-action ${liveOpsOpen ? "action-button-primary" : ""}`}
+                      onClick={() => setLiveOpsOpen((open) => !open)}
+                      title="Live-Ops 运营台：GM 世界事件注入 / 赛季骨架 / 零和审计（需 X-Ops-Token）"
+                    >
+                      Live-Ops
                     </button>
                   ) : null}
                   {developerMode ? (
@@ -3699,12 +3728,31 @@ export function App() {
           {developerMode && opsDashboardOpen ? (
             <OpsDashboard onClose={() => setOpsDashboardOpen(false)} />
           ) : null}
+          {/* Live-Ops 运营台：GM 世界事件注入 + 赛季 + 零和审计（developer 门控，均走 X-Ops-Token）。*/}
+          {developerMode && liveOpsOpen ? (
+            <LiveOpsPanel
+              onClose={() => setLiveOpsOpen(false)}
+              injectWorldEvent={injectWorldEvent}
+              createSeason={createSeason}
+              finalizeSeason={finalizeSeason}
+              fetchArbitrationAudit={fetchArbitrationAudit}
+            />
+          ) : null}
           {/* 多层副本（玩家可达；后端 QUNXIANG_DUNGEON 关时面板提示未启用）。*/}
           {showHUD && dungeonOpen && session ? (
             <DungeonPanel
               sessionID={session.id}
               partyCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
               onClose={() => setDungeonOpen(false)}
+            />
+          ) : null}
+          {/* 副本异步分段（玩家可达；逐段可中断、关键节点暂停问玩家；后端 QUNXIANG_DUNGEON 关时面板提示未启用）。*/}
+          {showHUD && dungeonSegmentOpen && session ? (
+            <DungeonSegmentPanel
+              sessionID={session.id}
+              partyCandidates={controlledUnits.map((unit) => ({ id: unit.id, name: unit.identity.name }))}
+              api={{ startDungeonAsync, runDungeonSegment, resumeDungeonSegment }}
+              onClose={() => setDungeonSegmentOpen(false)}
             />
           ) : null}
           {/* 商业化 / 合规浮层（玩家可见，复用顶部入口触发）。*/}

@@ -1128,6 +1128,240 @@ export function emitClientAnalytics(name: string, props?: Record<string, unknown
     .catch(() => undefined);
 }
 
+// ============ 副本异步分段推进（设计 PvE威胁系统.md §3-5；DungeonSegmentPanel 注入消费） ============
+// 与同步 runDungeon 并列：把副本切成「逐段可中断、关键节点暂停问玩家」的异步流。后端 flag QUNXIANG_DUNGEON
+// 关时返回 409 ErrDungeonDisabled（APIError.status=409、message 含「未启用」），面板据此识别。
+// 注意 /run /resume 返回的 Go 结构体 DungeonSegmentResult 无 json tag → 键名为大写字段名（SegmentID/NextAction/Floor/...）。
+
+// DungeonSegmentNextAction 与后端 session.DungeonNextAction 枚举对齐。
+export type DungeonSegmentNextAction =
+  | "continue_next_floor"
+  | "pause_first_contact"
+  | "pause_player_decision"
+  | "completed_cleared"
+  | "completed_fled"
+  | "completed_wiped";
+
+// DungeonSegmentResult 对齐后端 session.DungeonSegmentResult（无 json tag → 大写键名）。
+export type DungeonSegmentResult = {
+  SegmentID: string;
+  NextAction: DungeonSegmentNextAction;
+  Floor: number;
+  PauseCard: string;
+  Outcome: string;
+};
+
+// DungeonSegmentStartResult 是 start 端点返回的首段标识（有 json tag → 小写键名）。
+export type DungeonSegmentStartResult = {
+  segment_id: string;
+  floors: number;
+  floor: number;
+  state: string;
+};
+
+// startDungeonAsync 创建一次副本异步推进的首段（不立即推进任何战斗）。flag 关时 409。
+export async function startDungeonAsync(
+  sessionID: string,
+  unitIDs: string[],
+  floors: number,
+): Promise<DungeonSegmentStartResult> {
+  const data = await request<{ segment?: DungeonSegmentStartResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/dungeon/segments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unit_ids: unitIDs, floors }),
+    },
+  );
+  return data.segment ?? { segment_id: "", floors: 0, floor: 0, state: "" };
+}
+
+// runDungeonSegment 推进当前段一层（不暂停则跑到下一关键节点/终局）。
+export async function runDungeonSegment(
+  sessionID: string,
+  segmentID: string,
+): Promise<DungeonSegmentResult> {
+  const data = await request<{ result?: DungeonSegmentResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/dungeon/segments/${encodeURIComponent(segmentID)}/run`,
+    { method: "POST" },
+  );
+  return (
+    data.result ?? { SegmentID: segmentID, NextAction: "completed_fled", Floor: 0, PauseCard: "", Outcome: "fled" }
+  );
+}
+
+// resumeDungeonSegment 玩家回来据选择续跑/见好就收（choice: continue|retreat）。
+export async function resumeDungeonSegment(
+  sessionID: string,
+  segmentID: string,
+  choice: "continue" | "retreat",
+): Promise<DungeonSegmentResult> {
+  const data = await request<{ result?: DungeonSegmentResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/dungeon/segments/${encodeURIComponent(segmentID)}/resume`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ choice }),
+    },
+  );
+  return (
+    data.result ?? { SegmentID: segmentID, NextAction: "completed_fled", Floor: 0, PauseCard: "", Outcome: "fled" }
+  );
+}
+
+// ============ Live-Ops 运营端点（GM 注入 / 赛季 / 零和审计），全部 X-Ops-Token（LiveOpsPanel 注入消费） ============
+
+// GmWorldEventInput / GmWorldEventResult 对齐后端 liveops.GMEvent / GMEventResult。
+export type GmWorldEventInput = {
+  kind: string;
+  importance: number;
+  actorId?: string;
+  targetId?: string;
+  regionId?: string;
+  payload?: Record<string, unknown>;
+};
+export type GmWorldEventResult = {
+  cross_event_id: string;
+  audit_id: string;
+  world_tick: number;
+};
+
+// LiveopsCreateSeasonInput / LiveopsSeason / LiveopsFinalizeResult 对齐后端 liveops.CreateSeasonInput / Season / FinalizeResult。
+export type LiveopsCreateSeasonInput = {
+  name: string;
+  world_name?: string;
+  content_theme_id?: string;
+  max_population?: number;
+  region_seed?: string;
+};
+export type LiveopsSeason = {
+  id: string;
+  world_id: string;
+  name: string;
+  status: string;
+  started_at: string;
+  ends_at: string;
+  content_theme_id: string;
+  created_at: string;
+};
+export type LiveopsFinalizeResult = {
+  season_id: string;
+  world_id: string;
+  members_total: number;
+  archived: number;
+  archive_errors: string[];
+  sealed: boolean;
+};
+
+// LiveopsGroupStat / LiveopsArbitrationAuditReport 对齐后端 liveops.GroupStat / ArbitrationAuditReport。
+export type LiveopsGroupStat = { wins: number; losses: number; total: number; win_rate: number };
+export type LiveopsArbitrationAuditReport = {
+  world_id: string;
+  turn_start: number;
+  turn_end: number;
+  paid: LiveopsGroupStat;
+  non_paid: LiveopsGroupStat;
+  issue_detected: boolean;
+  redline_rate: number;
+  sample_sufficient: boolean;
+  note: string;
+};
+
+// injectWorldEvent 往某活世界注入一条 GM 世界事件（append-only、全量留审计）。运营态 X-Ops-Token。
+export async function injectWorldEvent(
+  worldID: string,
+  input: GmWorldEventInput,
+): Promise<GmWorldEventResult> {
+  const data = await request<{ result?: GmWorldEventResult }>(
+    `/api/ops/worlds/${encodeURIComponent(worldID)}/events`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: input.kind,
+        importance: input.importance,
+        actor_id: input.actorId,
+        target_id: input.targetId,
+        region_id: input.regionId,
+        payload: input.payload,
+      }),
+    },
+    { withOps: true },
+  );
+  return data.result ?? { cross_event_id: "", audit_id: "", world_tick: 0 };
+}
+
+// createSeason 创建一个赛季（建世界 + 落 seasons）。运营态 X-Ops-Token。
+export async function createSeason(input: LiveopsCreateSeasonInput): Promise<LiveopsSeason> {
+  const data = await request<{ season?: LiveopsSeason }>(
+    `/api/ops/seasons`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    { withOps: true },
+  );
+  return (
+    data.season ?? {
+      id: "",
+      world_id: "",
+      name: "",
+      status: "",
+      started_at: "",
+      ends_at: "",
+      content_theme_id: "",
+      created_at: "",
+    }
+  );
+}
+
+// finalizeSeason 收尾一个赛季（存活角色回流名人堂 + 世界封存）。运营态 X-Ops-Token。
+export async function finalizeSeason(seasonID: string): Promise<LiveopsFinalizeResult> {
+  const data = await request<{ result?: LiveopsFinalizeResult }>(
+    `/api/ops/seasons/${encodeURIComponent(seasonID)}/finalize`,
+    { method: "POST" },
+    { withOps: true },
+  );
+  return (
+    data.result ?? {
+      season_id: seasonID,
+      world_id: "",
+      members_total: 0,
+      archived: 0,
+      archive_errors: [],
+      sealed: false,
+    }
+  );
+}
+
+// fetchArbitrationAudit 扫某世界某回合区间的仲裁结局，按付费态分组算胜率、判 P2W 红线。运营态 X-Ops-Token。
+export async function fetchArbitrationAudit(
+  worldID: string,
+  turnStart: number,
+  turnEnd: number,
+): Promise<LiveopsArbitrationAuditReport> {
+  const params = new URLSearchParams({ turn_start: String(turnStart), turn_end: String(turnEnd) });
+  const data = await request<{ report?: LiveopsArbitrationAuditReport }>(
+    `/api/ops/worlds/${encodeURIComponent(worldID)}/arbitration-audit?${params.toString()}`,
+    undefined,
+    { withOps: true },
+  );
+  return (
+    data.report ?? {
+      world_id: worldID,
+      turn_start: turnStart,
+      turn_end: turnEnd,
+      paid: { wins: 0, losses: 0, total: 0, win_rate: 0 },
+      non_paid: { wins: 0, losses: 0, total: 0, win_rate: 0 },
+      issue_detected: false,
+      redline_rate: 0.6,
+      sample_sufficient: false,
+      note: "",
+    }
+  );
+}
+
 const visitorIDStorageKey = "qunxiang.visitor.id.v1";
 
 // anonymousVisitorID 读取（或惰性生成并持久化）匿名访客 ID，用于漏斗去重统计。

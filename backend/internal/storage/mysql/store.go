@@ -97,6 +97,22 @@ func Open(dsn string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 设计闭环新增表（副本异步分段 / Live-Ops 赛季 / GM 审计）：存量旧库幂等补建。
+	for _, t := range dbmigrate.DesignClosureTables {
+		if err := dbmigrate.EnsureTable(ctx, db, t.SQLite, t.MySQL); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	// 评审修复补列：dungeon_segments.entered_turn（L1 续跑确定性）、gm_events_audit.world_tick（L3 审计排序）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "dungeon_segments", dbmigrate.DungeonSegmentEnteredTurnColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := dbmigrate.EnsureColumns(ctx, db, "gm_events_audit", dbmigrate.GmEventsAuditTickColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 

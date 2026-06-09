@@ -80,8 +80,17 @@ func (service *Service) reassessGoalIfDue(ctx context.Context, state *State, rec
 		return err
 	}
 	appendLog(state, "goal_reassess", fmt.Sprintf("%s 重估了短期目标：%s", record.DisplayName(), goal), record.ID, "")
+
+	// 锚自动 upsert（设计 耦合 §1.3）：目标重估落地即把「她当前最惦记的目标」做成 goal 锚，喂 relevance.Score——
+	// 让世界事件能聚焦到「她在乎的目标」。best-effort：吞错只记日志，绝不阻断目标重估主链路。ref 走默认 goal:<id> 幂等覆盖。
+	if anchorErr := service.UpsertGoalAnchor(ctx, state.ID, record.ID, "", goalAnchorWeight, goal); anchorErr != nil {
+		appendLog(state, "goal_anchor_failed", fmt.Sprintf("%s 的目标锚落定失败：%v", record.DisplayName(), anchorErr), record.ID, "")
+	}
 	return nil
 }
+
+// goalAnchorWeight 是目标锚的默认权重（满权——「当前目标」是她心上最重的一根弦之一）。
+const goalAnchorWeight = 1.0
 
 // generateGoalReassessment 跑 LLM 产短期目标；LLM 不可用 / 预算护栏 / 账户超额 / 解析失败时回落规则 fallback。
 // 返回目标文本与一条 LLMInteraction（供 appendLLMInteractionWithSpend 记账；fallback 路径也带，便于遥测）。
@@ -129,7 +138,9 @@ func (service *Service) generateGoalReassessment(ctx context.Context, state Stat
 	return goal, buildLLMInteraction(state, record.ID, "goal_reassess", goal, systemPrompt, userPrompt, result, "")
 }
 
-// buildGoalReassessPrompt 拼装目标重估的用户提示词：人格 + 主导野心 + 近期记忆 + 旧目标线索。
+// buildGoalReassessPrompt 拼装目标重估的用户提示词：人格 + 主导野心 + 长期目标 + 出身夙愿 + 近期记忆。
+// §4.3/§5.1：玩家为她立下的离线宪章长期目标（LongTermGoals）作为**显式长远约束**拼入「长期目标」一节，
+// 让 LLM 重估短期目标时朝长远图景对齐（短期重估服务于长期目标，而非各自为政）。无宪章/无长期目标时该节优雅缺省。
 func buildGoalReassessPrompt(state State, record unit.Record, turn int) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "单位: %s（当前 T%d）\n", record.DisplayName(), turn)
@@ -141,6 +152,11 @@ func buildGoalReassessPrompt(state State, record unit.Record, turn int) string {
 	} else {
 		fmt.Fprintln(&builder, "内心没有特别强烈的野心，更随遇而安。")
 	}
+	// 长期目标（离线宪章 LongTermGoals）：玩家立下的长效图景，重估短期目标时须朝它对齐（§4.3/§5.1）。
+	if goals := charterLongTermGoals(&state, record.ID); len(goals) > 0 {
+		fmt.Fprintf(&builder, "长期目标（玩家为你立下的长效图景，重估短期目标时应朝它对齐）: %s\n",
+			strings.Join(goals, "；"))
+	}
 	if goal := strings.TrimSpace(record.Identity.Biography); goal != "" {
 		fmt.Fprintf(&builder, "出身与夙愿: %s\n", limitTextRunes(goal, 120))
 	}
@@ -150,8 +166,18 @@ func buildGoalReassessPrompt(state State, record unit.Record, turn int) string {
 		fmt.Fprintf(&builder, "近况记忆:\n%s\n", mem)
 	}
 
-	fmt.Fprintf(&builder, "请返回 JSON：goal。要求：1）第一人称；2）不超过%d字；3）具体可落地（如「先囤够三个月的粮再说」而非「变强」）；4）贴合她的性格、野心与近况，不要喊空泛口号。", goalReassessMaxRunes)
+	fmt.Fprintf(&builder, "请返回 JSON：goal。要求：1）第一人称；2）不超过%d字；3）具体可落地（如「先囤够三个月的粮再说」而非「变强」）；4）贴合她的性格、野心、长期目标与近况，不要喊空泛口号。", goalReassessMaxRunes)
 	return builder.String()
+}
+
+// charterLongTermGoals 取某单位离线宪章里的长期目标（去空白条目）；无宪章/无目标/state 为 nil 时返回 nil。
+// 纯逻辑、确定性、无 DB：与 charterContextForUnit 同源（GetUnitCharter + trimNonEmpty），仅取 LongTermGoals 一段。
+func charterLongTermGoals(state *State, unitID string) []string {
+	charter, ok := GetUnitCharter(state, unitID)
+	if !ok {
+		return nil
+	}
+	return trimNonEmpty(charter.LongTermGoals)
 }
 
 // fallbackGoalReassessment 规则兜底：LLM 不可用时按主导野心选模板目标，确定性（同输入同输出），保证主循环不中断。

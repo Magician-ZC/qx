@@ -241,6 +241,20 @@ func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bos
 	awards := encounter.AllocateLoot(key, loot, participants, fieldBossMinMeaningful)
 	result.Awards = awards
 
+	// H2：唯一遗物(world_boss_relic)经 arbitration 决出归属后，给胜/败方各留可审计零和争夺事件（CROSS_CONTEST_WIN/LOSE）。
+	// Scope.WorldID=worldID、Scope.Tick=当前世界时钟（否则被审计 world_id/tick 过滤掉）。仅 ≥2 争夺者时发；反 P2W 只记 score。
+	if result.Participants >= 2 {
+		tick := 0
+		if w, err := world.Get(ctx, service.db, worldID); err == nil {
+			tick = w.Tick
+		}
+		scoreByUnit := make(map[string]float64, len(participants))
+		for _, p := range participants {
+			scoreByUnit[p.UnitID] = p.Score
+		}
+		service.recordExclusiveContestOutcomes(ctx, "", worldID, tick, awards, scoreByUnit)
+	}
+
 	// 货币落本库真实存在的参战角色钱包（跨分片角色只记账、不在本库发放）。
 	goldByUnit := map[string]int{}
 	for _, a := range awards {
@@ -316,7 +330,13 @@ func worldBossNameHash(worldID, salt string) uint64 {
 //   - flag QUNXIANG_WORLD_BOSS_AUTO 默认关 → 直接 return（这是会改变世界状态的自治生成，保守默认、可灰度）。
 //   - worldID 为空（未接入共享世界）→ 直接 return：世界Boss是跨玩家共享机制，单局无意义。
 //   - 该 world 已有 status='active' 的世界Boss → return（不重复刷，单世界同时至多一头自治 Boss）。
-//   - 否则确定性生成一头：名按 FNV(worldID) 取名表、血按 FNV(worldID) 取梯度、regionID 空（全世界共享、不绑区域），调 SpawnWorldBoss。
+//   - 否则确定性生成一头：名按 FNV(worldID) 取名表、血按 FNV(worldID) 取梯度、regionID 空（全世界共享、不绑区域）。
+//
+// 并发正确性（修审计§8 已知低危 TOCTOU 竞态）：早先实现是「COUNT active → 无则 SpawnWorldBoss INSERT」两步，
+// COUNT 与 INSERT 间存在 TOCTOU 窗口——高并发多请求都见 0 → 都 INSERT → 生成多头 Boss（违反单世界至多一头）。
+// 现改为**单条原子 INSERT ... SELECT ... WHERE NOT EXISTS**：是否已有 active 的判定与插入在 DB 一条语句内原子完成，
+// 任何瞬间至多一头 active 自治 Boss。RowsAffected==0 表示已有 active（被 WHERE NOT EXISTS 挡下）→ 正常兜底 return nil；
+// ==1 表示本请求成功插入。手动投放路径 SpawnWorldBoss 不变（手动单次无竞态）。
 //
 // best-effort：任一步出错只返回该错（由调用方在边界吞错记日志），绝不中断回合推进。
 func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID string) error {
@@ -326,22 +346,54 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 	if worldID == "" || !worldBossAutoEnabled() {
 		return nil
 	}
-
-	// 是否已有 active Boss：COUNT status='active'（不读全行，避免方言 RETURNING/锁差异）。>0 即不再刷，保持单世界至多一头自治 Boss。
-	var active int
-	if err := service.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM world_bosses WHERE world_id = ? AND status = 'active'`, worldID).Scan(&active); err != nil {
-		return fmt.Errorf("count active world bosses: %w", err)
-	}
-	if active > 0 {
-		return nil
-	}
-
-	// 无 active Boss → 确定性生成一头。名/血都由 FNV(worldID) 派生：同一世界稳定可复现，不同世界各异，不用全局 rand。
-	name := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
-	hp := autoWorldBossHPTiers[worldBossNameHash(worldID, "hp")%uint64(len(autoWorldBossHPTiers))]
-	if _, err := service.SpawnWorldBoss(ctx, worldID, name, hp, ""); err != nil {
+	// 世界必须已存在：与 SpawnWorldBoss 同口径——否则首次出手 AdvanceTick 才报错，那时血已被改、状态已脏（finding robustness）。
+	if _, err := world.Get(ctx, service.db, worldID); err != nil {
 		return fmt.Errorf("auto spawn world boss: %w", err)
 	}
+
+	// 名/血都由 FNV(worldID) 派生：同一世界稳定可复现，不同世界各异，不用全局 rand。
+	name := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
+	hp := autoWorldBossHPTiers[worldBossNameHash(worldID, "hp")%uint64(len(autoWorldBossHPTiers))]
+	id := "wboss_" + uuid.NewString()
+
+	// 原子条件 INSERT：仅当该 world 当前**无** active Boss 时才插入；判定与插入在一条 SQL 内原子完成，杜绝 COUNT→INSERT 的 TOCTOU。
+	// created_at 沿用列默认值（与 SpawnWorldBoss 一致）：SQLite 用 CURRENT_TIMESTAMP、MySQL 用空串默认，不在此列显式赋值。
+	var query string
+	if dbdialect.IsMySQL(service.db) {
+		// MySQL 不允许 INSERT ... SELECT 直接省略 FROM，需 FROM DUAL 才能挂 WHERE NOT EXISTS。
+		query = `
+			INSERT INTO world_bosses (id, world_id, name, hp_max, hp_remaining, status, region_id)
+			SELECT ?, ?, ?, ?, ?, 'active', ''
+			FROM DUAL
+			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND status = 'active')`
+	} else {
+		query = `
+			INSERT INTO world_bosses (id, world_id, name, hp_max, hp_remaining, status, region_id)
+			SELECT ?, ?, ?, ?, ?, 'active', ''
+			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND status = 'active')`
+	}
+	if _, err := service.db.ExecContext(ctx, query, id, worldID, name, hp, hp, worldID); err != nil {
+		// L4 唯一兜底：WHERE NOT EXISTS 是主护栏，partial unique index uq_world_boss_active 是硬兜底。
+		// 两个并发 INSERT 的 NOT EXISTS 子查询可能都见 0（彼此尚未提交）→ 都尝试插入 → 后者触发 UNIQUE 约束冲突。
+		// 这等价于「已有 active Boss」——视为正常兜底（类 INSERT IGNORE 语义），返回 nil、不外抛、不中断回合推进。
+		// MySQL 的 gap-lock 理论竞态属 documented residual（flag 默认关）。
+		if isDupKeyErr(err) {
+			return nil
+		}
+		return fmt.Errorf("auto spawn world boss: %w", err)
+	}
+	// 无论 RowsAffected 为 0（WHERE NOT EXISTS 挡下：已有 active Boss——手动投放或另一并发请求刚插入，正常兜底）
+	// 还是 1（本请求成功插入一头自治 Boss），都满足「单世界至多一头 active」不变量，皆为正常结果。
 	return nil
+}
+
+// isDupKeyErr 判断一个 DB 错误是否为唯一约束冲突（partial unique index uq_world_boss_active 触发）。
+// SQLite 报 "UNIQUE constraint failed"、MySQL 报 "Duplicate entry ... for key"——大小写不敏感按错误串匹配
+// （跨方言无统一错误码，串匹配是 modernc/驱动无关的稳妥判法）。命中即视为「已有 active Boss」正常兜底。
+func isDupKeyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") || strings.Contains(msg, "constraint") || strings.Contains(msg, "duplicate")
 }

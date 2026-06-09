@@ -8,6 +8,7 @@ package session
 import (
 	"context"
 
+	"qunxiang/backend/internal/analytics"
 	"qunxiang/backend/internal/engine/attachment"
 	"qunxiang/backend/internal/engine/events"
 )
@@ -29,14 +30,18 @@ func (service *Service) ComputeAttachment(ctx context.Context, actorID string, l
 
 // returnVisitsForActor best-effort 查询「玩家专程回来看这个角色」的次数（牵挂的回访维度，不可付费）。
 //
-// 现状：return_visit 漏斗事件仅按匿名访客 vid 落在 fake_door_leads（见 httpapi/leads.go），未按 actor/玩家维度聚合，
-// 故此处暂无可信的「按角色回访」数据源 → 返回 attachment.DefaultReturnVisits（0），该维度恒不贡献、保守退化。
-// 一旦 return_visit 埋点带上 actor/session 维度（建议落 events 表的专属 reason_code 或 leads.payload_json.actor_id），
-// 本函数改为对该维度做 COUNT 即可让回访真正参与牵挂——调用方与 attachment 包签名都无需再改（已对齐 ComputeWithSignals）。
+// 已接通：return_visit 埋点现由 analytics.EmitReturnVisit 带上 actor 维度（unit_id + properties_json.actor_id）落 product_events，
+// 这里对该角色做真 COUNT（analytics.ReturnVisitsByActor）——这修了「牵挂四维之一回访恒 0 导致系统性偏低」的缺陷。
+// best-effort：db 缺失 / 查询失败 → 退回 attachment.DefaultReturnVisits（0），该维度退化为无贡献，绝不抬高牵挂、绝不阻断。
 func (service *Service) returnVisitsForActor(ctx context.Context, actorID string) int {
-	_ = ctx
-	_ = actorID
-	return attachment.DefaultReturnVisits
+	if service == nil || service.db == nil || actorID == "" {
+		return attachment.DefaultReturnVisits
+	}
+	n, err := analytics.ReturnVisitsByActor(ctx, service.db, actorID)
+	if err != nil || n < 0 {
+		return attachment.DefaultReturnVisits
+	}
+	return n
 }
 
 // defeatMoraleHitForLayer 把后果分级层映射为士气挫伤幅度：层越高代价越重（层3 只可能落在深牵挂+陪伴久的角色上）。

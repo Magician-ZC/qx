@@ -81,14 +81,14 @@ func FunnelCounts(ctx context.Context, q Querier, sinceDays int) (FunnelReport, 
 // NorthStarReport 是北极星指标的窗口聚合（只读）。
 type NorthStarReport struct {
 	SinceDays         int     `json:"since_days"`
-	SessionsCreated   int     `json:"sessions_created"`    // session_created
-	CharactersCreated int     `json:"characters_created"`  // character_created
-	DecisionPending   int     `json:"decision_pending"`    // decision_pending（命运待决）
-	DecisionResolved  int     `json:"decision_resolved"`   // decision_resolved（已处理）
-	InboxProcessRate  float64 `json:"inbox_process_rate"`  // resolved/pending；分母 0 -> 0
-	ShareInitiated    int     `json:"share_initiated"`     // share_initiated（转介）
-	Purchases         int     `json:"purchases"`           // purchase（营收）
-	ReturnVisits      int     `json:"return_visits"`       // return_visit（留存）
+	SessionsCreated   int     `json:"sessions_created"`   // session_created
+	CharactersCreated int     `json:"characters_created"` // character_created
+	DecisionPending   int     `json:"decision_pending"`   // decision_pending（命运待决）
+	DecisionResolved  int     `json:"decision_resolved"`  // decision_resolved（已处理）
+	InboxProcessRate  float64 `json:"inbox_process_rate"` // resolved/pending；分母 0 -> 0
+	ShareInitiated    int     `json:"share_initiated"`    // share_initiated（转介）
+	Purchases         int     `json:"purchases"`          // purchase（营收）
+	ReturnVisits      int     `json:"return_visits"`      // return_visit（留存）
 	// GDD §8 核心乐趣度量（命运高光卡三键反馈）。
 	FateReactExpected int     `json:"fate_react_expected"` // 意料之中
 	FateReactSurprise int     `json:"fate_react_surprise"` // 有点意外但合理 = 命中惊喜
@@ -138,6 +138,114 @@ func NorthStar(ctx context.Context, q Querier, sinceDays int) (NorthStarReport, 
 		report.OocRate = float64(report.FateReactOoc) / float64(total)
 	}
 	return report, nil
+}
+
+// NorthStarBySeason 与 NorthStar 同口径，但额外按赛季维度切片：只计 properties_json 含 "season_id":"<seasonID>" 的埋点。
+// seasonID 为空时退化为全量（等价 NorthStar）。赛季维度无独立列（schema 稳定），由 Emit 注入 properties_json 顶层，
+// 这里用方言安全的 LIKE 文本片段过滤（json.Marshal map 键有序，"season_id":"X" 文本稳定可匹配）。
+func NorthStarBySeason(ctx context.Context, q Querier, seasonID string, sinceDays int) (NorthStarReport, error) {
+	report := NorthStarReport{
+		SinceDays:   sinceDays,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if q == nil {
+		return report, fmt.Errorf("analytics north_star by season: nil querier")
+	}
+	cutoff := cutoffFor(sinceDays, time.Now())
+	// 赛季 LIKE 片段：匹配 json.Marshal 产出的紧凑文本 "season_id":"<id>"（无空格，键有序）。
+	seasonLike := ""
+	if seasonID != "" {
+		seasonLike = `%"season_id":"` + seasonID + `"%`
+	}
+
+	counts := map[string]int{}
+	if err := scanCountsScoped(ctx, q, cutoff, seasonLike, counts); err != nil {
+		return report, fmt.Errorf("analytics north_star by season counts: %w", err)
+	}
+	report.SessionsCreated = counts[EventSessionCreated]
+	report.CharactersCreated = counts[EventCharacterCreated]
+	report.DecisionPending = counts[EventDecisionPending]
+	report.DecisionResolved = counts[EventDecisionResolved]
+	report.ShareInitiated = counts[EventShareInitiated]
+	report.Purchases = counts[EventPurchase]
+	report.ReturnVisits = counts[EventReturnVisit]
+	report.FateReactExpected = counts[EventFateReactExpected]
+	report.FateReactSurprise = counts[EventFateReactSurprise]
+	report.FateReactOoc = counts[EventFateReactOoc]
+	if report.DecisionPending > 0 {
+		report.InboxProcessRate = float64(report.DecisionResolved) / float64(report.DecisionPending)
+	}
+	if total := report.FateReactExpected + report.FateReactSurprise + report.FateReactOoc; total > 0 {
+		report.SurpriseHitRate = float64(report.FateReactSurprise) / float64(total)
+		report.OocRate = float64(report.FateReactOoc) / float64(total)
+	}
+	return report, nil
+}
+
+// scanCountsScoped 执行按 event_name 的计数，支持可选的 occurred_at 窗口与 properties_json LIKE（赛季）双过滤。
+// cutoff/seasonLike 任一为空即省略对应子句；? 占位双驱动通用（SQLite/MySQL）。
+func scanCountsScoped(ctx context.Context, q Querier, cutoff, seasonLike string, dst map[string]int) error {
+	where := ""
+	var args []any
+	if cutoff != "" {
+		where += " WHERE occurred_at > ?"
+		args = append(args, cutoff)
+	}
+	if seasonLike != "" {
+		if where == "" {
+			where += " WHERE properties_json LIKE ?"
+		} else {
+			where += " AND properties_json LIKE ?"
+		}
+		args = append(args, seasonLike)
+	}
+	rows, err := q.QueryContext(ctx, `SELECT event_name, COUNT(*) FROM product_events`+where+` GROUP BY event_name`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key sql.NullString
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return err
+		}
+		k := key.String
+		if !key.Valid || k == "" {
+			k = "unknown"
+		}
+		dst[k] += n
+	}
+	return rows.Err()
+}
+
+// ReturnVisitsByActor 读某角色的回访次数（return_visit 埋点，按 actor 维度）。
+// 这是 attachment 牵挂「回访」维度的读端：session.returnVisitsForActor 调它把真实回访喂进牵挂（替换旧的硬编码 0）。
+// 优先用 unit_id 列匹配（EmitReturnVisit 已把 actorID 同时写进 unit_id 与 properties_json.actor_id），
+// 兼容老埋点再用 properties_json LIKE 兜底——两路 OR，避免漏计。actorID 空 → 返回 0。
+func ReturnVisitsByActor(ctx context.Context, q Querier, actorID string) (int, error) {
+	if q == nil {
+		return 0, fmt.Errorf("analytics return visits: nil querier")
+	}
+	if actorID == "" {
+		return 0, nil
+	}
+	actorLike := `%"actor_id":"` + actorID + `"%`
+	row, err := q.QueryContext(ctx, `
+		SELECT COUNT(*) FROM product_events
+		WHERE event_name = ? AND (unit_id = ? OR properties_json LIKE ?)`,
+		EventReturnVisit, actorID, actorLike)
+	if err != nil {
+		return 0, fmt.Errorf("analytics return visits by actor: %w", err)
+	}
+	defer row.Close()
+	var n int
+	if row.Next() {
+		if err := row.Scan(&n); err != nil {
+			return 0, err
+		}
+	}
+	return n, row.Err()
 }
 
 // scanCounts 执行「SELECT key, COUNT(*) ... [WHERE occurred_at > cutoff] GROUP BY key」并把结果累加进 dst。

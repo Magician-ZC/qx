@@ -27,6 +27,7 @@ import (
 
 	"qunxiang/backend/internal/agentqueue"
 	"qunxiang/backend/internal/engine/decision"
+	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/engine/scheduler"
 	"qunxiang/backend/internal/unit"
 )
@@ -48,6 +49,13 @@ const (
 	// per-region 最近命中 tick 生效；refractory 窗口外或冷启动（无最近命中记录）→ 衰减因子=1（与无 freshness 等价）。
 	threatFreshnessWindowTicks = 8   // refractory 窗口（tick）：上次命中后多少 tick 内仍施加衰减
 	threatFreshnessMinPerMille = 100 // 紧贴上次命中（Δtick=0）时保留的「base+anchor 概率」千分比下限（=10%，即压到 1/10）；窗口内线性回升到 1000(=100%)
+
+	// NPC 锚加权预算（设计 §1.5：从源头不产噪音）。世界事件预算按「该 NPC 的玩家锚密度」加权：
+	//   baseWeight = anchorBudgetFloor + (1-anchorBudgetFloor)·anchorDensity ∈ [floor,1]
+	// 一个 NPC 被越多角色当作锚指向（density→1）→ baseWeight→1，威胁/事件聚焦她在乎的人和地方；
+	// 零锚 NPC（density=0）→ baseWeight=floor，事件被压到地板（噪声世界自消化，但破圈下限仍保留=世界处处有危险）。
+	// anchorBudgetFloor=0.25 即设计宪法「0.25 + 0.75·密度」的地板项；纯密度驱动、付费无关、确定性。
+	anchorBudgetFloorPerMille = 250 // 锚加权预算地板(‰)：零锚 NPC 仍保 25% 事件预算（与破圈下限协同，世界不全扎堆活跃区）
 )
 
 // SetThreatHandler 注入「真遭遇结算」回调（main 注入 session.TriggerEliteEncounter 包装）。
@@ -131,6 +139,50 @@ func spawnPerMilleAtLevel(base int64, anchorDensity float64, freshnessPerMille i
 // 与本切片前**逐结果等价**（保证既有 elite 触发链 + 既有测试零行为变化）。新路径见 maybeEncounterThreat 内的 spawnPerMilleAtLevel。
 func threatSpawnPerMille(anchorDensity float64) int {
 	return spawnPerMilleAtLevel(threatBaseLevel, anchorDensity, 1000)
+}
+
+// anchorWeightedBudgetPerMille 把某 NPC 的锚密度算成「有意义事件预算」千分比 ∈ [anchorBudgetFloorPerMille,1000]
+// （设计 §1.5：baseWeight = 0.25 + 0.75·density）。语义：一个 NPC 被越多角色当作锚指向（density→1）→ 预算→1000，
+// 重大事件越该聚焦到她在乎的人和地方；零锚 NPC（density=0）→ 预算=地板(250‰)，事件被压低（噪声世界自消化）。
+// 纯密度驱动、付费无关、确定性、纯函数。density 越界自夹 [0,1]。
+func anchorWeightedBudgetPerMille(density float64) int {
+	if density < 0 {
+		density = 0
+	} else if density > 1 {
+		density = 1
+	}
+	span := 1000 - anchorBudgetFloorPerMille
+	return anchorBudgetFloorPerMille + int(float64(span)*density+0.5)
+}
+
+// isHighAnchorDensity 判定某 NPC 的锚密度是否「高」（被够多角色在乎，事件值得留 ReasonAnchorWeightedEvent 痕）。
+// 阈值取锚加权预算超过中点（density>0.5 → 预算>625‰）。纯函数、确定性。
+func isHighAnchorDensity(density float64) bool {
+	return density > 0.5
+}
+
+// emitAnchorWeightedEvent 在「事件确实聚焦到高锚 NPC」时写一条 ReasonAnchorWeightedEvent 流程事件留痕
+// （设计 §1.5「祸福偏要落在她最在意的人和地方」）。best-effort：db 缺失/写失败只记 Debug、绝不影响遭遇结算。
+func (r *Runner) emitAnchorWeightedEvent(ctx context.Context, sessionID, unitID, regionID string, density float64, tick int64) {
+	if r == nil || r.db == nil || unitID == "" {
+		return
+	}
+	if _, err := events.EmitProcessEvent(ctx, r.db, events.ProcessEvent{
+		SessionID:   sessionID,
+		OwnerUnitID: unitID,
+		RegionID:    regionID,
+		Tick:        int(tick),
+		Code:        events.ReasonAnchorWeightedEvent,
+		Category:    events.CategoryFate,
+		Payload: map[string]any{
+			"unit_id":         unitID,
+			"region_id":       regionID,
+			"anchor_density":  density,
+			"budget_permille": anchorWeightedBudgetPerMille(density),
+		},
+	}); err != nil {
+		r.log.Debug("region-runner emit anchor-weighted event", "unit", unitID, "error", err)
+	}
 }
 
 // regionThreatBaseLevel 读 region 注册表的真实 threat_level 累积值作为本区威胁度基线（替换硬编码 threatBaseLevel）。
@@ -262,16 +314,25 @@ func (r *Runner) maybeEncounterThreat(ctx context.Context, job *agentqueue.Decis
 	if draw >= threatMaxPerMille {
 		return false, scheduler.TierCold // 超过任何可能阈值 → 必不命中
 	}
+	// density 仅在「draw 落在可变阈值带」时才查（省 ~92% DB）；queried 标记是否已查，供命中后留痕复用、不重复查。
+	density := 0.0
+	queried := false
 	if draw >= threatFloorPerMille { // 破圈下限以上：按 region 威胁度+freshness+锚密度阈值判定（以下则必命中）
-		density := 0.0
 		if r.anchorDensity != nil {
 			density = r.anchorDensity(ctx, job.UnitID)
 		}
+		queried = true
 		if draw >= r.resolveSpawnThreshold(ctx, job.RegionID, density, tick) {
 			return false, scheduler.TierCold
 		}
 	}
 	atomic.AddInt64(&r.st.threatsRolled, 1)
+	// NPC 锚加权预算（§1.5）：命中的若是高锚 NPC，写 ReasonAnchorWeightedEvent 留痕「祸福偏要落在她最在意的人和地方」。
+	// **只在密度已查过时留痕**（queried，即 draw 落在可变阈值带）——不为留痕额外查 DB，保住「省 ~92% DB」不变量。
+	// 破圈命中（draw<floor，未查密度）天然是「零锚/低锚噪声」，本就不该被当作「聚焦到她在乎处」，跳过留痕正合语义。
+	if queried && isHighAnchorDensity(density) {
+		r.emitAnchorWeightedEvent(ctx, job.SessionID, job.UnitID, job.RegionID, density, tick)
+	}
 	// 威胁扎堆（§11.3）：命中威胁 → ① region.threat_level +1 累计（让威胁在高活跃区天然扎堆，下次刷新读到更高基线）；
 	// ② 记本区最近命中 tick（freshness 反扎堆：短期内压低同区再次触发，避免一窝蜂连刷）。两者一升一抑，长期扎堆+短期错峰。
 	// best-effort + flag-gated：分片关 / registry==nil / region 未登记时静默跳过，绝不影响遭遇结算。
