@@ -21,6 +21,8 @@ const (
 	BattlefieldSizeSmall  = "small"
 	BattlefieldSizeMedium = "medium"
 	BattlefieldSizeLarge  = "large"
+	// BattlefieldSizeWorld 是命运主世界的「世界级」大地图：远大于战棋战场，全屏铺开 + 拖拽探索她生活的天地。
+	BattlefieldSizeWorld = "world"
 )
 
 // BattlefieldSize 结构体用于承载战场尺寸选项。
@@ -36,6 +38,7 @@ var battlefieldSizeCatalog = []BattlefieldSize{
 	{ID: BattlefieldSizeSmall, DisplayName: "小", Width: 9, Height: 7, Summary: "短兵相接，横向展开更快。"},
 	{ID: BattlefieldSizeMedium, DisplayName: "中", Width: 13, Height: 9, Summary: "标准长方形战场，兼顾遭遇和迂回。"},
 	{ID: BattlefieldSizeLarge, DisplayName: "大", Width: 17, Height: 11, Summary: "横向空间更大，适合侦察、侧翼和消耗。"},
+	{ID: BattlefieldSizeWorld, DisplayName: "世界", Width: 24, Height: 16, Summary: "命运主世界大地图：全屏铺开、拖拽探索她生活的天地。"},
 }
 
 // BattlefieldSizes 返回可选战场尺寸目录。
@@ -48,7 +51,7 @@ func BattlefieldSizes() []BattlefieldSize {
 // NormalizeBattlefieldSizeID 规范化战场尺寸 ID，默认沿用旧版 7x7 小地图以保证兼容。
 func NormalizeBattlefieldSizeID(sizeID string) string {
 	switch sizeID {
-	case BattlefieldSizeSmall, BattlefieldSizeMedium, BattlefieldSizeLarge:
+	case BattlefieldSizeSmall, BattlefieldSizeMedium, BattlefieldSizeLarge, BattlefieldSizeWorld:
 		return sizeID
 	default:
 		return BattlefieldSizeSmall

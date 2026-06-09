@@ -273,6 +273,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	if err := liveopsSvc.SeedDefaultContentThemes(context.Background()); err != nil {
 		deps.Logger.Error("seed default content themes", "error", err)
 	}
+	// 开发/演示：QUNXIANG_SEED_DEMO 开时幂等播种 demo 账号 + 主世界角色（自动 20 人村庄），
+	// 登录 demo/demo1234 即可在全屏世界地图上看到主角 + 20 个村民。best-effort 不阻断启动。
+	if envFlag("QUNXIANG_SEED_DEMO") {
+		seedDemoCharacter(context.Background(), deps.Accounts, newSessionService, deps.Logger)
+	}
 
 	resolveCommanderFaction := func(c *gin.Context, sessionID string, fallbackFactionID string) (string, bool) {
 		sessionID = strings.TrimSpace(sessionID)

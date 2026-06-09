@@ -601,11 +601,72 @@
   height: 100%;
   min-height: 0;
 }
-@media (max-width: 900px) {
-  /* 窄屏：两栏 wrap 成上下，地图退到上方，给一个较矮的确定高度即可（不抢满屏）。 */
-  .fate-board-stage {
-    height: min(56vh, 520px);
-  }
+
+/* ── 全屏世界地图 + 命运 UI 浮层抽屉（play 相位主舞台）──
+   地图铺满整个视口作背景；命运卡/指引/立约/换号作浮在地图上的浮层（可拖拽 pan + 滚轮缩放）。 */
+.fate-play-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #0a1418;
+}
+/* 全屏态下地图舞台铺满整个固定容器（覆盖上面的 78vh；100vh 是确定高度，照样不触发 resizeTo 反馈循环）。 */
+.fate-play-fullscreen .fate-board-stage {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+/* 命运抽屉：右侧浮层（半透明宣纸卡，可滚动）；收起时移出视口右侧。 */
+.fate-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(440px, 94vw);
+  height: 100vh;
+  overflow-y: auto;
+  padding: 56px 16px 32px;
+  box-sizing: border-box;
+  background: rgba(245, 236, 220, 0.96);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: -10px 0 30px rgba(60, 44, 27, 0.24);
+  transform: translateX(100%);
+  transition: transform 0.28s ease;
+  z-index: 20;
+}
+.fate-drawer.fate-drawer-open {
+  transform: translateX(0);
+}
+/* 抽屉里的命运卡铺满抽屉宽（覆盖 .fate-root 的居中窄 max-width）。 */
+.fate-drawer .fate-root {
+  max-width: 100%;
+}
+/* 抽屉开关（右上角浮层，恒在抽屉之上）。 */
+.fate-drawer-toggle {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 21;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(140, 100, 50, 0.5);
+  background: rgba(250, 244, 232, 0.96);
+  color: #6b4a22;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(60, 44, 27, 0.2);
+}
+/* 全屏态下「换个账号」浮到左上角。 */
+.fate-play-fullscreen .fate-restart {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 21;
 }
 
 /* ── 窄屏响应式（≤480px）：避免固定控件与内容重叠、避免横向溢出 ──

@@ -91,37 +91,7 @@ const FACTIONS: { id: string; nameZH: string; creed: string }[] = [
   { id: "chaos", nameZH: "混乱", creed: "打破桎梏，快意恩仇。" },
 ];
 
-// ── play 双栏布局的内联样式（本文件不可改 fate.css，故内联，贴合 .fate-shell 墨色宣纸调）──
-// 宽屏：地图主舞台占左侧弹性区、命运卡固定宽右栏；窄屏：clamp 让右栏退到地图下方（flex-wrap）。
-// .fate-shell 默认 align-items:center + 子项窄 max-width，这里给一个更宽的外层把两栏铺开。
-const fatePlayShellStyle: React.CSSProperties = {
-  // 覆盖 .fate-shell 的居中窄列：play 态要把地图铺宽，故让外层吃满可用宽。
-  alignItems: "stretch",
-};
-const fatePlayLayoutStyle: React.CSSProperties = {
-  width: "100%",
-  maxWidth: 1600,
-  margin: "0 auto",
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 18,
-  alignItems: "flex-start",
-};
-const fatePlayStageStyle: React.CSSProperties = {
-  // 地图主舞台：弹性占据剩余空间，最小宽 360 保证窄屏仍可读；min-height 给 PixiBoard 的 resizeTo 一块可视面积。
-  flex: "1 1 480px",
-  minWidth: 320,
-  minHeight: 420,
-  display: "flex",
-  flexDirection: "column",
-};
-const fatePlaySideStyle: React.CSSProperties = {
-  // 命运卡旁白：固定弹性基准宽，窄屏整体退到地图下方占满整行。
-  flex: "1 1 380px",
-  minWidth: 300,
-  maxWidth: 560,
-};
-// 立约入口按钮的内联样式（本文件不可改 fate.css，故内联，贴合墨色宣纸调）：右栏顶部一条低调暖色描边按钮。
+// 立约入口按钮的内联样式（贴合墨色宣纸调）：抽屉顶部一条低调暖色描边按钮。
 const charterToggleBtnStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
@@ -146,6 +116,8 @@ export function FateApp() {
   const [error, setError] = useState("");
   // charterOpen：降生后玩家点「立约/改约」按钮，浮层式打开 CharterEditor（读/改/撤她的离线宪章）。
   const [charterOpen, setCharterOpen] = useState(false);
+  // drawerOpen：命运 UI 浮层抽屉是否展开（默认开，让玩家同时看到全屏地图 + 命运卡；可收起独看地图）。
+  const [drawerOpen, setDrawerOpen] = useState(true);
 
   // 捏人四要素 + 出身。
   const [name, setName] = useState("");
@@ -295,23 +267,32 @@ export function FateApp() {
   // 本文件不可改 fate.css，故两栏布局用内联样式（贴合 .fate-shell 墨色宣纸调）；地图自身轮询随她移动刷新。
   if (phase === "play" && saved) {
     return (
-      <div className="fate-shell" style={fatePlayShellStyle}>
-        <div style={fatePlayLayoutStyle}>
-          <div style={fatePlayStageStyle}>
-            <FateBoard sessionId={saved.sessionId} unitId={saved.unitId} />
-          </div>
-          <div style={fatePlaySideStyle}>
-            {/* 立约入口：降生后玩家可随时查看/改/撤她的结构化离线宪章（红线/长期目标/社交授权）。
-                点击浮层式打开 CharterEditor；与 FateView 旁白并列在右栏顶部。 */}
-            <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
-              ✦ 立约 · 看看你与她定下的约
-            </button>
-            <FateView sessionId={saved.sessionId} unitId={saved.unitId} />
-          </div>
-        </div>
+      <div className="fate-play-fullscreen">
+        {/* 全屏世界地图（主舞台）：她生活的天地——拖拽平移、滚轮缩放、观战她与身边二十余人。 */}
+        <FateBoard sessionId={saved.sessionId} unitId={saved.unitId} />
+
+        {/* 左上浮层：换个账号。 */}
         <button className="fate-restart" onClick={() => void signOut()}>
           换个账号登入
         </button>
+
+        {/* 右上浮层：命运抽屉开关（收起则独看全屏地图）。 */}
+        <button
+          className="fate-drawer-toggle"
+          onClick={() => setDrawerOpen((v) => !v)}
+          aria-expanded={drawerOpen}
+        >
+          {drawerOpen ? "收起命运 ›" : "‹ 展开命运"}
+        </button>
+
+        {/* 右侧浮层抽屉：命运卡旁白 + 指引 + 立约，叠在地图之上、可折叠。 */}
+        <aside className={`fate-drawer ${drawerOpen ? "fate-drawer-open" : ""}`} aria-hidden={!drawerOpen}>
+          {/* 立约入口：降生后玩家可随时查看/改/撤她的结构化离线宪章（红线/长期目标/社交授权）。 */}
+          <button style={charterToggleBtnStyle} onClick={() => setCharterOpen(true)}>
+            ✦ 立约 · 看看你与她定下的约
+          </button>
+          <FateView sessionId={saved.sessionId} unitId={saved.unitId} />
+        </aside>
 
         {/* 离线宪章编辑浮层：read=getCharter / save=putCharter / delete=deleteCharter（api.ts 现有）。
             单角色客户端只一名单位，故 units 传单元素；onClose 收起浮层。

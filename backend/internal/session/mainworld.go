@@ -159,7 +159,8 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	sessionID := uuid.NewString()
 	selectedMapScriptID := normalizeBattlefieldScriptID("", seed)
 	selectedMapScriptName := battlefieldScriptDisplayName(selectedMapScriptID)
-	selectedMapSize := battlefieldSizeByID(BattlefieldSizeSmall)
+	// 命运主世界用「世界级」大地图（24×16）：全屏铺开 + 拖拽探索，而非战棋小战场。
+	selectedMapSize := battlefieldSizeByID(BattlefieldSizeWorld)
 
 	state := State{
 		ID:                   sessionID,

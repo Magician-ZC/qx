@@ -234,6 +234,7 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
   let worldRenderKey = "";
   let cachedPlacement: BoardPlacement | null = null;
   let boardOffset = { x: 0, y: 0 };
+  let viewScale = 1; // 相机缩放（滚轮调，作用于 boardLayer.scale；与 boardOffset 的 position 组合成可拖可缩的相机）。
   let dragging = false;
   let didDrag = false;
   let dragStart = { x: 0, y: 0 };
@@ -355,6 +356,30 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
   };
   app.stage.on("pointerup", endDrag);
   app.stage.on("pointerupoutside", endDrag);
+
+  // 滚轮缩放（朝光标缩放）：缩放 boardLayer.scale 作相机变焦，与拖拽 pan 的 position 组合。clamp [0.4, 3]。
+  // 用 DOM canvas 的 wheel（passive:false 以 preventDefault 阻止页面滚动），缩放时保持光标下的世界点不动。
+  const canvasEl = app.view as HTMLCanvasElement;
+  const onWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    const rect = canvasEl.getBoundingClientRect();
+    const cx = event.clientX - rect.left;
+    const cy = event.clientY - rect.top;
+    const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const next = clamp(viewScale * factor, 0.4, 3);
+    if (next === viewScale) {
+      return;
+    }
+    const worldX = (cx - boardOffset.x) / viewScale;
+    const worldY = (cy - boardOffset.y) / viewScale;
+    viewScale = next;
+    boardOffset = { x: cx - worldX * viewScale, y: cy - worldY * viewScale };
+    boardLayer.scale.set(viewScale);
+    boardLayer.position.set(boardOffset.x, boardOffset.y);
+    renderFrame();
+  };
+  canvasEl.addEventListener("wheel", onWheel, { passive: false });
+
   renderScene();
   scheduleRenderScene();
   void ensureVisualAssets().then((assetVersion) => {
@@ -377,6 +402,7 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
         pendingRenderFrame = 0;
       }
       resizeObserver.disconnect();
+      canvasEl.removeEventListener("wheel", onWheel);
       app.stop();
       // terrainTextures / unitAvatarTextures 是全局资源缓存，不能在组件卸载时销毁底层纹理。
       // React StrictMode 在开发环境会挂载-卸载-再挂载一次；销毁共享纹理会导致后续 Pixi 场景复用已释放资源。
