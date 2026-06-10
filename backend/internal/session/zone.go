@@ -62,10 +62,16 @@ func reprojectCurrentZone(state *State) {
 }
 
 // zonePortalUnlocked 判定一条传送门当前是否已解锁可穿行（设计 §8.3「解锁制」）。
-// 阶段1：border（相邻区域边界）恒解锁；portal（城镇传送门）一律视为未解锁，待阶段3 任务系统的
-// UnlockZone 接入「玩家已解锁区域集合」后，把这里改为查解锁集即可平滑升级。
-func zonePortalUnlocked(portal world.ZonePortal) bool {
-	return portal.Kind != "portal"
+// 阶段3 任务解锁制（升级阶段2 的「portal 恒锁」）：
+//   - border（相邻区域边界）恒解锁——走到即过；
+//   - portal（城镇传送门）须目标区已在 state.UnlockedZones 集合里才解锁（由任务交付的 UnlockZone 落地）。
+//
+// state 为 nil（极端兜底）时退回阶段2 语义（portal 恒锁），保守不放开。
+func zonePortalUnlocked(state *State, portal world.ZonePortal) bool {
+	if portal.Kind != "portal" {
+		return true // border 恒通
+	}
+	return zoneUnlocked(state, portal.ToZoneID)
 }
 
 // zonePortalTo 在「当前区域」的传送门里找通往 toZoneID 的那条（用于 travel 可达性校验）。

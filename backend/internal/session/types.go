@@ -596,7 +596,16 @@ type State struct {
 	SeededZoneIDs []string `json:"seeded_zone_ids,omitempty"`
 	// DefeatedBosses 是「本世界周期内已被讨平的区域 id 集合」（阶段2 §3 防反复刷）。ChallengeZoneBoss 胜利后 append
 	// 对应 zoneID，已在集合内则拒绝再战。失败不入集合（可重试）。omitempty 保旧档兼容。
-	DefeatedBosses   []string          `json:"defeated_bosses,omitempty"`
+	DefeatedBosses []string `json:"defeated_bosses,omitempty"`
+	// ── 分区大世界阶段3 · 任务系统（设计 docs/分区大世界设计方案-2026-06-10.md §5）──
+	// 三者均 omitempty：旧档（阶段1/2 存档）反序列化为 nil/空，向后兼容、零影响。
+	// ActiveQuests 是主角进行中的任务（含目标进度，随 state_json 整块持久化）；接取上限见 maxActiveQuests。
+	ActiveQuests []Quest `json:"active_quests,omitempty"`
+	// CompletedQuestIDs 是已交付任务 id 集合（任务链前置判定 + 防重复接取/重复发奖）。
+	CompletedQuestIDs []string `json:"completed_quest_ids,omitempty"`
+	// UnlockedZones 是「已解锁可传送的目标区域 id 集合」（任务交付的 UnlockZone 落地于此）。
+	// zonePortalUnlocked 查它判 portal 类传送门是否已通——把阶段2「portal 恒锁」升级为「任务解锁制」。
+	UnlockedZones    []string          `json:"unlocked_zones,omitempty"`
 	CommandPower     CommandPowerState `json:"command_power"`
 	FactionRelations []FactionRelation `json:"faction_relations"`
 	PlayerUnitIDs    []string          `json:"player_unit_ids"`

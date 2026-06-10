@@ -86,6 +86,9 @@ func (service *Service) ChallengeZoneBoss(ctx context.Context, sessionID, unitID
 	// 这里 Save 的是 state（DefeatedBosses 集合 + 它内部 appendLog 的日志），与 travel 同口径用合并保存避免覆盖外部写。
 	if result.Outcome == "defeated" {
 		appendDefeatedBoss(&state, zone.ID)
+		// 任务进度 hook（阶段3 §5.3）：讨平本区 boss → 推进匹配的 defeat_boss objective（target=zoneId）。
+		// best-effort、纯逻辑（只改 state.ActiveQuests，随下方 saveSessionMergingExternalEvents 一并落库）。
+		advanceQuestObjectives(&state, ObjectiveDefeatBoss, zone.ID, 1)
 	}
 	if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
 		return result, fmt.Errorf("challenge zone boss (save session): %w", err)

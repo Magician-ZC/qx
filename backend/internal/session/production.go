@@ -1199,6 +1199,14 @@ func (service *Service) executeGather(
 	}
 
 	discarded := grantItems(actor, rewards)
+	// 任务进度 hook（阶段3 §5.3）：实际入袋的材料 → 推进匹配的 collect_item objective（target=itemId，按数量累计）。
+	// 只计真正落袋的（rewards 去掉 discarded 满包丢弃部分），best-effort、纯逻辑（改 state.ActiveQuests，随既有 Save 落库）。
+	// **玩家方过滤**：executeGather 是 ATB 执行循环对全部参战单位（含 enemy/wild）的通用结算，而 state.ActiveQuests 是**主角**的任务；
+	// 唯有主角（玩家方单位）的采集才该推进她自己的 collect 目标。否则任一野怪/敌方采到 ration 都会污染、甚至凭空完成主角的收集任务
+	// （与 boss/reach hook 同口径——那两者落在 guardPlayerAction 守护的玩家入口，只有主角能触发）。
+	if isPlayerSideUnit(*state, actor.ID) {
+		advanceCollectObjectivesForGrants(state, rewards, discarded)
+	}
 	if err := service.units.Save(ctx, *actor); err != nil {
 		return err
 	}

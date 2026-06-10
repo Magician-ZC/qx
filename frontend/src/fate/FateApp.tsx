@@ -26,6 +26,7 @@ import {
 import { FateView } from "./FateView";
 import { FateBoard } from "./FateBoard";
 import { WorldMap } from "./WorldMap";
+import { QuestPanel } from "./QuestPanel";
 import { Minimap } from "./Minimap";
 import { CharacterSheet } from "./CharacterSheet";
 import { AccountSettings } from "./AccountSettings";
@@ -134,6 +135,27 @@ const worldMapToggleBtnStyle: React.CSSProperties = {
   boxShadow: "0 4px 14px rgba(60, 44, 27, 0.2)",
 };
 
+// 任务入口浮层按钮：与「🗺 舆图」并排居顶。舆图按钮 translateX(-50%) 真居中，此按钮居中偏右排开，
+// 两者共用同款墨色宣纸卡风格 + 同层级(z 21)。calc(50% + 100px) 让它落在舆图按钮右侧不重叠。
+const questToggleBtnStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 14,
+  left: "calc(50% + 100px)",
+  zIndex: 21,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(140, 100, 50, 0.5)",
+  background: "rgba(250, 244, 232, 0.96)",
+  color: "#6b4a22",
+  fontFamily: "'Noto Serif SC', 'Songti SC', serif",
+  fontSize: 14,
+  cursor: "pointer",
+  boxShadow: "0 4px 14px rgba(60, 44, 27, 0.2)",
+};
+
 // 小地图定位容器：Minimap 自身 position:absolute top:12 left:12（贴最近定位祖先左上角）。
 // 直接挂在 .fate-play-fullscreen(position:fixed) 下会与「换个账号」按钮(top:14 left:14)叠在一起，
 // 故套一个偏下的相对容器(top:52)，让小地图落到 restart 按钮下方。容器尺寸贴合小地图(~172×150)。
@@ -164,6 +186,8 @@ export function FateApp() {
   const [drawerOpen, setDrawerOpen] = useState(true);
   // worldMapOpen：世界地图（舆图）浮层是否展开——点顶部「舆图」按钮打开，选区前往后自动关闭（仿 charterOpen 范式）。
   const [worldMapOpen, setWorldMapOpen] = useState(false);
+  // questOpen：任务面板（差遣）浮层是否展开——点顶部「📜 任务」按钮打开（仿 worldMapOpen 范式）。
+  const [questOpen, setQuestOpen] = useState(false);
   // boardRefresh：传给 FateBoard 的 refreshSignal——前往新区成功后 bump，使 board 重拉快照切到新区地图(state.map 已投影)+新区NPC。
   const [boardRefresh, setBoardRefresh] = useState(0);
   // boardSnap：FateBoard 经 onSnapshot 上抛的最新整快照——存着喂给小地图 Minimap（与 FateBoard 同源，不另起 getSession 轮询）。
@@ -350,6 +374,11 @@ export function FateApp() {
           🗺 舆图 · 天下
         </button>
 
+        {/* 顶部偏右浮层：任务（差遣）入口。点开 QuestPanel 浮层，接取/查看进度/交付（仿 worldMapOpen 范式）。 */}
+        <button style={questToggleBtnStyle} onClick={() => setQuestOpen(true)} aria-haspopup="dialog">
+          📜 任务
+        </button>
+
         {/* 右上浮层：命运抽屉开关（收起则独看全屏地图）。 */}
         <button
           className="fate-drawer-toggle"
@@ -434,6 +463,18 @@ export function FateApp() {
               setBoardSnap(null);
               setBoardRefresh((v) => v + 1);
             }}
+          />
+        )}
+
+        {/* 任务面板浮层（差遣）：可接/进行中/可交付三段。接取/交付成功 → bump boardRefresh 让 FateBoard 重拉快照——
+            任务进度也喂自治决策上下文、交付解锁传送会改可达区，故重拉以同步。主角不挪位，无需清 boardSnap。
+            zoneId 缺省由后端按当前区生成可接任务。 */}
+        {questOpen && (
+          <QuestPanel
+            sessionId={saved.sessionId}
+            unitId={saved.unitId}
+            onClose={() => setQuestOpen(false)}
+            onChanged={() => setBoardRefresh((v) => v + 1)}
           />
         )}
 

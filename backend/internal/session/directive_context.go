@@ -109,6 +109,9 @@ func directiveContextForActor(state State, unitID string, factionID string) stri
 	parts := make([]string, 0, 8)
 	seen := map[string]struct{}{}
 	appendDirectivePart(&parts, seen, factionDoctrineText(state, factionID))
+	// 任务集成（阶段3 §5.3 步骤 5）：把该 unit 进行中的任务作「她当前的目标」喂进自治上下文——
+	// 离线时她会朝任务目标自治行动（去对应区域/采集/讨伐）。放在 doctrine 之后、靠前，使任务成为显著的当前牵引。
+	appendDirectivePart(&parts, seen, activeQuestContextForUnit(&state, unitID))
 
 	for index := len(state.DirectiveHistory) - 1; index >= 0 && len(parts) < 6; index-- {
 		directive := state.DirectiveHistory[index]

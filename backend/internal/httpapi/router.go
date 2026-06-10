@@ -2850,6 +2850,44 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"dungeon": result})
 	})
 
+	// ── 分区大世界阶段3 · 任务系统（设计 docs/分区大世界设计方案-2026-06-10.md §5）：剧情按角色画像 LLM 动态生成 ──
+	// 可接任务：当前区（或 ?zone= 指定区）城镇按骨架生成的可接取任务（剧情 LLM best-effort，机制护栏锁定）。
+	router.GET("/api/sessions/:id/units/:unitId/quests/available", func(c *gin.Context) {
+		quests, err := newSessionService().AvailableQuests(c.Request.Context(), c.Param("id"), c.Param("unitId"), c.Query("zone"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"quests": quests})
+	})
+	// 接取任务：把某可接任务加入 ActiveQuests（上限 5；questId 须为该区某骨架确定性 id）。
+	router.POST("/api/sessions/:id/units/:unitId/quests/:questId/accept", func(c *gin.Context) {
+		quest, err := newSessionService().AcceptQuest(c.Request.Context(), c.Param("id"), c.Param("unitId"), c.Param("questId"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"quest": quest})
+	})
+	// 进行中任务：主角进行中的任务 + 目标进度。
+	router.GET("/api/sessions/:id/units/:unitId/quests/active", func(c *gin.Context) {
+		quests, err := newSessionService().ListActiveQuests(c.Request.Context(), c.Param("id"), c.Param("unitId"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"quests": quests})
+	})
+	// 交付任务：校验目标全达成 → 发奖（钱包/物品/经验经既有路径）+ UnlockZone 非空则解锁 portal 传送 → 移出 Active 入 Completed。
+	router.POST("/api/sessions/:id/units/:unitId/quests/:questId/turn-in", func(c *gin.Context) {
+		quest, err := newSessionService().TurnInQuest(c.Request.Context(), c.Param("id"), c.Param("unitId"), c.Param("questId"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"quest": quest})
+	})
+
 	// 与同格/相邻 NPC 直接买卖（行商 POI 的结算出口；物品/金币走既有结算口径）。
 	router.POST("/api/sessions/:id/units/:unitId/trade", func(c *gin.Context) {
 		var body session.PlayerTradeRequest

@@ -209,6 +209,11 @@ const (
 	// 两者皆流程事件（EmitProcessEvent 旁路，不改保护字段——实际状态变更由 execute*/Resolve* 内部经 Mutator 留痕）。
 	ReasonPlayerTileAction    ReasonCode = "PLAYER_TILE_ACTION"     // 玩家直发地块动作（采集/建造/锻造/收获/拆除）
 	ReasonPOIEncounterResolve ReasonCode = "POI_ENCOUNTER_RESOLVED" // 地图 POI 遭遇被玩家触发并结算（埋伏/行商/求助/奇遇/迷途）
+
+	// 任务系统（分区大世界阶段3 §5）：接取/达成任务的流程痕迹。两者皆流程事件（EmitProcessEvent 旁路，
+	// 不改保护字段——交付发奖的钱包/物品/经验由 turn-in 内部经 status.Mutator(ReasonEconomyReward) 与背包路径留痕）。
+	ReasonQuestAccepted  ReasonCode = "QUEST_ACCEPTED"  // 玩家为角色接取了一桩任务（available→active）
+	ReasonQuestCompleted ReasonCode = "QUEST_COMPLETED" // 任务目标全数达成 + 已交付（completed→turned_in），含解锁传送
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -336,6 +341,9 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
 		{Code: ReasonLifeBeat, Category: CategoryLifecycle, DisplayName: "她的日常", DefaultReasonText: "她又走过了寻常的一段日子", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 4},
 		{Code: ReasonPlayerTileAction, Category: CategoryLifecycle, DisplayName: "依你之意而为", DefaultReasonText: "她依你的指点，在这片土地上动了手", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 5},
+		// 任务系统（阶段3 §5）：流程事件，StatDomains 空（发奖的状态变更另走 ReasonEconomyReward + 背包路径）。
+		{Code: ReasonQuestAccepted, Category: CategoryLifecycle, DisplayName: "接下任务", DefaultReasonText: "她接下了一桩差事，心里有了新的奔头", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
+		{Code: ReasonQuestCompleted, Category: CategoryLifecycle, DisplayName: "任务达成", DefaultReasonText: "她了结了一桩差事，自有一番交代", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonPOIEncounterResolve, Category: CategoryLifecycle, DisplayName: "途中际遇", DefaultReasonText: "她在途中撞见了一桩际遇", StatDomains: []string{}, ImportanceMin: 2, ImportanceMax: 7},
 
 		// —— 发行安全门：输入侧越狱/prompt-injection 拦截（治理类目，流程留痕）——

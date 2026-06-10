@@ -686,6 +686,99 @@ export async function enterZoneDungeon(
   );
 }
 
+// ── 分区大世界阶段3 §5：任务系统客户端（命运客户端「📜 任务」面板的数据源） ──
+// 类型严格对齐后端 session.Quest / Objective / QuestReward 的 json tag（设计 §5.1）。
+
+// QuestObjective 是一桩任务的一个目标（含进度）。kind 决定结算锚点，target 决定匹配对象。
+//   - defeat_boss：击败 target=zoneId 的区域 boss（required 通常 1）。
+//   - collect_item：采集 target=itemId 累计 required 个。
+//   - reach_zone：到达 target=zoneId 区域（required 通常 1）。
+export type QuestObjective = {
+  kind: "defeat_boss" | "collect_item" | "reach_zone" | string;
+  target: string;
+  required: number;
+  current: number;
+};
+
+// QuestReward 是任务奖励（钱包经 Mutator / 物品经背包 / 经验直增 / unlock_zone 解锁 portal 传送）。
+// item_grants/unlock_zone 后端 omitempty，可能缺省。
+export type QuestReward = {
+  wallet: number;
+  item_grants?: string[];
+  exp: number;
+  unlock_zone?: string;
+};
+
+// Quest 对齐后端 session.Quest：title/narrative_zh 由 LLM 按角色画像动态生成（有确定性 fallback）。
+// state ∈ available（可接）/active（进行中）/completed（目标全达成待交付）/turned_in（已交付）。
+export type Quest = {
+  id: string;
+  title: string;
+  narrative_zh: string;
+  giver_unit_id: string;
+  zone_id: string;
+  type: "slay" | "collect" | "explore" | string;
+  objectives: QuestObjective[];
+  rewards: QuestReward;
+  state: "available" | "active" | "completed" | "turned_in" | string;
+};
+
+// getAvailableQuests 拉某角色当前区（或 ?zone= 指定区）的可接任务（骨架确定性生成 + LLM best-effort 填剧情，已过滤已接/已交付）。
+// 失败抛中文 APIError（站位/归属/终局等经后端 respondPlayerActionError 统一映射）。
+export async function getAvailableQuests(
+  sessionID: string,
+  unitID: string,
+  zoneID?: string,
+): Promise<Quest[]> {
+  const qs = zoneID && zoneID.trim() ? `?zone=${encodeURIComponent(zoneID.trim())}` : "";
+  const data = await request<{ quests?: Quest[] }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/quests/available${qs}`,
+  );
+  return data.quests ?? [];
+}
+
+// acceptQuest 接取一桩可接任务（加入 ActiveQuests，State=active；上限 5，questID 须为该区骨架确定性 id）。
+// 失败抛中文 APIError（上限已满 / 已接取 / 非法 id 等经后端统一映射）。
+export async function acceptQuest(
+  sessionID: string,
+  unitID: string,
+  questID: string,
+): Promise<Quest> {
+  const data = await request<{ quest?: Quest }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/quests/${encodeURIComponent(questID)}/accept`,
+    { method: "POST" },
+  );
+  if (!data.quest) {
+    throw new APIError("接取任务未返回结果");
+  }
+  return data.quest;
+}
+
+// getActiveQuests 拉主角进行中的任务 + 目标进度（available/active/completed 视图拷贝）。
+export async function getActiveQuests(sessionID: string, unitID: string): Promise<Quest[]> {
+  const data = await request<{ quests?: Quest[] }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/quests/active`,
+  );
+  return data.quests ?? [];
+}
+
+// turnInQuest 交付一桩任务（须目标全达成→发奖/解锁/移出 Active 入 Completed）。
+// 未达成抛中文 APIError（「目标尚未达成…」），执行互斥→409 等经后端统一映射。
+export async function turnInQuest(
+  sessionID: string,
+  unitID: string,
+  questID: string,
+): Promise<Quest> {
+  const data = await request<{ quest?: Quest }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/quests/${encodeURIComponent(questID)}/turn-in`,
+    { method: "POST" },
+  );
+  if (!data.quest) {
+    throw new APIError("交付任务未返回结果");
+  }
+  return data.quest;
+}
+
 // ── 地块事件系统客户端（开发计划 2026-06-10 §3.7）：点地块→动作目录→直发动作/POI 遭遇/交易 ──
 
 // TileAction 是动作目录里的一个可点条目（available=false 时置灰并展示 reason_zh）。

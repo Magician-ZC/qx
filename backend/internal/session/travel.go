@@ -62,7 +62,7 @@ func (service *Service) ZonesOverview(ctx context.Context, sessionID string) ([]
 			IsCurrent: zone.ID == state.CurrentZoneID,
 			// Reachable 反映「解锁后可达」：border 恒可达；portal 阶段1 未解锁 → 不可达（前端据 PortalKind=="portal"
 			// 且 Reachable==false 画「锁」）。与 TravelToZone 的解锁门契约一致，阶段3 接任务解锁后同步放开。
-			Reachable:  has && zonePortalUnlocked(portal),
+			Reachable:  has && zonePortalUnlocked(&state, portal),
 			PortalKind: portal.Kind, // 仍暴露（has=false 时为空串），供前端区分边界/传送门/不通
 			// 权威防刷态：本区 boss 是否已讨平（state.DefeatedBosses）——前端据此跨刷新置灰挑战按钮。
 			BossDefeated: zoneBossDefeated(&state, zone.ID),
@@ -99,7 +99,7 @@ func (service *Service) TravelToZone(ctx context.Context, sessionID, unitID, toZ
 	}
 	// 解锁门（设计 §8.3「解锁制」）：border（相邻区域边界）恒通；portal（城镇传送门）阶段1 暂未解锁，
 	// 待阶段3 任务系统的 UnlockZone 接入「已解锁区域集合」后放开。未解锁返回该传送门的中文提示。
-	if !zonePortalUnlocked(portal) {
+	if !zonePortalUnlocked(&state, portal) {
 		tip := strings.TrimSpace(portal.UnlockTip)
 		if tip == "" {
 			tip = "这道传送门尚未开通"
@@ -111,10 +111,18 @@ func (service *Service) TravelToZone(ctx context.Context, sessionID, unitID, toZ
 	if coordKey == "" {
 		coordKey = strings.TrimSpace(toCoordKey)
 	}
+	// 切区前记下来路区（用于回程 portal 解锁，防穿过单向解锁的 portal 后被困新区）。
+	fromZoneID := state.CurrentZoneID
 	// 切区 + 投影（state.Map 变为目标区地图）。
 	zone, err := setCurrentZone(&state, toZoneID)
 	if err != nil {
 		return err
+	}
+	// 回程解锁（阶段3 §6）：成功穿过一道 portal 进入新区后，把「来路区」记入 UnlockedZones——
+	// 这样回程的 portal（worldgen 把 capital↔wild 连成双向 portal）也随之解锁，玩家不会被困在新区。
+	// border 走到即过、本就不查解锁集，此 append 对 border 回程无副作用（幂等）。
+	if portal.Kind == "portal" && fromZoneID != "" {
+		appendUnlockedZone(&state, fromZoneID)
 	}
 	// 阶段2 §1：首次进入某区则 lazy 播种公共 NPC（复用 SeedFactionSpawn，标 ZoneID + 等级带派生 + 入 AmbientUnitIDs）。
 	// 须在 setCurrentZone 之后（state.Map 已投影为目标区）、saveSessionMergingExternalEvents 之前调，使新增的
@@ -138,6 +146,9 @@ func (service *Service) TravelToZone(ctx context.Context, sessionID, unitID, toZ
 	if err := service.units.Save(ctx, *rec); err != nil {
 		return fmt.Errorf("travel (save unit): %w", err)
 	}
+	// 任务进度 hook（阶段3 §5.3）：到达新区 → 推进匹配的 reach_zone objective（target=toZoneID）。
+	// best-effort、纯逻辑（只改 state.ActiveQuests，随下方 saveSessionMergingExternalEvents 一并落库）。
+	advanceQuestObjectives(&state, ObjectiveReachZone, toZoneID, 1)
 	// 落痕：一句中文叙事 + 流程事件（她跨越了一片天地，作生活 beat 冒进命运 feed）。
 	narrative := fmt.Sprintf("依你的指引，%s跋涉来到了「%s」。", rec.DisplayName(), zone.Name)
 	appendLog(&state, "travel", narrative, rec.ID, "")
