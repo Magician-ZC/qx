@@ -15,7 +15,11 @@ CREATE TABLE IF NOT EXISTS units (
   version BIGINT NOT NULL DEFAULT 0,
   created_at VARCHAR(64) NOT NULL DEFAULT '',
   updated_at VARCHAR(64) NOT NULL DEFAULT '',
-  INDEX idx_units_session_id (session_id)
+  INDEX idx_units_session_id (session_id),
+  -- 共享世界 Phase 2「玩家相遇」：按 (region_id, life_state) 查某区的在世单位（ListActiveByRegion 跨 session 拉同区玩家）。
+  -- 列序**前导 region_id**——查询 WHERE 只过滤 region_id+life_state、不含 world_id（复合 region_id=worldID#zoneID 已自带
+  -- 世界前缀，world_id 列冗余）；world_id 前导会按最左前缀规则使索引整个失效。末列 last_active_tick 覆盖 ORDER BY。
+  INDEX idx_units_region_active (region_id, life_state, last_active_tick)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS memories (

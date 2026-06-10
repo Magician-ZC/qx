@@ -370,6 +370,15 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, err
 	}
 
+	// 共享世界 Phase 2「玩家相遇」：给本局共享世界**主角**赋**复合 region_id**=worldID#zoneID，
+	// 使同区其他玩家的 buildSnapshot 能用 ListActiveByRegion 把他「看见」。仅 flag 开 + 共享世代生效；
+	// 私有档（flag 关/world_default）此调用整体 no-op，region_id 维持 sessionID 口径，零影响。best-effort：吞错不阻断降生。
+	//
+	// NPC 取舍（Phase 2）：**只 scope 主角**，出生区公共 NPC（AmbientUnitIDs）维持各自 session 私有的 region_id 默认——
+	// 它们不进任何别玩家的 ListActiveByRegion 扫描（避免私有 NPC 泄进共享命名空间），enrich 端也只并入主角。
+	// 世界共享 NPC 是 Phase 4 的事。
+	service.scopeSharedWorldUnitsToZoneBestEffort(ctx, &state, state.CurrentZoneID, append([]string{}, state.PlayerUnitIDs...))
+
 	return service.mainWorldCharacterView(ctx, sessionID, worldID, true)
 }
 

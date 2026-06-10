@@ -21,6 +21,10 @@ const palette = {
   // ambient：阵营据点公共 NPC / 野外散人（命运主世界静态可见的「世间众生」）的 token 色。
   // 刻意取一抹素淡的墨褐——比 player 暖、比 enemy 冷都更低调，提示「这是路人，不是敌我交战单位」。
   ambient: 0x9a8f6e,
+  // peer：共享世界 Phase 2「同区其他真人玩家」的 token 色（紫金）+ 高亮描边色。
+  // 刻意取一抹与 player(暖橙)/enemy(冷青)/ambient(墨褐)都不同的紫——一眼区分「这是别的真人玩家，不是 NPC/敌我」。
+  peer: 0x9b6bd6,
+  peerRing: 0xe6c84f,
   selected: 0xf2d98f,
   plains: 0x92a66e,
   forest: 0x5f7f4f,
@@ -339,6 +343,7 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
         ...latest.session.enemy_units,
         ...(latest.session.ambient_units ?? []),
         ...(latest.session.wild_units ?? []),
+        ...(latest.session.other_world_units ?? []),
       ].find((unit) => unit.id === focusID);
       if (focusUnit) {
         const herCenter = tileCenter(focusUnit.status.position_q, focusUnit.status.position_r, placement);
@@ -1079,7 +1084,13 @@ function drawUnits(
     (unit) => unit.status.life_state === "active",
   );
   const ambientIDs = new Set(ambientAndWild.map((unit) => unit.id));
-  const units = [...session.player_units, ...session.enemy_units, ...ambientAndWild];
+  // peers：共享世界 Phase 2「同区其他真人玩家的主角」（后端 other_world_units，只读上图）——
+  // 它们绝不在 player/enemy/wild/ambient 任一分类里（后端硬契约去重），故这里单独并入渲染序列。
+  // 与 NPC 同样防御性滤掉非 active（理论上 other_world_units 恒为 active 主角，仍兜底防后端残留幽灵）。
+  // 视觉上区别于敌我/路人：紫金 token + 高亮描边 + 头顶「玩家」标识；点击与 NPC 一样只读查看（不可操作，那是 Phase 3）。
+  const peerUnits = (session.other_world_units ?? []).filter((unit) => unit.status.life_state === "active");
+  const peerIDs = new Set(peerUnits.map((unit) => unit.id));
+  const units = [...session.player_units, ...session.enemy_units, ...ambientAndWild, ...peerUnits];
   const unitNames = new Map(units.map((unit) => [unit.id, unit.identity.name]));
   const injuryMap = latestInjuryMarkerByUnit(session.logs, session.raw_event_log ?? [], unitNames, nowMs);
   const selectedCoord = model.selectedTileCoord;
@@ -1114,6 +1125,8 @@ function drawUnits(
     const selected = selectedCoord?.q === unit.status.position_q && selectedCoord?.r === unit.status.position_r;
     // ambient/wild NPC 画小一号（0.28× 对 player/enemy 的 0.36×），视觉上「退到背景里」当路人。
     const isAmbient = ambientIDs.has(unit.id);
+    // peer：同区其他真人玩家的主角。与本玩家主角同尺寸（0.36×，是「人」不是路人），但用区别色 + 高亮描边凸显「这是别的真人」。
+    const isPeer = peerIDs.has(unit.id);
     const tokenRadius = placement.radius * (isAmbient ? 0.28 : 0.36);
 
     // 不再给选中单位画圆环，因为地块已经有高亮边框了
@@ -1134,19 +1147,22 @@ function drawUnits(
     });
 
     const token = new Graphics();
-    // 取色：阵亡=废墟灰；ambient/wild=素淡墨褐（路人，不分敌我）；其余按指挥阵营分玩家暖/敌方冷。
+    // 取色：阵亡=废墟灰；peer(其他真人玩家)=紫金；ambient/wild=素淡墨褐（路人，不分敌我）；其余按指挥阵营分玩家暖/敌方冷。
     const tokenFill = !alive
       ? palette.ruin
-      : isAmbient
-        ? palette.ambient
-        : unit.faction_id === session.player_faction_id
-          ? palette.player
-          : palette.enemy;
+      : isPeer
+        ? palette.peer
+        : isAmbient
+          ? palette.ambient
+          : unit.faction_id === session.player_faction_id
+            ? palette.player
+            : palette.enemy;
     token.beginFill(tokenFill, alive ? 0.98 : 0.5);
+    // 描边：选中沿用高亮金；peer(其他真人玩家)未选中时也用一圈醒目的金描边（peerRing）+ 加粗，一眼把别的真人从敌我/路人里拎出来。
     token.lineStyle({
-      color: selected ? palette.selected : palette.ink,
-      alpha: 0.85,
-      width: selected ? 3 : 2,
+      color: selected ? palette.selected : isPeer ? palette.peerRing : palette.ink,
+      alpha: selected || isPeer ? 0.95 : 0.85,
+      width: selected ? 3 : isPeer ? 3 : 2,
     });
     token.drawCircle(center.x, center.y, tokenRadius);
     token.endFill();
@@ -1190,6 +1206,37 @@ function drawUnits(
 
     tokenContainer.addChild(token, tokenShade, avatarSprite, hpTrack);
     layer.addChild(tokenContainer);
+    // peer 持久「玩家」标识（共享世界 Phase 2）：在 token 头顶常驻一枚小标牌，明确「这是别的真人玩家，不是 NPC」。
+    // 与 selected 才显的 brass tag 互不冲突（位置更高一档：-0.98× vs tag 的 -0.74×），点击仍走 onTileClick 只读查看。
+    if (isPeer && alive) {
+      const peerLabel = new Text(
+        "玩家",
+        new TextStyle({
+          fill: palette.inkDark,
+          fontFamily: "Avenir Next, Helvetica Neue, sans-serif",
+          fontSize: Math.max(8, placement.radius * 0.2),
+          fontWeight: "700",
+          letterSpacing: 1,
+        }),
+      );
+      peerLabel.anchor.set(0.5);
+      const labelY = center.y - placement.radius * 0.98;
+      const padX = Math.max(4, placement.radius * 0.12);
+      const padY = Math.max(2, placement.radius * 0.06);
+      const badge = new Graphics();
+      badge.beginFill(palette.peerRing, 0.92);
+      badge.lineStyle({ color: palette.peer, alpha: 0.9, width: 1.5 });
+      badge.drawRoundedRect(
+        center.x - peerLabel.width / 2 - padX,
+        labelY - peerLabel.height / 2 - padY,
+        peerLabel.width + padX * 2,
+        peerLabel.height + padY * 2,
+        Math.max(3, placement.radius * 0.1),
+      );
+      badge.endFill();
+      peerLabel.position.set(center.x, labelY);
+      layer.addChild(badge, peerLabel);
+    }
     const liveExecution = executionMap.get(unit.id);
     if (liveExecution) {
       layer.addChild(drawExecutionBadge(center.x, center.y + placement.radius * 0.88, placement.radius, liveExecution));

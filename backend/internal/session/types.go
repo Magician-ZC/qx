@@ -701,6 +701,11 @@ type Snapshot struct {
 	// AmbientUnits 是出生点公共同阵营 NPC 的快照视图（静态上图可见，有 hex 坐标）。前端据此把 NPC 画上命运地图。
 	// **观战性质**：这批 NPC 不自治、零 LLM、不进执行 order；前端按位置渲染即可（契约：SessionSnapshot.ambient_units）。
 	AmbientUnits []unit.Record `json:"ambient_units,omitempty"`
+	// OtherWorldUnits 是共享世界 Phase 2「玩家相遇」并入的**同区其他玩家的主角**（只读上图，绝不可操作）。
+	// 仅 QUNXIANG_SHARED_WORLD 开 + 本局 world_id==共享世代 + 主角当前区有别玩家时非空；私有档/flag 关恒为 nil（零影响）。
+	// 硬契约：这些是**别 session 的角色**，绝不在 PlayerUnitIDs/EnemyUnitIDs/WildUnitIDs 里——不被本玩家操作、
+	// 不进执行 order、不被 zoneVisibleUnits 误当本局背景。前端据此渲染「同区其他玩家」（区别于本玩家主角/NPC）。
+	OtherWorldUnits []unit.Record `json:"other_world_units,omitempty"`
 }
 
 // PhaseBoundarySnapshotMeta 结构体用于承载该模块的核心数据。

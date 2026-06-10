@@ -79,6 +79,35 @@ func EnsureIndex(ctx context.Context, db *sql.DB, table string, indexName string
 	return nil
 }
 
+// DropIndex 幂等地删掉某表上指定名字的索引（用于索引重命名/列序修正后清理失效旧索引）。
+// 双驱动安全：MySQL 的 DROP INDEX 无 IF EXISTS（旧版本对不存在的索引报错），故先经 information_schema 查重再删；
+// SQLite 直接用 DROP INDEX IF EXISTS（索引在 sqlite 是数据库级对象，DROP 不需 ON table）。可在每次 Open 安全重复执行。
+func DropIndex(ctx context.Context, db *sql.DB, table string, indexName string) error {
+	if db == nil {
+		return fmt.Errorf("drop index: nil db")
+	}
+	if dbdialect.IsMySQL(db) {
+		var count int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
+			table, indexName,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("inspect index %s.%s: %w", table, indexName, err)
+		}
+		if count == 0 {
+			return nil
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP INDEX %s ON %s", indexName, table)); err != nil {
+			return fmt.Errorf("drop index %s on %s: %w", indexName, table, err)
+		}
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP INDEX IF EXISTS %s", indexName)); err != nil {
+		return fmt.Errorf("drop index %s: %w", indexName, err)
+	}
+	return nil
+}
+
 // EnsureSinglePlayerAccountWorldUnique 给 single_player_sessions(account_id, world_id) 建唯一约束
 // （评审 W-E：账号绑定持久角色的并发降生 TOCTOU 硬兜底——第二个并发 INSERT 必触唯一冲突，由 mainworld.go best-effort 收敛）。
 // best-effort：存量库若有重复 (account_id, world_id) 行会建索引失败，吞错即可（query-first 仍是主护栏）。

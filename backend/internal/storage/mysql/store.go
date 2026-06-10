@@ -76,6 +76,19 @@ func Open(dsn string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 共享世界 Phase 2「玩家相遇」索引：按 (region_id, life_state) 查某区在世单位（ListActiveByRegion 跨 session 拉同区玩家）。
+	// 列序前导 region_id：查询 WHERE 不含 world_id（复合 region_id=worldID#zoneID 已自带世界前缀，列冗余），
+	// world_id 前导会按最左前缀规则使索引失效（退化全表扫描）；末列 last_active_tick 覆盖 ORDER BY。
+	// 改名（旧名 idx_units_world_region 列序错失效）+先删旧索引：EnsureIndex 仅按名字查重，存量库若已建旧名索引，
+	// 不改名只换列会被「名字已存在」静默跳过——故必须 DropIndex 清旧名 + 用新名建对（须在上方补列之后——索引列须先存在）。
+	if err := dbmigrate.DropIndex(ctx, db, "units", "idx_units_world_region"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := dbmigrate.EnsureIndex(ctx, db, "units", "idx_units_region_active", "region_id", "life_state", "last_active_tick"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// region-runner 调度队列迁移：给两表幂等补 session_id（保留期清理键，M7.3-real-0）。
 	for _, table := range []string{"agent_wake_queue", "agent_decision_jobs"} {
 		if err := dbmigrate.EnsureColumns(ctx, db, table, dbmigrate.AgentQueueSessionColumn); err != nil {

@@ -313,8 +313,10 @@ const boardLoadingStyle: React.CSSProperties = {
   letterSpacing: "0.08em",
 };
 
-// allUnitsOf 把一份快照里四类单位（玩家/敌方/据点 NPC/野外散人）汇成可查列表，
+// allUnitsOf 把一份快照里各类单位（玩家/敌方/据点 NPC/野外散人 + 共享世界同区其他玩家）汇成可查列表，
 // 供点格子时定位「这格上站的是谁」与按 unit_id 反查名字。
+// other_world_units（共享世界 Phase 2）也并进来仅供**只读定位/反查名字**——它们绝不进任何可操作链路
+// （交易/交谈只在 player_units/ambient_units/wild_units 里找目标，查不到 peer 自然不给动作按钮，那是 Phase 3）。
 function allUnitsOf(snap: SessionSnapshot | null): BattleUnit[] {
   if (!snap) return [];
   return [
@@ -322,15 +324,18 @@ function allUnitsOf(snap: SessionSnapshot | null): BattleUnit[] {
     ...(snap.enemy_units ?? []),
     ...(snap.ambient_units ?? []),
     ...(snap.wild_units ?? []),
+    ...(snap.other_world_units ?? []),
   ];
 }
 
-// TileOccupant 是格子上一个角色的简介（名字 + 称谓 + 阵营 + 是否就是她）。
+// TileOccupant 是格子上一个角色的简介（名字 + 称谓 + 阵营 + 是否就是她 + 是否别的真人玩家）。
 type TileOccupant = {
   name: string;
   lineage: string;
   faction: string;
   isHer: boolean;
+  // isPeer：共享世界 Phase 2「同区其他真人玩家的主角」。仅只读展示「这是另一位玩家」，不给交互/操作按钮。
+  isPeer: boolean;
 };
 
 // TilePanel 是点格子弹出的「这是什么地方 + 这里有谁 + 有什么 + 能做什么」面板的本地拼装部分。
@@ -578,6 +583,8 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     (q: number, r: number) => {
       const mapTile = snap?.map?.tiles?.find((t) => t.coord.q === q && t.coord.r === r);
       const terrainCode = (mapTile?.terrain ?? "").toLowerCase();
+      // peerIDs：共享世界同区其他玩家主角的 id 集合（仅只读展示标识用）。私有档 / flag 关时 other_world_units 缺省，集合为空。
+      const peerIDs = new Set((snap?.other_world_units ?? []).map((u) => u.id));
       const occupants: TileOccupant[] = allUnitsOf(snap)
         .filter((u) => u.status.position_q === q && u.status.position_r === r)
         .map((u) => ({
@@ -585,6 +592,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           lineage: u.identity?.lineage ?? "",
           faction: u.faction_id ?? "",
           isHer: u.id === unitId,
+          isPeer: peerIDs.has(u.id),
         }));
       const tilePois = pois.filter((p) => p.q === q && p.r === r).map((p) => ({ kind: p.kind, label: p.label_zh }));
       const landmark = mapTile?.landmark ?? "";
@@ -611,7 +619,10 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         const namedOther = occupants.find((o) => !o.isHer);
         let draft = "";
         if (namedOther) {
-          draft = `留意「${namedOther.name}」`;
+          // 别的真人玩家（Phase 2 只读）：指引草稿用「远远望见」措辞，不暗示能对其直接动手（交互是 Phase 3）。
+          draft = namedOther.isPeer
+            ? `远远望见另一位旅人「${namedOther.name}」`
+            : `留意「${namedOther.name}」`;
         } else if (tilePois.length > 0) {
           draft = `去探一探那处${tilePois[0].label}`;
         } else if (landmark) {
@@ -1228,13 +1239,32 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
                   <div style={{ fontSize: 14, color: "#4a3417" }}>
                     {o.name}
                     {o.isHer && <span style={{ fontSize: 11, color: "#a83a28", marginLeft: 6 }}>· 就是她</span>}
+                    {/* 共享世界 Phase 2：别的真人玩家——紫金徽记 + 「另一位玩家」，只读告知（不可操作，交互是 Phase 3）。 */}
+                    {o.isPeer && !o.isHer && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: "#fff",
+                          background: "#9b6bd6",
+                          borderRadius: 4,
+                          padding: "1px 6px",
+                          marginLeft: 6,
+                        }}
+                      >
+                        另一位玩家
+                      </span>
+                    )}
                   </div>
-                  {(o.lineage || o.faction) && (
-                    <div style={whoCardLineStyle}>
-                      {o.lineage}
-                      {o.lineage && o.faction ? " · " : ""}
-                      {o.faction ? `心向${factionNameZH(o.faction)}` : ""}
-                    </div>
+                  {o.isPeer && !o.isHer ? (
+                    <div style={whoCardLineStyle}>这是另一位玩家「{o.name}」，与你同游此地（暂只可远观）。</div>
+                  ) : (
+                    (o.lineage || o.faction) && (
+                      <div style={whoCardLineStyle}>
+                        {o.lineage}
+                        {o.lineage && o.faction ? " · " : ""}
+                        {o.faction ? `心向${factionNameZH(o.faction)}` : ""}
+                      </div>
+                    )
                   )}
                 </div>
               ))}

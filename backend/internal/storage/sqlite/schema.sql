@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS units (
 );
 
 CREATE INDEX IF NOT EXISTS idx_units_session_id ON units(session_id);
+-- 共享世界 Phase 2「玩家相遇」：按 (region_id, life_state) 查「某区的在世单位」（ListActiveByRegion 跨 session 拉同区玩家）。
+-- 列序**前导 region_id**——查询 WHERE 只过滤 region_id+life_state、不含 world_id（复合 region_id=worldID#zoneID 已自带世界前缀，
+-- 跨世代天然隔离，world_id 列在此查询里冗余）；故 world_id 若前导则按 B-tree 最左前缀规则索引整个失效（退化全表扫描）。
+-- 末列 last_active_tick 覆盖 ORDER BY，省去 TEMP B-TREE 排序（仅尾部 id 二级排序需补）。
+-- 索引改名（旧名 idx_units_world_region 列序错失效）：rename 使 store.go 的 EnsureIndex 在所有库（含已建旧索引的存量库）
+-- 都按新名建对，且 dropLegacyUnitsWorldRegionIndex 顺带清掉那个永不命中的旧索引。
+CREATE INDEX IF NOT EXISTS idx_units_region_active ON units(region_id, life_state, last_active_tick);
 
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,

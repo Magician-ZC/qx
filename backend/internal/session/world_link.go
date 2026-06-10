@@ -32,6 +32,19 @@ const (
 	sharedWorldGenesisSeed = "shared-world-genesis"
 )
 
+// isSharedWorldID 判定某 worldID 是否共享世界世代（world_shared_v1）。
+// Phase 2 的复合 region_id / 玩家相遇分叉**只对共享世界世代生效**——私有 world_default / per_session 世界一律走旧路径，零影响。
+func isSharedWorldID(worldID string) bool {
+	return strings.TrimSpace(worldID) == sharedWorldID
+}
+
+// inSharedWorld 判定本局是否「开 flag 的共享世界局」：flag 开 + state.WorldID==共享世代。
+// 这是 Phase 2 所有跨玩家分叉（scope 复合 region_id、buildSnapshot 拉同区别玩家）的统一守门——
+// 任一不满足都回退旧行为（私有档 region_id 维持 sessionID 口径、快照只含本 session 单位），保证 flag 关/私有档零影响。
+func inSharedWorld(state *State) bool {
+	return state != nil && sharedWorldEnabled() && isSharedWorldID(state.WorldID)
+}
+
 // sharedWorldEnabled 读 QUNXIANG_SHARED_WORLD，**默认关**（未设/非法值 → 关，走旧私有副本路径，行为逐字节不变）。
 // 仅显式置 1/true/yes/on 时才开 → 降生分叉到共享世界几何（同 RegionSeed 派生同种子、逐格相同的世界）。
 // 默认关是 Phase 1 的硬隔离保证：旧 world_default 私有档、既有降生测试全部不受影响。
@@ -51,6 +64,25 @@ func deriveSharedSeed(regionSeed string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(regionSeed))
 	return int64(h.Sum64())
+}
+
+// sharedRegionID 把（共享世界 worldID, zoneID）组成**复合 region_id**：`worldID#zoneID`（Phase 2「玩家相遇」）。
+//
+// 为什么是复合而非裸 zoneID：units 表的 region_id 列在分片关时默认 ==sessionID（ambient_scheduling.go:79），
+// 大量代码按 region_id 写得「貌似 region-scoped 实则 session-scoped」。Phase 2 给共享世界角色另起一套**专属命名空间**——
+//   - 加 worldID 前缀：确保跨世代世界（world_default / world_shared_v1 / 未来 v2）同名 zone（如都叫 zone_neutral_start）
+//     绝不混进同一 region，跨世界角色永不互相浮现；
+//   - 加 `#` 分隔符：zoneID 形如 `zone_neutral_start`、worldID 形如 `world_shared_v1`，都不含 `#`，故复合键无歧义、可反解。
+//
+// **只给共享世界角色用**（flag 开 + world_id==共享世代 + zoneID 非空）；私有档 region_id 维持 sessionID 口径、零影响。
+// 这是 §5 风险 2「region_id 语义二义性」的规避：不全局改 region_id 语义，只在共享世界新命名空间里赋予其「真·地理子区」含义。
+func sharedRegionID(worldID, zoneID string) string {
+	worldID = strings.TrimSpace(worldID)
+	zoneID = strings.TrimSpace(zoneID)
+	if worldID == "" || zoneID == "" {
+		return ""
+	}
+	return worldID + "#" + zoneID
 }
 
 // worldBindingMode 读 QUNXIANG_WORLD_BINDING，归一为三档绑定策略（大小写不敏感、去空白）：

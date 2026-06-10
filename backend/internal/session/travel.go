@@ -146,6 +146,11 @@ func (service *Service) TravelToZone(ctx context.Context, sessionID, unitID, toZ
 	if err := service.units.Save(ctx, *rec); err != nil {
 		return fmt.Errorf("travel (save unit): %w", err)
 	}
+	// 共享世界 Phase 2「玩家相遇」：若本局是共享世界局，主角随 travel 把**复合 region_id** 更新为目标区
+	// （worldID#toZoneID），使「相遇范围」跟着她走——到新区即对该区其他玩家可见、离开旧区即从旧区玩家快照消失。
+	// 仅 flag 开 + 共享世代生效；私有档 travel 此调用整体 no-op，绝不改 region_id（维持 sessionID 口径，零影响）。
+	// best-effort：scope 更新失败不回滚 travel（相遇可见性是增强，绝不让它拖垮已成功的穿行）。
+	service.scopeSharedWorldUnitsToZoneBestEffort(ctx, &state, toZoneID, []string{rec.ID})
 	// 任务进度 hook（阶段3 §5.3）：到达新区 → 推进匹配的 reach_zone objective（target=toZoneID）。
 	// best-effort、纯逻辑（只改 state.ActiveQuests，随下方 saveSessionMergingExternalEvents 一并落库）。
 	advanceQuestObjectives(&state, ObjectiveReachZone, toZoneID, 1)

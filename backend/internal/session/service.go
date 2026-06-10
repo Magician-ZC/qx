@@ -586,10 +586,17 @@ func (service *Service) GetSnapshot(ctx context.Context, sessionID string) (Snap
 		return Snapshot{}, err
 	}
 	if service.resumeStaleAsyncExecutionIfNeeded(ctx, &state) {
-		return buildSnapshot(state, units), nil
+		snapshot := buildSnapshot(state, units)
+		// 共享世界 Phase 2：并入同区别玩家的主角（只读上图）。私有档/flag 关此处 no-op，snapshot 逐字节不变。
+		service.enrichSnapshotWithSharedWorldPeers(ctx, &state, &snapshot)
+		return snapshot, nil
 	}
 	service.maybeRefreshDraftNarrativesAsync(state)
-	return buildSnapshot(state, units), nil
+	snapshot := buildSnapshot(state, units)
+	// 共享世界 Phase 2「玩家相遇」（REST 主取快照路径，命运客户端轮询用）：把同区其他玩家的角色并入 OtherWorldUnits。
+	// 只读：绝不写他人 units。flag 关 / 私有档 / world_id 空 → enrich 整体 no-op，返回与改造前逐字节一致的快照。
+	service.enrichSnapshotWithSharedWorldPeers(ctx, &state, &snapshot)
+	return snapshot, nil
 }
 
 // SetGlobalDirective 写入玩家全局方针并更新方针历史。

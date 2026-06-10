@@ -807,4 +807,10 @@ export type SessionSnapshot = {
   // 这些 NPC **只作静态可见**（在格子上有坐标、可被她在地图上看到），**绝不进 WildUnitIDs/执行 order**，
   // 否则每拍会多触发 8~12 次 LLM 决策、成本爆炸。前端只读渲染：区别色 + 小一号 token。
   ambient_units?: BattleUnit[];
+  // other_world_units：共享世界 Phase 2「玩家相遇」并入的**同区其他真人玩家的主角**（只读上图，绝不可操作）。
+  // 契约（crossFileNeeds）：后端 Snapshot.OtherWorldUnits（json:"other_world_units,omitempty"）。
+  // 仅 QUNXIANG_SHARED_WORLD 开 + 本局 world_id==共享世代 + 主角当前区有别玩家时非空；私有档 / flag 关恒为 undefined（零影响）。
+  // 硬契约：这些是**别 session 的角色**，绝不在 player_units/enemy_units/wild_units/ambient_units 里——不被本玩家操作、
+  // 不进执行 order、不被战争迷雾视野计算当本局单位。前端据此渲染「同区其他玩家」：区别于本玩家主角 / NPC（真人标识 + 点击只读）。
+  other_world_units?: BattleUnit[];
 };
