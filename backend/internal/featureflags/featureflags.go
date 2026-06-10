@@ -180,6 +180,9 @@ var knownGameplayFlags = []FlagSpec{
 	{Name: "QUNXIANG_FACTION_PVE", Description: "阵营冲突遭遇（游历中撞见敌对阵营的人时低频概率触发一次冲突遭遇，对手入敌方队列、出命运卡可接管）；默认关。", DefaultOn: false},
 	{Name: "QUNXIANG_AMBIENT_WANDER", Description: "出生点公共 NPC 轻量游走（回合边界确定性低概率挪一格，让命运地图舞台活起来，纯代码零 LLM）；默认关，关时 NPC 静态站着。", DefaultOn: false},
 
+	// —— 共享世界（方向 B Phase 1） —— //
+	{Name: "QUNXIANG_SHARED_WORLD", Description: "共享世界几何（Phase 1）：开后新降生进 world_shared_v1 新世代，所有玩家用同一 RegionSeed 派生种子拿到逐格相同的世界；默认关，关时各玩家各自独立私有世界（world_default，旧行为不变）。", DefaultOn: false},
+
 	// —— 多档字符串型 —— //
 	{
 		Name:        "QUNXIANG_WORLD_BINDING",

@@ -102,7 +102,14 @@ func (service *Service) propagateThreatSetback(ctx context.Context, state *State
 			classifier = events.ReasonRegionRavaged
 		}
 		owner := unit.Record{ID: b.sourceID}
-		routing, err := service.SurfaceFateEvent(ctx, state.ID, &owner, FateEvent{
+		// 跨玩家投递 seam（共享世界 Phase 0，与 WorldizeDeath 同口径）：旁观者可能与 victim 不在同一 session。
+		// 用旁观者**自己所在 session**（units.session_id 反查）让 SurfaceFateEvent 取到其自己的离线宪章红线锚/
+		// 在世天数/provenance；查不到/同 session 回落 victim 的 state.ID（既有同 session 行为逐字节不变）。best-effort。
+		ownerSession := state.ID
+		if own := service.sessionIDForUnit(ctx, b.sourceID); own != "" {
+			ownerSession = own
+		}
+		routing, err := service.SurfaceFateEvent(ctx, ownerSession, &owner, FateEvent{
 			ActorID:       victim.ID,
 			TargetID:      victim.ID,
 			ReasonCode:    classifier,

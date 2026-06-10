@@ -1278,7 +1278,18 @@ func (service *Service) WorldizeDeath(ctx context.Context, sessionID string, dec
 	surfaced := 0
 	for _, source := range mourners {
 		owner := unit.Record{ID: source}
-		routing, err := service.SurfaceFateEvent(ctx, sessionID, &owner, FateEvent{
+		// 跨玩家投递 seam（共享世界 Phase 0）：哀悼者可能与逝者**不在同一 session**（共享世界里
+		// relations 跨玩家成边）。SurfaceFateEvent 会用传入 sessionID 经 loadStateForFate 取该 owner 的
+		// **离线宪章红线锚**（buildRelevanceAnchorsWithState 读 state.UnitCharters[owner.ID]）+ 真实在世天数 +
+		// provenance。若沿用逝者的 sessionID，加载到的是逝者那局的 state——其 UnitCharters 不含跨 session 哀悼者的
+		// charter，会**静默丢掉哀悼者自己的红线锚**，致相关性误判/归因门误拒（用 A 的红线判 B 的事件）。
+		// 修：对每个哀悼者用其**自己所在 session**（units.session_id 反查）；查不到/同 session 时回落逝者 sessionID
+		// （既有同 session 投递行为逐字节不变）。best-effort、纯读、绝不阻断扇出。
+		ownerSession := sessionID
+		if own := service.sessionIDForUnit(ctx, source); own != "" {
+			ownerSession = own
+		}
+		routing, err := service.SurfaceFateEvent(ctx, ownerSession, &owner, FateEvent{
 			ActorID:       deceased.ID,
 			TargetID:      deceased.ID,
 			ReasonCode:    events.ReasonCombatDown,

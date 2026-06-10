@@ -157,6 +157,21 @@ func AdvanceTick(ctx context.Context, db DB, id string, dialect dbdialect.Dialec
 	return tick, nil
 }
 
+// UpdateRegionSeed 持久化某世界的 RegionSeed（共享世界几何的确定性种子根）。
+// 用于「世界已存在但 region_seed 为空」的补种场景（共享世界 get-or-create 时若历史行缺种子，
+// 补一个确定性固定值后所有降生玩家才能拿到逐格相同的世界）。世界不存在时返回 ErrNotFound。
+// 幂等安全：传入相同 seed 重复调用结果一致（纯 UPDATE，无副作用）。
+func UpdateRegionSeed(ctx context.Context, db DB, id string, regionSeed string) error {
+	res, err := db.ExecContext(ctx, `UPDATE worlds SET region_seed = ? WHERE id = ?`, regionSeed, id)
+	if err != nil {
+		return fmt.Errorf("world update region_seed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Seal 把世界置为封存（只读）。
 func Seal(ctx context.Context, db DB, id string) error {
 	res, err := db.ExecContext(ctx, `UPDATE worlds SET status = ? WHERE id = ?`, string(StatusSealed), id)

@@ -1,6 +1,7 @@
 /* 文件说明：世界编年史面板浮层（分区大世界阶段4 §7「世界编年史」的命运客户端露出）。
-   角色史=她的人生（CharacterSheet/ChroniclePanel），世界史=她所处时代的洪流——boss 讨平 / 英雄诞生陨落 /
-   区域解锁 / 阵营之战。本面板纯只读观察态：挂载即 getWorldChronicle 拉一页（倒序），按纪元(Era)分段展示。
+   角色史=一人之命途（CharacterSheet/ChroniclePanel），世界史=共享世界众生交织的洪流——boss 讨平 / 英雄诞生陨落 /
+   区域解锁 / 阵营之战，条目以各角色真实名字（DisplayName）入史而非「主角」占位（共享世界群像史，方向B Phase0）。
+   本面板纯只读观察态：挂载即 getWorldChronicle 拉一页（倒序），按纪元(Era)分段展示。
    全屏遮罩 overlay，墨色宣纸 + 史官古卷质感（全内联样式，不碰 fate.css/styles.css，仿 WorldMap/QuestPanel 范式）。
    每条：category 图标（⚔ boss 讨平 / ✦ 英雄诞生 / 🕯 英雄陨落 / 🗝 区域解锁 / ⚑ 阵营之战）+ 标题 + 史官叙事 + 世界纪。
    空态「史册尚未落笔」（旧单图档 world_id 空 / 大世界尚无大事）。遮罩空白 / Esc 关闭。 */
@@ -109,7 +110,7 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
         <div style={headerStyle}>
           <div>
             <div style={titleStyle}>📖 世界编年史</div>
-            <div style={subtitleStyle}>她所处时代的洪流——史官执笔，纪元为序。</div>
+            <div style={subtitleStyle}>这方世界的纪元史·众生交织——史官执笔，纪元为序。</div>
           </div>
           <button type="button" style={closeBtnStyle} onClick={onClose} aria-label="关闭世界编年史">
             ×
@@ -125,7 +126,7 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
               <div style={emptyTitleStyle}>史册尚未落笔</div>
               <div style={emptyHintStyle}>
                 {worldLinked
-                  ? "这方天地尚未有惊动史官之事。霸主、英雄、烽烟，皆待来日书写。"
+                  ? "这方世界众生方兴，尚无惊动史官之事。霸主、英雄、烽烟，皆待诸位来日共同书写。"
                   : "这方世界尚未与大世界相连，史册无从落笔。"}
               </div>
             </div>
@@ -150,7 +151,7 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
         </div>
 
         <div style={footerStyle}>
-          <span style={footerNoteStyle}>角色史载她的一生，世界史载她的时代。</span>
+          <span style={footerNoteStyle}>角色史载一人之命途，世界史载众生交织的洪流。</span>
         </div>
       </div>
     </div>

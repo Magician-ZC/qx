@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"log"
 	"strings"
 
@@ -21,6 +22,36 @@ import (
 // 取固定字面量而非 uuid：唯一性约束 + 固定 ID 让「先 Get 再 Create」天然幂等，
 // 并发下两个建局同时撞 Create 会触发主键冲突，由 EnsureDefaultWorld 兜底再 Get 一次。
 const defaultWorldID = "world_default"
+
+// 共享世界几何（Phase 1）常量：与旧私有副本（world_default）**物理隔离**的新世代世界。
+//   - sharedWorldID：新世代固定 ID。旧 world_default 已降生角色零影响（它们仍走各自独立种子的私有世界）。
+//   - sharedWorldGenesisSeed：RegionSeed 缺省时写入的确定性固定字符串根。共享世界的「同一张图」由它派生——
+//     所有开 flag 降生的玩家用 deriveSharedSeed(RegionSeed) 得到同一个 int64 种子，GenerateWorld 逐格相同。
+const (
+	sharedWorldID         = "world_shared_v1"
+	sharedWorldGenesisSeed = "shared-world-genesis"
+)
+
+// sharedWorldEnabled 读 QUNXIANG_SHARED_WORLD，**默认关**（未设/非法值 → 关，走旧私有副本路径，行为逐字节不变）。
+// 仅显式置 1/true/yes/on 时才开 → 降生分叉到共享世界几何（同 RegionSeed 派生同种子、逐格相同的世界）。
+// 默认关是 Phase 1 的硬隔离保证：旧 world_default 私有档、既有降生测试全部不受影响。
+func sharedWorldEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_SHARED_WORLD"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// deriveSharedSeed 把共享世界的 RegionSeed（字符串）确定性派生为 GenerateWorld 所需的 int64 种子。
+// 用 FNV-64a（与全仓「确定性随机不依赖全局 rand」铁律同源）：同一 RegionSeed 永远派生同一 int64，
+// 故所有开 flag 降生的玩家跑 world.GenerateWorld(同种子) 得到**逐格相同**的世界，可离线复算验证。
+func deriveSharedSeed(regionSeed string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(regionSeed))
+	return int64(h.Sum64())
+}
 
 // worldBindingMode 读 QUNXIANG_WORLD_BINDING，归一为三档绑定策略（大小写不敏感、去空白）：
 //   - shared（默认，未设/非法/缺省皆归此）：所有 session 接入同一个共享主世界 world_default，
@@ -67,6 +98,53 @@ func (service *Service) EnsureDefaultWorld(ctx context.Context) (string, error) 
 		return "", err
 	}
 	return defaultWorldID, nil
+}
+
+// EnsureSharedWorld get-or-create 共享世界几何世代 world_shared_v1，返回 (worldID, regionSeed, err)。确定性、幂等。
+//
+// 与 EnsureDefaultWorld 同模式（先 Get 命中即返回、ErrNotFound 才 Create 固定 ID、并发撞唯一键再 Get 兜底），
+// 额外保证 **RegionSeed 非空**：这是共享世界「同一张图」的根——
+//   - 新建时直接以 sharedWorldGenesisSeed 落库（Create 带 RegionSeed）。
+//   - 已存在但历史行 RegionSeed 为空（如被别的代码路径先建）→ 补一个确定性固定值并持久化（UpdateRegionSeed）。
+//
+// 返回的 regionSeed 供降生路径 deriveSharedSeed → GenerateWorld。worldID 恒为 sharedWorldID。
+// 与旧 world_default 物理隔离：旧私有档零影响（它们的 world_id 仍是 world_default，不在本世代）。
+func (service *Service) EnsureSharedWorld(ctx context.Context) (string, string, error) {
+	if service == nil || service.db == nil {
+		return "", "", errors.New("ensure shared world: nil service or db")
+	}
+	if w, err := world.Get(ctx, service.db, sharedWorldID); err == nil {
+		seed := strings.TrimSpace(w.RegionSeed)
+		if seed == "" {
+			// 历史行缺种子：补确定性固定值，保证后续降生玩家拿到逐格相同的世界。best-effort——
+			// 补种失败仍回退用 genesis 常量（GenerateWorld 不依赖 DB 行的 seed 列、只依赖传入字符串），不阻断。
+			seed = sharedWorldGenesisSeed
+			if updErr := world.UpdateRegionSeed(ctx, service.db, sharedWorldID, seed); updErr != nil {
+				log.Printf("ensure shared world: backfill region_seed best-effort failed (world=%s): %v", sharedWorldID, updErr)
+			}
+		}
+		return sharedWorldID, seed, nil
+	} else if !errors.Is(err, world.ErrNotFound) {
+		return "", "", err
+	}
+	if _, err := world.Create(ctx, service.db, world.World{
+		ID:            sharedWorldID,
+		Name:          "共享世界",
+		Status:        world.StatusActive,
+		MaxPopulation: 100000,
+		RegionSeed:    sharedWorldGenesisSeed,
+	}); err != nil {
+		// 并发竞争：另一降生先 Create 成功导致主键冲突 → 再 Get 一次兜底（与 EnsureDefaultWorld 同模式）。
+		if w, getErr := world.Get(ctx, service.db, sharedWorldID); getErr == nil {
+			seed := strings.TrimSpace(w.RegionSeed)
+			if seed == "" {
+				seed = sharedWorldGenesisSeed
+			}
+			return sharedWorldID, seed, nil
+		}
+		return "", "", err
+	}
+	return sharedWorldID, sharedWorldGenesisSeed, nil
 }
 
 // bindSessionWorld 按 worldBindingMode 把一局接入世界，best-effort：吞错只记日志、绝不阻断建局。

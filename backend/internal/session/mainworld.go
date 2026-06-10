@@ -70,9 +70,22 @@ func (service *Service) ResumeMainWorldCharacter(ctx context.Context, accountID 
 	if accountID == "" {
 		return MainWorldCharacter{}, fmt.Errorf("resume main-world character: empty account")
 	}
-	worldID, err := service.EnsureDefaultWorld(ctx)
-	if err != nil {
-		return MainWorldCharacter{}, err
+	// 世代世界锚：resume 必须与降生用同一世代 worldID，否则 (account_id, world_id) 查不到。
+	//   - flag 关（默认）：world_default（旧私有档世代，行为逐字节不变）。
+	//   - flag 开：world_shared_v1（共享世界世代）——resume 拿到玩家在共享世界的持久角色。
+	var worldID string
+	if sharedWorldEnabled() {
+		id, _, ensErr := service.EnsureSharedWorld(ctx)
+		if ensErr != nil {
+			return MainWorldCharacter{}, ensErr
+		}
+		worldID = id
+	} else {
+		id, ensErr := service.EnsureDefaultWorld(ctx)
+		if ensErr != nil {
+			return MainWorldCharacter{}, ensErr
+		}
+		worldID = id
 	}
 	sessionID, found, err := service.sessions.FindMainWorldSessionID(ctx, accountID, worldID)
 	if err != nil {
@@ -138,12 +151,31 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, err
 	}
 
-	// world_default 必须先于幂等查询解析（resume 与降生共用同一世界锚）。
-	worldID, err := service.EnsureDefaultWorld(ctx)
-	if err != nil {
-		return MainWorldCharacter{}, err
+	// 世界锚 + 几何种子根解析（resume 与降生共用同一世界锚）。共享世界 Phase 1 在此分叉：
+	//   - flag 关（默认）：worldID=world_default，几何种子=本局 now.UnixNano()（各玩家各自独立世界，旧行为逐字节不变）。
+	//   - flag 开：worldID=world_shared_v1（与旧 world_default 物理隔离的新世代），几何种子=deriveSharedSeed(RegionSeed)
+	//     ——所有开 flag 降生的玩家拿到逐格相同的共享世界。worldGeometrySeed 仅驱动 GenerateWorld（世界几何）；
+	//     角色/阵营/天气等仍用本局唯一 seed（见下方），避免共享世界里玩家被克隆成同一个人。
+	shared := sharedWorldEnabled()
+	var worldID string
+	worldGeometrySeed := int64(0) // 下方 now 解析后据 shared 赋值（私有=now.UnixNano；共享=派生自 RegionSeed）
+	sharedRegionSeed := ""
+	if shared {
+		id, regionSeed, ensErr := service.EnsureSharedWorld(ctx)
+		if ensErr != nil {
+			return MainWorldCharacter{}, ensErr
+		}
+		worldID = id
+		sharedRegionSeed = regionSeed
+	} else {
+		id, ensErr := service.EnsureDefaultWorld(ctx)
+		if ensErr != nil {
+			return MainWorldCharacter{}, ensErr
+		}
+		worldID = id
 	}
-	// 幂等守卫：该账号在 world_default 已有角色 → 返回既有，绝不重复降生。
+	// 幂等守卫：该账号在**当前世代世界**（私有 world_default / 共享 world_shared_v1）已有角色 → 返回既有，绝不重复降生。
+	// 两世代用不同 world_id，故同账号可同时拥有一个私有档 + 一个共享档（(account_id, world_id) 唯一索引天然区分）。
 	if sessionID, found, findErr := service.sessions.FindMainWorldSessionID(ctx, accountID, worldID); findErr != nil {
 		return MainWorldCharacter{}, findErr
 	} else if found {
@@ -156,6 +188,12 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 
 	now := time.Now().UTC()
 	seed := now.UnixNano()
+	// 世界几何种子：私有世界用本局唯一 seed（旧行为）；共享世界用派生自 RegionSeed 的确定性种子
+	// （所有开 flag 玩家同种子 → 逐格相同世界）。仅此一处分叉影响世界地图；角色/天气等仍用本局唯一 seed。
+	worldGeometrySeed = seed
+	if shared {
+		worldGeometrySeed = deriveSharedSeed(sharedRegionSeed)
+	}
 	sessionID := uuid.NewString()
 	selectedMapScriptID := normalizeBattlefieldScriptID("", seed)
 	selectedMapScriptName := battlefieldScriptDisplayName(selectedMapScriptID)
@@ -206,7 +244,10 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	// 分区大世界（设计 docs/分区大世界设计方案-2026-06-10.md §1/§2）：生成多区域世界，出生区（Zones[0]=
 	// 中立新手区）作当前区，state.Map 经 setCurrentZone 投影为出生区地图——旧代码读 state.Map 即读出生区，
 	// 渲染/移动/采集/POI/威胁等所有现有逻辑天然作用于「当前区域」，无需改动。
-	worldZones := world.GenerateWorld(seed)
+	// 共享世界 Phase 1：用 worldGeometrySeed（共享=派生自 RegionSeed，私有=本局 seed）生成世界几何。
+	// 同种子 → 逐格相同的 Zones（确定性）；这是「共享几何只读」的最小实现——state.Zones 仍存 session
+	// 作投影缓存，但内容因同种子逐格一致，无需 SaveMap 到 world_maps、不动 state.Map 的 86 处调用点。
+	worldZones := world.GenerateWorld(worldGeometrySeed)
 	state.Zones = worldZones
 	startZoneID := worldZones[0].ID
 	if _, err := setCurrentZone(&state, startZoneID); err != nil {
@@ -263,13 +304,14 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	// 离线宪章：把捏人的 desire/wound/redline 落成长期目标 + 红线（喂归因校验 snap.Redlines、驱动 LLM 自治）。
 	applyMainWorldCharter(&state, hero.ID, in)
 
-	// 接入共享主世界（必须在玩家单位已落库之后、村庄/ambient 锚落库之前——使 state.WorldID 置位，
+	// 接入世代世界（必须在玩家单位已落库之后、村庄/ambient 锚落库之前——使 state.WorldID 置位，
 	// 跨玩家锚带正确世界域）。best-effort：吞错不阻断降生。注意：bindSessionWorld 受 QUNXIANG_WORLD_BINDING
-	// 控制，默认 shared → world_default；若被设为 off/per_session，state.WorldID 可能非 world_default，
-	// 下方做一次最终校正，保证主世界角色恒绑 world_default（否则 resume 查不到）。
+	// 控制，默认 shared → world_default；若被设为 off/per_session，state.WorldID 可能非本世代 worldID。
+	// 下方做一次最终校正，保证主世界角色恒绑**当前世代 worldID**（私有 world_default / 共享 world_shared_v1，
+	// 否则 resume 按 (account_id, world_id) 查不到）——共享世界 Phase 1 复用这条既有校正即把角色锚回 world_shared_v1。
 	_ = service.bindSessionWorld(ctx, &state)
 	if strings.TrimSpace(state.WorldID) != worldID {
-		// QUNXIANG_WORLD_BINDING=off/per_session 时强制把主世界角色锚回 world_default（页游入口的硬契约）。
+		// 强制把主世界角色锚回当前世代 worldID（页游入口的硬契约）。
 		if err := service.AssignSessionToWorld(ctx, &state, worldID); err != nil {
 			return MainWorldCharacter{}, err
 		}
