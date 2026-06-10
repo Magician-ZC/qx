@@ -400,6 +400,39 @@ CREATE TABLE IF NOT EXISTS ops_audit_log (
   INDEX idx_ops_audit_log_ts (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// WorldChronicleTable* 世界编年史表（分区大世界阶段4 §7）：记录整个世界的纪元大事，独立于单角色编年史。
+// schema.sql 的 fresh 库已含本表；本常量供存量旧库（阶段1/2/3 建过的库）经 DesignClosureTables 幂等补建——
+// 否则世界编年史 silently 永不落库/读取。索引 idx_world_chronicle_world：SQLite 写在 schema.sql（applySchema 幂等建），
+// MySQL 内联于本 DDL（CREATE TABLE 内 INDEX）。
+const WorldChronicleTableSQLite = `
+CREATE TABLE IF NOT EXISTS world_chronicle (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  world_tick INTEGER NOT NULL DEFAULT 0,
+  era TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  title_zh TEXT NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL DEFAULT '',
+  actor_refs TEXT NOT NULL DEFAULT '[]',
+  importance INTEGER NOT NULL DEFAULT 5,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const WorldChronicleTableMySQL = `
+CREATE TABLE IF NOT EXISTS world_chronicle (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  world_tick INT NOT NULL DEFAULT 0,
+  era VARCHAR(64) NOT NULL DEFAULT '',
+  category VARCHAR(64) NOT NULL DEFAULT '',
+  title_zh VARCHAR(255) NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL,
+  actor_refs TEXT NOT NULL,
+  importance INT NOT NULL DEFAULT 5,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_world_chronicle_world (world_id, world_tick, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // DesignClosureTables 汇总本波新增表的双驱动 DDL，供 store.go 一次性幂等补建。
 var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{DungeonSegmentsTableSQLite, DungeonSegmentsTableMySQL},
@@ -410,6 +443,7 @@ var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{RuntimeConfigOverridesTableSQLite, RuntimeConfigOverridesTableMySQL},
 	{OpsOperatorsTableSQLite, OpsOperatorsTableMySQL},
 	{OpsAuditLogTableSQLite, OpsAuditLogTableMySQL},
+	{WorldChronicleTableSQLite, WorldChronicleTableMySQL},
 }
 
 // DungeonSegmentEnteredTurnColumn 给 dungeon_segments 补 entered_turn（评审 L1：副本踏入回合钉死，

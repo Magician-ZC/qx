@@ -996,6 +996,9 @@ func createChildUnit(state State, left unit.Record, right unit.Record, coord wor
 	child.Identity.Gender = normalizeGender(profile.Gender, int(seed))
 	child.Identity.Lineage = "child"
 	child.Identity.Age = 0
+	// 生命周期分级（阶段4 §6）：子嗣 = mortal——Age 随世界 tick 增长、高龄确定性自然死亡（世界新陈代谢的新生侧）。
+	// 非受保护字段，直接写（随 profile blob 持久化）。
+	child.Identity.LifecycleClass = unit.LifecycleMortal
 	child.Identity.Biography = profile.Biography
 	child.Personality = normalizeCandidatePersonality(profile.Personality, seed)
 	child.Social.ParentUnitIDs = []string{left.ID, right.ID}

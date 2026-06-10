@@ -1073,7 +1073,11 @@ function drawUnits(
   // ambient/wild：命运主世界里「世间众生」——据点公共 NPC（ambient_units，faction_spawn 播种、静态可见）
   // 与野外散人（wild_units，此前 drawUnits 也漏画了）。它们随 player/enemy 一起上图，但用区别色 + 小一号 token，
   // 让她在地图上看得见身边有名有姓的人，又不与敌我交战单位混淆。ambientIDs 供下方 token 取色/取半径时区分。
-  const ambientAndWild = [...(session.ambient_units ?? []), ...(session.wild_units ?? [])];
+  // 防御性过滤已死的背景 NPC（life_state!=="active"）：mortal NPC 衰老老死/战斗被杀后，后端死亡链会把其 id 从
+  // ambient/wild 名册摘除（数据正源），这里再滤一道兜底——避免后端残留把死者当「世间众生」画成永久幽灵 token。
+  const ambientAndWild = [...(session.ambient_units ?? []), ...(session.wild_units ?? [])].filter(
+    (unit) => unit.status.life_state === "active",
+  );
   const ambientIDs = new Set(ambientAndWild.map((unit) => unit.id));
   const units = [...session.player_units, ...session.enemy_units, ...ambientAndWild];
   const unitNames = new Map(units.map((unit) => [unit.id, unit.identity.name]));

@@ -539,6 +539,25 @@ CREATE TABLE IF NOT EXISTS chronicle_entries (
 CREATE INDEX IF NOT EXISTS idx_chronicle_entries_session ON chronicle_entries(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_chronicle_entries_unit ON chronicle_entries(unit_id, turn);
 
+-- 世界编年史表（分区大世界阶段4 §7）：记录整个世界的纪元大事——boss 讨平 / 区域解锁 / 传奇诞生陨落 / 阵营之战，
+-- 独立于单角色编年史（chronicle_entries 是「她的人生」，本表是「她所处时代的洪流」）。按 world_id 聚合、world_tick 倒序读。
+-- append-only；era 是叙事纪元分段；category 入史类别；actor_refs 是涉及角色/阵营/区域 id 的 JSON 数组。
+-- 刻意不设 worlds/units 外键（跨分片/离线归属），完整性由业务层负责。
+CREATE TABLE IF NOT EXISTS world_chronicle (
+  id TEXT PRIMARY KEY,
+  world_id TEXT NOT NULL,
+  world_tick INTEGER NOT NULL DEFAULT 0,
+  era TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  title_zh TEXT NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL DEFAULT '',
+  actor_refs TEXT NOT NULL DEFAULT '[]',
+  importance INTEGER NOT NULL DEFAULT 5,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_chronicle_world ON world_chronicle(world_id, world_tick, created_at);
+
 -- 关系图传播留痕表（双驱动地基）：血仇/哀恸/相关性沿关系图扩散的每一跳留痕，供调试/复盘/反作弊审计。
 -- origin_event_id 是传播源事件；from_unit→to_unit 是这一跳的边；hop 跳数；fidelity=HopFidelity(hop)=0.6^hop 可信度。
 -- append-only；刻意不设 units 外键（跨分片/离线角色），归属完整性由业务层负责。

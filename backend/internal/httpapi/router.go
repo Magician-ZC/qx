@@ -2541,6 +2541,24 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"moment": view})
 	})
 
+	// ---- 世界编年史（world chronicle，分区大世界阶段4 §7）：整个世界的纪元大事，独立于单角色编年史 ----
+	// 角色史=她的人生（上面 /chronicle），世界史=她所处时代的洪流（boss 讨平/区域解锁/传奇诞生陨落/阵营之战）。
+	// 会话作用域 + 指挥阵营鉴权（复用 chronicleAuth）；按 worldTick/纪元倒序读一页（?limit= 缺省由 service 夹默认上限）。
+	// 旧单图档（WorldID 空）返回空 entries（前端提示「这方世界尚未与大世界相连」），非错误。
+	router.GET("/api/sessions/:id/world-chronicle", func(c *gin.Context) {
+		sessionID, ok := chronicleAuth(c)
+		if !ok {
+			return
+		}
+		limit, _ := chronicleLimitOffset(c)
+		feed, err := newSessionService().WorldChronicleFeedForSession(c.Request.Context(), sessionID, limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"feed": feed})
+	})
+
 	// ---- 离线宪章（offline_charter）读写：玩家不在场时单位据此自治的三段长效授权 ----
 	// 会话作用域 + 鉴权 + 单位归属校验（同 feuds 端点范式）：拒绝跨会话/任意 unitId 越权读写他人宪章。
 	// 三段：long_term_goals（长期目标，驱动目标重估）、redlines（红线，喂归因校验/Freeze List 硬门）、social_mandates（社交授权）。

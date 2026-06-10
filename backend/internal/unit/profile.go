@@ -13,6 +13,31 @@ type Identity struct {
 	Age              int    `json:"age"`
 	Biography        string `json:"biography"`
 	RecruitmentPitch string `json:"recruitment_pitch"`
+	// LifecycleClass 是单位的生命周期分级（分区大世界阶段4 §6，用户明确分三类）：
+	//   protagonist=玩家主角（Age 冻结、永不衰老死亡，命运可玩性根基）；
+	//   functional=固定功能性 NPC（商人/传送/任务发布/铁匠，Age 冻结、永不死亡，世界服务恒定）；
+	//   mortal=普通 NPC（路人/村民/野外散人/子嗣，Age 随世界 tick 增长、高龄确定性自然死亡，世界新陈代谢）。
+	// 非受保护字段（仿 Faction/Ambition，直接读写、不走 status.Mutator），随 profile blob（profileDocument.Identity）整块持久化。
+	// omitempty：旧档/空 class 反序列化为空串——衰老结算里**保守视为 mortal**（有新陈代谢），但主角恒按 PlayerUnitIDs 双保险护住、绝不死。
+	LifecycleClass LifecycleClass `json:"lifecycle_class,omitempty"`
+}
+
+// LifecycleClass 是单位生命周期分级（分区大世界阶段4 §6）。
+type LifecycleClass string
+
+const (
+	// LifecycleProtagonist 玩家控制角色——Age 完全冻结、永不衰老死亡（穿越时代的恒定主角）。
+	LifecycleProtagonist LifecycleClass = "protagonist"
+	// LifecycleFunctional 固定功能性 NPC（商人/传送管理员/任务发布/铁匠）——Age 冻结、永不死亡（世界服务恒定可用）。
+	LifecycleFunctional LifecycleClass = "functional"
+	// LifecycleMortal 普通 NPC（路人/村民/野外散人/子嗣）——Age 随世界 tick 增长、高龄按确定性掷骰自然死亡（世界新陈代谢）。
+	LifecycleMortal LifecycleClass = "mortal"
+)
+
+// IsMortal 判定该分级是否会衰老死亡。空串（旧档/未标记）**保守视为 mortal**——有新陈代谢，
+// 但主角的不死由调用方按 LifecycleClass!=mortal && 不在 PlayerUnitIDs 双保险另外护住（见 session/aging.go）。
+func (c LifecycleClass) IsMortal() bool {
+	return c != LifecycleProtagonist && c != LifecycleFunctional
 }
 
 // SocialState 记录单位在人际关系系统中的轻量状态。

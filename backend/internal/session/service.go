@@ -968,6 +968,7 @@ func (service *Service) settleExecutionToDeploymentBoundary(ctx context.Context,
 	service.scanFactionConflicts(ctx, state, units)            // 阵营冲突遭遇扫描（QUNXIANG_FACTION_PVE 默认关零行为；F4 H3：不再 append EnemyUnitIDs 走离线自动战，只出可接管命运卡）
 	service.scanExclusiveContestsAtBoundary(ctx, state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
 	service.wanderAmbientUnits(ctx, state, units)              // 出生点公共 NPC 轻量游走（QUNXIANG_AMBIENT_WANDER 默认关零行为；纯代码零 LLM，让命运地图舞台活起来）
+	service.settleAgingBestEffort(ctx, state, units)           // 生命周期三分类衰老死亡（阶段4 §6，QUNXIANG_AGING 默认关零行为）：mortal 增龄+高龄确定性老死→死亡全链；主角双保险绝不死。panic 兜底，绝不阻断边界
 	service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, state, units, "deployment_phase_started")
 	appendSessionMetricsLog(state)
 }

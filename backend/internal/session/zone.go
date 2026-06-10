@@ -118,16 +118,20 @@ func (service *Service) tagAmbientZoneBestEffort(ctx context.Context, zoneID str
 // zoneVisibleUnits 按主角当前区域过滤要上图的 NPC（ambient/wild）：只显示 Status.ZoneID 等于
 // 主角当前区域的单位。CurrentZoneID 为空（单区/兼容旧档）则不过滤、全显示（与改造前行为一致）。
 // 主角自身（PlayerUnits）不经此过滤，恒显示。
+//
+// 同时滤掉已死的背景 NPC（LifeState==Dead）：ambient/wild 是「世间众生」背景 token，死者（衰老老死 / 战斗击杀）应从
+// 地图消失而非留「幽灵」。死亡链已 best-effort 把死者 id 从 state.WildUnitIDs/AmbientUnitIDs 摘除（数据正源），这里再加
+// 一道 LifeState 过滤兜底——覆盖「id 摘除失败」「战斗死亡未走老死链摘 id」等残留，确保快照里背景死者绝不上图。
+// 注意：此函数**只**服务 ambient/wild（player/enemy 走 orderedUnits 不经此处），故滤 Dead 不影响主角/敌我的阵亡墓碑展示。
 func zoneVisibleUnits(state *State, ids []string, byID map[string]unit.Record) []unit.Record {
 	all := orderedUnits(ids, byID)
-	if state == nil || state.CurrentZoneID == "" {
-		return all // 单区/旧档：不过滤
-	}
 	visible := make([]unit.Record, 0, len(all))
 	for _, rec := range all {
-		// ZoneID 空的 NPC 视为属于「当前世界的默认显示」——但分区世界里 NPC 落库时已显式设区，
-		// 故空 ZoneID 仅出现在迁移残留，保守归当前区显示（不凭空消失）。
-		if rec.Status.ZoneID == "" || rec.Status.ZoneID == state.CurrentZoneID {
+		if rec.Status.LifeState == unit.LifeStateDead {
+			continue // 背景死者不上图（防幽灵 token）
+		}
+		// CurrentZoneID 为空（单区/旧档）不做区域过滤；否则只显示当前区 + ZoneID 空（迁移残留保守归当前区，不凭空消失）。
+		if state == nil || state.CurrentZoneID == "" || rec.Status.ZoneID == "" || rec.Status.ZoneID == state.CurrentZoneID {
 			visible = append(visible, rec)
 		}
 	}

@@ -14,6 +14,7 @@ import (
 
 	"qunxiang/backend/internal/engine/turns"
 	"qunxiang/backend/internal/faction"
+	"qunxiang/backend/internal/unit"
 	"qunxiang/backend/internal/world"
 )
 
@@ -322,6 +323,49 @@ func resetCoords(t *testing.T, service *Service, sessionID string, coords map[st
 		if err := service.units.Save(ctx, records[i]); err != nil {
 			t.Fatalf("reset save %s: %v", records[i].ID, err)
 		}
+	}
+}
+
+// TestFactionSpawn_LifecycleMix 验「修复 issue 1」：据点公共 NPC 不再一刀切全标 functional（旧实现违背 §6.1 致世界
+// 无新陈代谢）。播种后应是「少数服务 NPC=functional（永生）+ 多数村民/路人=mortal（会老死）」的混合：
+//   - functional 数量 ∈ [1, factionFunctionalPerSpawn]（覆盖核心服务，又不泛滥）。
+//   - 至少有一个 mortal（世界有新陈代谢的人口）。
+//   - 绝不出现「全 functional」（旧 bug）或「无任何 functional」（服务断档）。
+func TestFactionSpawn_LifecycleMix(t *testing.T) {
+	_, service := newMainWorldTestService(t)
+	ctx := context.Background()
+	sessionID, npcIDs := seedSpawnSessionWithMap(t, service)
+
+	records, err := service.units.ListBySession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("list units: %v", err)
+	}
+	spawned := map[string]struct{}{}
+	for _, id := range npcIDs {
+		spawned[id] = struct{}{}
+	}
+	var functional, mortal int
+	for i := range records {
+		if _, ok := spawned[records[i].ID]; !ok {
+			continue
+		}
+		switch records[i].Identity.LifecycleClass {
+		case unit.LifecycleFunctional:
+			functional++
+		case unit.LifecycleMortal:
+			mortal++
+		default:
+			t.Fatalf("公共 NPC %s 生命周期分级应为 functional 或 mortal，得 %q", records[i].ID, records[i].Identity.LifecycleClass)
+		}
+	}
+	if functional < 1 || functional > factionFunctionalPerSpawn {
+		t.Fatalf("functional 服务 NPC 数应 ∈ [1, %d]，得 %d（旧 bug=全 functional / 服务断档=0）", factionFunctionalPerSpawn, functional)
+	}
+	if mortal < 1 {
+		t.Fatalf("应有 mortal NPC 承担世界新陈代谢，却一个都没有（mortal=%d）", mortal)
+	}
+	if functional+mortal != len(npcIDs) {
+		t.Fatalf("functional(%d)+mortal(%d) 应等于播种总数 %d", functional, mortal, len(npcIDs))
 	}
 }
 

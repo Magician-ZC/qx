@@ -32,6 +32,25 @@ func ApplyFatalDamage(record *Record) error {
 	return nil
 }
 
+// ApplyNaturalDeath 让单位**直接永久死亡**（分区大世界阶段4 §6 自然老死）——不经 down/恢复倒计时，
+// 一步把 LivesRemaining→0、LifeState→dead。区别于 ApplyFatalDamage（战斗致命伤会先消耗一条命再倒地）：
+// 自然老死是寿数已尽、不可挽回，无「多命缓冲」。本函数位于 statuslint 白名单（/internal/unit/），
+// 直赋受保护字段 LivesRemaining/HP/LifeState 合法（与同文件 ApplyFatalDamage 同源）。
+// 已 dead 的单位幂等返错；调用方（session/aging.go）据成功与否触发死讯路由/血脉传承/入世界编年史。
+func ApplyNaturalDeath(record *Record) error {
+	if record == nil {
+		return fmt.Errorf("nil record")
+	}
+	if record.Status.LifeState == LifeStateDead {
+		return fmt.Errorf("unit is already permanently dead")
+	}
+	record.Status.HP = 0
+	record.Status.LivesRemaining = 0
+	record.Status.LifeState = LifeStateDead
+	record.Status.RecoveryTurns = 0
+	return nil
+}
+
 // Rescue 把倒地单位救回恢复状态并施加心理后遗影响。
 func Rescue(record *Record) error {
 	if record.Status.LifeState != LifeStateDown {

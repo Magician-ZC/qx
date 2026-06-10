@@ -474,6 +474,23 @@ CREATE TABLE IF NOT EXISTS chronicle_entries (
   INDEX idx_chronicle_entries_unit (unit_id, turn)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 世界编年史表（分区大世界阶段4 §7）：记录整个世界的纪元大事（boss 讨平 / 区域解锁 / 传奇诞生陨落 / 阵营之战），
+-- 独立于单角色编年史（chronicle_entries=她的人生，本表=她所处时代的洪流）。按 world_id 聚合、world_tick 倒序读。
+-- append-only；无 worlds/units 外键（跨分片/离线归属），完整性由业务层负责。
+CREATE TABLE IF NOT EXISTS world_chronicle (
+  id VARCHAR(191) PRIMARY KEY,
+  world_id VARCHAR(191) NOT NULL,
+  world_tick INT NOT NULL DEFAULT 0,
+  era VARCHAR(64) NOT NULL DEFAULT '',
+  category VARCHAR(64) NOT NULL DEFAULT '',
+  title_zh VARCHAR(255) NOT NULL DEFAULT '',
+  narrative_zh TEXT NOT NULL,
+  actor_refs TEXT NOT NULL,
+  importance INT NOT NULL DEFAULT 5,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  INDEX idx_world_chronicle_world (world_id, world_tick, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 关系图传播留痕表（双驱动地基）：血仇/哀恸/相关性沿关系图扩散的每一跳留痕，供调试/复盘/反作弊审计。
 -- origin_event_id 传播源；from_unit→to_unit 这一跳的边；hop 跳数；fidelity=0.6^hop 可信度。
 -- append-only；无 units 外键（跨分片/离线角色），归属由业务层负责。

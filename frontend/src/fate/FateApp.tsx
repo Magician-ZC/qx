@@ -27,6 +27,7 @@ import { FateView } from "./FateView";
 import { FateBoard } from "./FateBoard";
 import { WorldMap } from "./WorldMap";
 import { QuestPanel } from "./QuestPanel";
+import { WorldChroniclePanel } from "./WorldChroniclePanel";
 import { Minimap } from "./Minimap";
 import { CharacterSheet } from "./CharacterSheet";
 import { AccountSettings } from "./AccountSettings";
@@ -156,6 +157,27 @@ const questToggleBtnStyle: React.CSSProperties = {
   boxShadow: "0 4px 14px rgba(60, 44, 27, 0.2)",
 };
 
+// 编年史入口浮层按钮：与「🗺 舆图」「📜 任务」并排居顶，落在舆图按钮左侧（calc(50% - 200px)）不重叠。
+// 同款墨色宣纸卡风格 + 同层级(z 21)，故内联（不碰 fate.css）。点开 WorldChroniclePanel 看世界纪元大事。
+const chronicleToggleBtnStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 14,
+  left: "calc(50% - 200px)",
+  zIndex: 21,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(140, 100, 50, 0.5)",
+  background: "rgba(250, 244, 232, 0.96)",
+  color: "#6b4a22",
+  fontFamily: "'Noto Serif SC', 'Songti SC', serif",
+  fontSize: 14,
+  cursor: "pointer",
+  boxShadow: "0 4px 14px rgba(60, 44, 27, 0.2)",
+};
+
 // 小地图定位容器：Minimap 自身 position:absolute top:12 left:12（贴最近定位祖先左上角）。
 // 直接挂在 .fate-play-fullscreen(position:fixed) 下会与「换个账号」按钮(top:14 left:14)叠在一起，
 // 故套一个偏下的相对容器(top:52)，让小地图落到 restart 按钮下方。容器尺寸贴合小地图(~172×150)。
@@ -188,6 +210,8 @@ export function FateApp() {
   const [worldMapOpen, setWorldMapOpen] = useState(false);
   // questOpen：任务面板（差遣）浮层是否展开——点顶部「📜 任务」按钮打开（仿 worldMapOpen 范式）。
   const [questOpen, setQuestOpen] = useState(false);
+  // chronicleOpen：世界编年史浮层是否展开——点顶部「📖 编年史」按钮打开（仿 worldMapOpen 范式，纯只读观察态）。
+  const [chronicleOpen, setChronicleOpen] = useState(false);
   // boardRefresh：传给 FateBoard 的 refreshSignal——前往新区成功后 bump，使 board 重拉快照切到新区地图(state.map 已投影)+新区NPC。
   const [boardRefresh, setBoardRefresh] = useState(0);
   // boardSnap：FateBoard 经 onSnapshot 上抛的最新整快照——存着喂给小地图 Minimap（与 FateBoard 同源，不另起 getSession 轮询）。
@@ -379,6 +403,11 @@ export function FateApp() {
           📜 任务
         </button>
 
+        {/* 顶部偏左浮层：世界编年史入口。点开 WorldChroniclePanel 浮层，按纪元倒序看世界大事（纯只读观察态）。 */}
+        <button style={chronicleToggleBtnStyle} onClick={() => setChronicleOpen(true)} aria-haspopup="dialog">
+          📖 编年史
+        </button>
+
         {/* 右上浮层：命运抽屉开关（收起则独看全屏地图）。 */}
         <button
           className="fate-drawer-toggle"
@@ -475,6 +504,15 @@ export function FateApp() {
             unitId={saved.unitId}
             onClose={() => setQuestOpen(false)}
             onChanged={() => setBoardRefresh((v) => v + 1)}
+          />
+        )}
+
+        {/* 世界编年史浮层（纯只读观察态）：挂载即拉一页世界纪元大事，按 Era 分段倒序展示。
+            观察态、不改角色，故无 onChanged——关闭仅 setChronicleOpen(false)。 */}
+        {chronicleOpen && (
+          <WorldChroniclePanel
+            sessionId={saved.sessionId}
+            onClose={() => setChronicleOpen(false)}
           />
         )}
 

@@ -232,6 +232,9 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	hero.Faction = chosenFaction
 	hero.MoralAlignment = faction.BaselineFor(chosenFaction)
 	hero.Status.ZoneID = startZoneID // 分区世界：主角降生在出生区（快照按区过滤的归属锚）
+	// 生命周期分级（阶段4 §6）：玩家主角恒为 protagonist——Age 完全冻结、永不衰老死亡（穿越时代的恒定主角）。
+	// 非受保护字段，直接写（随 profile blob 持久化）。衰老结算另按 PlayerUnitIDs 双保险护住，绝不夺命。
+	hero.Identity.LifecycleClass = unit.LifecycleProtagonist
 	if err := service.units.Save(ctx, hero); err != nil {
 		return MainWorldCharacter{}, err
 	}

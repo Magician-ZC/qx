@@ -14,6 +14,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/unit"
@@ -89,6 +90,9 @@ func (service *Service) ChallengeZoneBoss(ctx context.Context, sessionID, unitID
 		// 任务进度 hook（阶段3 §5.3）：讨平本区 boss → 推进匹配的 defeat_boss objective（target=zoneId）。
 		// best-effort、纯逻辑（只改 state.ActiveQuests，随下方 saveSessionMergingExternalEvents 一并落库）。
 		advanceQuestObjectives(&state, ObjectiveDefeatBoss, zone.ID, 1)
+		// 入世界编年史（阶段4 §7.2 入史规则）：区域 boss 讨平 → boss_slain。best-effort，绝不影响结算。
+		// worldTick=部署回合（state.TurnState.Turn）；WorldID 空（旧单图档）则 chronicle helper 内部 no-op。
+		service.chronicleBossSlain(ctx, strings.TrimSpace(state.WorldID), state.TurnState.Turn, rec.ID, rec.DisplayName(), zone.BossName, zone.Name)
 	}
 	if err := service.saveSessionMergingExternalEvents(ctx, &state); err != nil {
 		return result, fmt.Errorf("challenge zone boss (save session): %w", err)

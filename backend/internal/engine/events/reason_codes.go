@@ -214,6 +214,14 @@ const (
 	// 不改保护字段——交付发奖的钱包/物品/经验由 turn-in 内部经 status.Mutator(ReasonEconomyReward) 与背包路径留痕）。
 	ReasonQuestAccepted  ReasonCode = "QUEST_ACCEPTED"  // 玩家为角色接取了一桩任务（available→active）
 	ReasonQuestCompleted ReasonCode = "QUEST_COMPLETED" // 任务目标全数达成 + 已交付（completed→turned_in），含解锁传送
+
+	// 世界编年史（分区大世界阶段4 §7）：整个世界的纪元大事被记进世界级编年史（独立于单角色编年史）。
+	// 流程事件（经 EmitProcessEvent，CategoryLifecycle，不改保护状态字段、不走 status.Mutator）——
+	// 一条 world_chronicle 落库时旁路留痕，作世界史的「回到那一刻」定位锚点。入史规则见 session/world_chronicle.go。
+	ReasonWorldChronicleRecord ReasonCode = "WORLD_CHRONICLE_RECORD"
+	// 自然老死（阶段4 §6）：mortal NPC 高龄按确定性掷骰自然死亡——改 lives_remaining（经 lives 白名单路径推进
+	// LivesRemaining→0/LifeState=dead，本码仅作流程/编年史留痕语义，区别于 PvP 的 CHARACTER_DIED/PvE 的 FELL_IN_DEFEAT）。
+	ReasonDeathByAge ReasonCode = "DEATH_BY_AGE"
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -345,6 +353,9 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonQuestAccepted, Category: CategoryLifecycle, DisplayName: "接下任务", DefaultReasonText: "她接下了一桩差事，心里有了新的奔头", StatDomains: []string{}, ImportanceMin: 3, ImportanceMax: 6},
 		{Code: ReasonQuestCompleted, Category: CategoryLifecycle, DisplayName: "任务达成", DefaultReasonText: "她了结了一桩差事，自有一番交代", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonPOIEncounterResolve, Category: CategoryLifecycle, DisplayName: "途中际遇", DefaultReasonText: "她在途中撞见了一桩际遇", StatDomains: []string{}, ImportanceMin: 2, ImportanceMax: 7},
+		// 世界编年史 + 自然老死（阶段4 §6/§7）：流程留痕（DEATH_BY_AGE 的实际 lives 变更经 lives 白名单路径，本条仅叙事/编年史语义）。
+		{Code: ReasonWorldChronicleRecord, Category: CategoryLifecycle, DisplayName: "世界纪事", DefaultReasonText: "这一笔被记进了世界编年史", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
+		{Code: ReasonDeathByAge, Category: CategoryLifecycle, DisplayName: "寿终正寝", DefaultReasonText: "一个人活到了岁数尽头，安静地走了", StatDomains: []string{"lives_remaining"}, ImportanceMin: 5, ImportanceMax: 8},
 
 		// —— 发行安全门：输入侧越狱/prompt-injection 拦截（治理类目，流程留痕）——
 		{Code: ReasonInputInjectionBlocked, Category: CategoryGovernance, DisplayName: "输入拦截", DefaultReasonText: "一段输入试图越权改写设定，被挡了下来", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
@@ -396,8 +407,11 @@ func EmitProcessEvent(ctx context.Context, execer interface {
 		`,
 		id,
 		event.SessionID,
-		event.OwnerUnitID,
-		related,
+		// actor/target 经 nullableText：空 owner 落 SQL NULL（满足 events.actor_unit_id→units(id) 外键，
+		// ON DELETE SET NULL 同语义）。世界级流程事件（如世界编年史锚点）无单一归属角色，owner 留空即 NULL，
+		// 避免空串 "" 被当作非法 unit id 触发外键约束失败（此前空 owner 会插入 "" 致 FK 拒绝）。
+		nullableText(event.OwnerUnitID),
+		nullableText(related),
 		string(category),
 		string(event.Code),
 		string(encoded),

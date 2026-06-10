@@ -115,6 +115,53 @@ var factionLifeThemes = map[string][]string{
 	faction.IDChaos:   {"觉得旧秩序早该砸烂，乱中才有她的活路。", "在废墟里讨生活，信奉强者自取、弱者自弃。", "视一切规矩为枷锁，只认眼前的痛快。"},
 }
 
+// factionServiceArchetypes 是少数「服务职能恒定」NPC 的原型池（商人/铁匠/任务发布/传送管理员等）——这批被标
+// functional：Age 冻结、永不衰老死亡，保证据点的买卖/打造/接任务/传送服务永远在线。其余村民/路人为 mortal（会老死，
+// 承担世界新陈代谢）。三阵营共用同一池（服务职能与道德底色无关，集市掌柜各阵营都得有人当）。
+var factionServiceArchetypes = []string{"集市商贩", "城镇铁匠", "任务发布人", "传送守关人", "客栈掌柜"}
+
+// factionFunctionalPerSpawn 是单据点（8–12 人）里被标 functional 的服务性 NPC 上限。设计 §6.1：functional 只应是
+// 「商人/传送/任务发布/铁匠」等少数职能恒定 NPC，绝不能一刀切全标永生——否则世界无新陈代谢。取 2 即「至少一位掌柜
+// 一位发布人」覆盖核心服务，又把绝大多数 NPC 留给 mortal（老的逝去、新的出生）。
+const factionFunctionalPerSpawn = 2
+
+// functionalSlotsForSpawn 据 (sessionID, faction, region, seed) 在 [0, count) 里确定性选 min(count, cap) 个下标作为
+// functional 服务 NPC 槽位，其余为 mortal。确定性（同输入同集合、可复现，禁全局 rand）：用 FNV 给每个下标取键、按键升序
+// 取前 k 个（A-Res 风格的确定性抽样，避免「永远是前两个」的可预测偏置，又与行为/频率无关）。
+func functionalSlotsForSpawn(sessionID, factionID, regionID string, seed int64, count int) map[int]struct{} {
+	slots := make(map[int]struct{})
+	if count <= 0 {
+		return slots
+	}
+	k := factionFunctionalPerSpawn
+	if k > count {
+		k = count
+	}
+	if k <= 0 {
+		return slots
+	}
+	type keyed struct {
+		index int
+		key   uint64
+	}
+	scored := make([]keyed, count)
+	for i := 0; i < count; i++ {
+		scored[i] = keyed{index: i, key: fnvSpawn(sessionID, factionID, regionID, seed, fmt.Sprintf("functional_slot:%d", i))}
+	}
+	// 按 key 升序选前 k（稳定：key 相等时按 index）——纯确定性选址，与播种顺序/行为频率无关。
+	for a := 0; a < count; a++ {
+		for b := a + 1; b < count; b++ {
+			if scored[b].key < scored[a].key || (scored[b].key == scored[a].key && scored[b].index < scored[a].index) {
+				scored[a], scored[b] = scored[b], scored[a]
+			}
+		}
+	}
+	for i := 0; i < k; i++ {
+		slots[scored[i].index] = struct{}{}
+	}
+	return slots
+}
+
 // FactionSpawnResult 是一次出生据点播种的结果摘要。
 type FactionSpawnResult struct {
 	FactionID string   // 阵营 ID（freedom/order/chaos）
@@ -183,6 +230,9 @@ func (service *Service) SeedFactionSpawn(ctx context.Context, sessionID string, 
 
 	archetypes := factionArchetypes[fid]
 	lifeThemes := factionLifeThemes[fid]
+	// 生命周期分级（阶段4 §6）按职能区分：仅少数承担「买卖/打造/任务发布/传送」服务职能的 NPC 标 functional（永生、
+	// 世界服务恒定），其余村民/路人标 mortal（会老死，承担世界新陈代谢）。functionalSlots 确定性选取本据点的服务槽位。
+	functionalSlots := functionalSlotsForSpawn(sessionID, fid, regionID, seed, count)
 
 	for i := 0; i < count; i++ {
 		tag := fmt.Sprintf("npc%d", i)
@@ -197,8 +247,13 @@ func (service *Service) SeedFactionSpawn(ctx context.Context, sessionID string, 
 			given = factionGivenM
 		}
 		name := pickFromPool(factionSurnames, h("sur")) + pickFromPool(given, h("giv"))
+		// 服务槽位用服务原型（集市商贩/铁匠/任务发布人等），其余用阵营出身原型。isFunctional 决定生命周期分级。
+		_, isFunctional := functionalSlots[i]
 		archetype := pickFromPool(archetypes, h("arch"))
 		theme := pickFromPool(lifeThemes, h("theme"))
+		if isFunctional {
+			archetype = pickFromPool(factionServiceArchetypes, h("svc"))
+		}
 
 		// 复用 BootstrapRecord 底座（确定性 seed 派生属性/人格），再覆写阵营字段。
 		npcSeed := seed + int64(i)*2671
@@ -208,6 +263,15 @@ func (service *Service) SeedFactionSpawn(ctx context.Context, sessionID string, 
 		// 阵营指纹 Lineage（幂等守卫据此识别，且与玩家/村民指纹不冲突）。
 		rec.Identity.Lineage = factionNPCLineagePrefix + archetype
 		rec.Identity.Biography = fmt.Sprintf("%s（%s阵营）。%s", archetype, def.NameZH, theme)
+		// 生命周期分级（阶段4 §6）按职能区分，**不再一刀切全 functional**（旧实现违背 §6.1 致世界无新陈代谢）：
+		//   - functionalSlots 命中（少数服务 NPC：商人/铁匠/任务发布/传送）→ functional：Age 冻结、永不老死，世界服务恒定。
+		//   - 其余村民/路人 → mortal：Age 随 tick 增长、高龄确定性自然死亡，承担世界新陈代谢（老的逝去、新的出生）。
+		// 非受保护字段，直接写（随 profile blob 持久化）。含 lazy 播种各区的 ambient 都走本函数，各区均有少量服务 NPC。
+		if isFunctional {
+			rec.Identity.LifecycleClass = unit.LifecycleFunctional
+		} else {
+			rec.Identity.LifecycleClass = unit.LifecycleMortal
+		}
 		// 阵营 + 道德轴（非保护字段，直接写——不走 Mutator）：道德轴≈baseline + 确定性小扰动。
 		rec.Faction = fid
 		rec.MoralAlignment = faction.PerturbBaseline(fid, npcSeed, tag, runtimeconfig.GetFloat("faction.moral_jitter"))

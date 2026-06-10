@@ -360,6 +360,9 @@ func (service *Service) TurnInQuest(ctx context.Context, sessionID, unitID, ques
 	// ① 解锁传送：UnlockZone 非空 → 解锁该区 portal（zonePortalUnlocked 据 UnlockedZones 放开）。随 session 库一并落地。
 	if zid := strings.TrimSpace(quest.Rewards.UnlockZone); zid != "" {
 		appendUnlockedZone(&state, zid)
+		// 入世界编年史（阶段4 §7.2 入史规则）：任务交付解锁区域 → zone_unlocked。best-effort，绝不影响交付。
+		// WorldID 空（旧单图档）则 chronicle helper 内部 no-op。
+		service.chronicleZoneUnlocked(ctx, strings.TrimSpace(state.WorldID), state.TurnState.Turn, rec.ID, rec.DisplayName(), zid, questZoneName(&state, zid))
 	}
 	// ② 收尾标记：移出 ActiveQuests + 入 CompletedQuestIDs（state.ActiveQuests 是切片删除）。
 	quest.State = QuestStateTurnedIn

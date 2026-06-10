@@ -1016,6 +1016,61 @@ export async function getChronicleMoment(params: {
   return data.moment ?? null;
 }
 
+// ── 世界编年史读侧（world chronicle，分区大世界阶段4 §7）：整个世界的纪元大事，独立于单角色编年史 ──
+// 角色史=她的人生（上面 getChronicleFeed），世界史=她所处时代的洪流（boss 讨平/区域解锁/传奇诞生陨落/阵营之战）。
+// 严格对齐后端 world.WorldChronicleEntry 的 json tag（snake_case，TitleZH→title_zh / NarrativeZH→narrative_zh，
+// 与既有 Quest.narrative_zh 同口径）。actor_refs 后端 omitempty，可能缺省。
+
+// WorldChronicleEntry 是世界编年史的一条纪元大事。
+//   - world_tick：发生时的世界时钟刻（与世界时钟同源，倒序排列锚点）。
+//   - era：所属纪元（按累计重大事件 Importance≥7 数 /12 分段，如「开拓纪元」「三阵营之战」）。
+//   - category：事件类别（boss_slain/zone_unlocked/hero_born/hero_died/faction_war/...），决定图标。
+//   - importance：重要度 [1,10]（后端夹），世界编年史按 ≥7 计入纪元推进。
+export type WorldChronicleEntry = {
+  id: string;
+  world_id: string;
+  world_tick: number;
+  era: string;
+  category: string;
+  title_zh: string;
+  narrative_zh: string;
+  actor_refs?: string[];
+  importance: number;
+  created_at?: string;
+};
+
+// WorldChronicleFeed 是一页世界编年史（倒序，按 world_tick/创建时间）。
+// world_id 为旧单图档（未与大世界相连）时为空 → entries 为空，非错误。
+export type WorldChronicleFeed = {
+  world_id: string;
+  entries: WorldChronicleEntry[];
+  limit: number;
+};
+
+// getWorldChronicle 拉某会话所在世界的编年史（倒序，?limit= 缺省由后端 service 夹默认上限 500）。
+// 会话作用域读，request 自动带会话角色 token（与 getChronicleFeed 一致）。
+// best-effort：失败（404/网络/字段缺/旧单图档 WorldID 空）一律回 {world_id:"", entries:[], limit:0}，
+// 不打断命运客户端浮层（编年史是观察态露出，绝不应让一次拉取失败阻断主界面）。
+export async function getWorldChronicle(
+  sessionID: string,
+  limit?: number,
+): Promise<WorldChronicleFeed> {
+  const qs = typeof limit === "number" && limit > 0 ? `?limit=${encodeURIComponent(String(Math.floor(limit)))}` : "";
+  try {
+    const data = await request<{ feed?: WorldChronicleFeed }>(
+      `/api/sessions/${encodeURIComponent(sessionID)}/world-chronicle${qs}`,
+    );
+    const feed = data.feed;
+    return {
+      world_id: feed?.world_id ?? "",
+      entries: feed?.entries ?? [],
+      limit: feed?.limit ?? 0,
+    };
+  } catch {
+    return { world_id: "", entries: [], limit: 0 };
+  }
+}
+
 // bootstrapCharacter 快速创建一个角色（捏人 onboarding 用）。
 // withVillage=true 时附带 with_village=1，兑现「她身边已有二十个有名有姓的人」的 onboarding 承诺。
 export async function bootstrapCharacter(

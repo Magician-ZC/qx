@@ -140,6 +140,9 @@ func computeMapNPCEventPOIs(state State, byID map[string]*unit.Record) []MapPOI 
 		if rec == nil {
 			continue
 		}
+		if rec.Status.LifeState == unit.LifeStateDead {
+			continue // 死者不再派生地图事件 POI（防幽灵：死亡链已摘 id，此处兜底战斗击杀等残留）
+		}
 		coord := world.Coord{Q: rec.Status.PositionQ, R: rec.Status.PositionR}
 		typeCode := npcEventTypeFor(state.ID, coord, rec.ID)
 		out = append(out, MapPOI{
