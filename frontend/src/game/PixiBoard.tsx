@@ -15,7 +15,10 @@ type Props = {
   nowMs?: number;
   zoom?: number;
   spectator?: boolean;
-  pois?: Array<{ q: number; r: number; kind: string; label: string }>;
+  // focusUnitID：命运观战模式下「她」的单位 ID，透传给 Pixi 场景做首屏相机居中（仅首次，之后玩家拖动不被打断）。
+  focusUnitID?: string;
+  // consumed=true 的 POI 徽标在 Pixi 层变淡（已采完/探完）。
+  pois?: Array<{ q: number; r: number; kind: string; label: string; consumed?: boolean }>;
   executionMarkers?: Array<{
     unitID: string;
     status: "started" | "completed";
@@ -38,6 +41,7 @@ export function PixiBoard({
   nowMs = Date.now(),
   zoom = 1,
   spectator = false,
+  focusUnitID = "",
   pois = [],
   executionMarkers = [],
 }: Props) {
@@ -54,6 +58,7 @@ export function PixiBoard({
     nowMs,
     zoom,
     spectator,
+    focusUnitID,
     pois,
     executionMarkers,
   });
@@ -69,6 +74,7 @@ export function PixiBoard({
     nowMs,
     zoom,
     spectator,
+    focusUnitID,
     pois,
     executionMarkers,
   };
@@ -100,7 +106,7 @@ export function PixiBoard({
   useEffect(() => {
     // 会话数据变更时只触发 scene.render，不重新挂载 Pixi 应用。
     sceneRef.current?.render(latestModelRef.current);
-  }, [session, commanderFactionID, fogPerspectiveUnitID, selectedTileCoord, onTileClick, onOpenDialogues, onOpenUnitChat, nowMs, zoom, spectator, pois, executionMarkers]);
+  }, [session, commanderFactionID, fogPerspectiveUnitID, selectedTileCoord, onTileClick, onOpenDialogues, onOpenUnitChat, nowMs, zoom, spectator, focusUnitID, pois, executionMarkers]);
 
   return <div ref={containerRef} className="pixi-board" aria-label="一念单局战场" />;
 }

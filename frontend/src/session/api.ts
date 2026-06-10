@@ -537,6 +537,7 @@ export async function equipItem(sessionID: string, unitID: string, itemID: strin
 }
 
 // MapPOI 对齐后端 session.MapPOI（json tag）：地块特殊资源 / 野外 NPC 身上的事件，画在格子上的徽标。
+// consumed=true 表示已被「采完/探完」（前端徽标变淡、动作目录不再给「探一探」）。
 export type MapPOI = {
   q: number;
   r: number;
@@ -544,6 +545,7 @@ export type MapPOI = {
   type_code: string;
   label_zh: string;
   unit_id?: string;
+  consumed?: boolean;
 };
 
 // getMapPOIs 拉某会话地图的兴趣点（确定性，命运地图画徽标 + 点击查看）。失败回空数组（不打断观战）。
@@ -561,6 +563,149 @@ export async function getSessionExecutionInProgress(sessionID: string): Promise<
     `/api/sessions/${encodeURIComponent(sessionID)}`,
   );
   return Boolean(data.session?.execution_in_progress);
+}
+
+// ── 地块事件系统客户端（开发计划 2026-06-10 §3.7）：点地块→动作目录→直发动作/POI 遭遇/交易 ──
+
+// TileAction 是动作目录里的一个可点条目（available=false 时置灰并展示 reason_zh）。
+export type TileAction = {
+  action: "gather" | "build" | "harvest" | "forge" | "upgrade" | "demolish" | "poi_encounter" | "talk" | "trade" | string;
+  activity?: string;
+  structure_type?: string;
+  target_unit_id?: string;
+  item_id?: string;
+  label_zh: string;
+  available: boolean;
+  reason_zh?: string;
+};
+
+// TileAffordances 对齐后端 session.TileAffordances：该格「是什么 + 有什么 + 能做什么」。
+export type TileAffordances = {
+  q: number;
+  r: number;
+  terrain: string;
+  terrain_zh: string;
+  landmark?: string;
+  poi?: { kind: string; type_code: string; label_zh: string; consumed: boolean } | null;
+  structure?: {
+    id: string;
+    type: string;
+    type_zh: string;
+    progress: number;
+    required: number;
+    complete: boolean;
+    harvest_ready: boolean;
+    owner_faction: string;
+  } | null;
+  occupants?: { unit_id: string; name: string; faction_id: string; is_wild: boolean }[];
+  unit_on_tile: boolean;
+  distance: number;
+  actions: TileAction[];
+};
+
+// getTileAffordances 拉某格的动作目录（决策零 LLM；用于点格子面板渲染动作按钮）。
+export async function getTileAffordances(sessionID: string, unitID: string, q: number, r: number): Promise<TileAffordances> {
+  return request<TileAffordances>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/tile-affordances?unit_id=${encodeURIComponent(unitID)}&q=${q}&r=${r}`,
+  );
+}
+
+// TileActionResult 是直发地块动作的结算摘要（中文一句话 + 资源/物品/状态增减明细）。
+export type TileActionResult = {
+  ok: boolean;
+  action: string;
+  summary_zh: string;
+  effects?: { kind: string; item_id?: string; label_zh: string; delta: number }[];
+};
+
+// executeTileAction 直发地块动作（采集/建造/锻造/强化/收获/拆除），后端复用既有结算链。
+export async function executeTileAction(
+  sessionID: string,
+  unitID: string,
+  payload: { action: string; q: number; r: number; activity?: string; structure_type?: string; item_id?: string },
+): Promise<TileActionResult> {
+  return request<TileActionResult>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/tile-action`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+// MerchantGood 是行商货单上的一件商品报价。
+export type MerchantGood = {
+  item_id: string;
+  display_name: string;
+  quantity: number;
+  buy_price: number;
+  sell_price: number;
+};
+
+// POIEncounterResult 是触发 POI 遭遇的结算（埋伏→精英战 / 行商→货单 / 求助、奇遇→分支 / 迷途→结识）。
+export type POIEncounterResult = {
+  ok: boolean;
+  kind: "resource" | "ambush" | "merchant" | "help" | "adventure" | "lost" | string;
+  type_code: string;
+  summary_zh: string;
+  consumed: boolean;
+  outcome?: {
+    wallet_delta?: number;
+    hunger_delta?: number;
+    morale_delta?: number;
+    gained_item_id?: string;
+    gained_item_name?: string;
+    gained_item_qty?: number;
+    relation_zh?: string;
+    effect_summary_zh?: string;
+    encounter_outcome?: string;
+    damage_taken?: number;
+    penalty_layer?: number;
+    awards?: string[];
+  };
+  merchant_unit_id?: string;
+  merchant_goods?: MerchantGood[];
+};
+
+// resolvePOIEncounter 触发该格 POI 遭遇结算（结算后该 POI 标记消耗防重放；行商不消耗、返回货单）。
+export async function resolvePOIEncounter(sessionID: string, unitID: string, q: number, r: number): Promise<POIEncounterResult> {
+  return request<POIEncounterResult>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/poi-encounter`,
+    { method: "POST", body: JSON.stringify({ q, r }) },
+  );
+}
+
+// PlayerTradeResult 是与 NPC 直接买卖的结算（金币/物品走后端既有口径）。
+export type PlayerTradeResult = {
+  ok: boolean;
+  summary_zh: string;
+  wallet_after: number;
+  items?: { item_id: string; display_name: string; quantity: number }[];
+};
+
+// tradeWithUnit 与同格/相邻 NPC 直接买卖（mode=buy 买入 / sell 卖出；quantity 缺省 1）。
+export async function tradeWithUnit(
+  sessionID: string,
+  unitID: string,
+  payload: { target_unit_id: string; mode: "buy" | "sell"; item_id: string; quantity?: number },
+): Promise<PlayerTradeResult> {
+  return request<PlayerTradeResult>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/trade`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+// useItem 玩家在线让角色使用背包消耗品（吃口粮/喝药；恢复恒经后端 Mutator）。失败抛错（中文友好提示）。
+export async function useItem(sessionID: string, unitID: string, itemID: string): Promise<void> {
+  await request(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/use-item`,
+    { method: "POST", body: JSON.stringify({ item_id: itemID }) },
+  );
+}
+
+// unequipItem 玩家在线让角色卸下某槽位装备回背包（weapon|armor|shoes|accessory，含重算派生攻防）。
+export async function unequipItem(sessionID: string, unitID: string, slot: string): Promise<void> {
+  await request(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/unequip`,
+    { method: "POST", body: JSON.stringify({ slot }) },
+  );
 }
 
 // resolveFateDecision 处理一条待决策（玩家拿主意）。

@@ -1178,6 +1178,16 @@ func (service *Service) executeGather(
 		return err
 	}
 
+	// 资源 POI 加成（地块事件系统 §3.2）：同格存在未消耗的特殊资源 POI（派生与 map_pois.go 同口径）时，
+	// 本次产出 ×1.5（向上取整）并把该 POI 标记为已消耗（幂等防重放）。空手而归（如打猎落空）不触发、不消耗。
+	if len(rewards) > 0 {
+		if poiType, ok := unconsumedResourcePOIAt(state, actor.Status.PositionQ, actor.Status.PositionR); ok {
+			rewards = scaleGatherRewardsForPOI(rewards)
+			markPOIConsumed(state, actor.Status.PositionQ, actor.Status.PositionR)
+			note = strings.TrimSpace(note + fmt.Sprintf("探明的%s让收获格外丰厚。", poiType))
+		}
+	}
+
 	if decision.Activity == ProductionActivityFarm {
 		index := structureIndexByID(state.Structures, decision.StructureID)
 		if index < 0 {
@@ -1524,6 +1534,22 @@ func gatherRewards(state State, actor unit.Record, decision unitDecisionPayload)
 	default:
 		return nil, "", fmt.Errorf("unsupported activity %q", decision.Activity)
 	}
+}
+
+// scaleGatherRewardsForPOI 把采集产出按资源 POI 加成放大 ×1.5（逐项向上取整，整数算式 ceil(q*3/2)）。
+// 纯函数、确定性；返回新切片不改入参。
+func scaleGatherRewardsForPOI(rewards []itemGrant) []itemGrant {
+	scaled := make([]itemGrant, 0, len(rewards))
+	for _, reward := range rewards {
+		if reward.Quantity <= 0 {
+			continue
+		}
+		scaled = append(scaled, itemGrant{
+			ItemID:   reward.ItemID,
+			Quantity: (reward.Quantity*3 + 1) / 2, // ceil(1.5q)
+		})
+	}
+	return scaled
 }
 
 func huntRewardsForRolls(terrain world.TerrainID, rationRoll float64, leatherRoll float64) []itemGrant {

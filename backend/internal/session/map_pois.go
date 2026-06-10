@@ -29,6 +29,7 @@ type MapPOI struct {
 	TypeCode string     `json:"type_code"` // 矿脉/药田/灵泉/古迹 或 奇遇/求助/埋伏/行商/迷途
 	LabelZH  string     `json:"label_zh"`  // 展示文案
 	UnitID   string     `json:"unit_id,omitempty"`
+	Consumed bool       `json:"consumed"` // 已被采完/探完（State.ConsumedPOIs 按坐标标记），前端徽标变淡
 }
 
 // npcEventTypes 是野外 NPC 身上可能携带的事件类型（确定性抽一个）。
@@ -61,20 +62,48 @@ func resourceForTerrain(terrain world.TerrainID) string {
 	}
 }
 
+// resourcePOITypeAt 与 computeMapResourcePOIs 完全同口径地判断「某格是否派生特殊资源 POI」，
+// 返回 typeCode（矿脉/药田/灵泉/古迹遗物）。供地块动作目录（tile_affordances）与采集加成（executeGather）复用，
+// 避免派生规则出现第二份口径。废墟(古迹)放宽阈值近乎必产；其余地形稀疏 (<0.12)。确定性、纯函数。
+func resourcePOITypeAt(sessionID string, terrain world.TerrainID, coord world.Coord) (string, bool) {
+	typeCode := resourceForTerrain(terrain)
+	if typeCode == "" {
+		return "", false
+	}
+	threshold := 0.12
+	if terrain == world.TerrainRuins {
+		threshold = 0.85 // 废墟≈古迹，近乎必产
+	}
+	if poiRoll(sessionID, coord, "resource") >= threshold {
+		return "", false
+	}
+	return typeCode, true
+}
+
+// unconsumedResourcePOIAt 判断某格是否存在「尚未被消耗」的特殊资源 POI，返回 typeCode。
+// 派生与 computeMapResourcePOIs 同口径 + 消耗态查 State.ConsumedPOIs（poi_state.go）。
+func unconsumedResourcePOIAt(state *State, q int, r int) (string, bool) {
+	if state == nil {
+		return "", false
+	}
+	coord := world.Coord{Q: q, R: r}
+	typeCode, ok := resourcePOITypeAt(state.ID, terrainAt(state.Map, coord), coord)
+	if !ok {
+		return "", false
+	}
+	if isPOIConsumed(state, q, r) {
+		return "", false
+	}
+	return typeCode, true
+}
+
 // computeMapResourcePOIs 确定性地给部分地块派生特殊资源 POI（稀疏，少而点睛）。
-// 废墟(古迹)本就是地标，放宽阈值近乎必产；其余地形稀疏 (<0.12)。
+// 派生口径收敛在 resourcePOITypeAt；下发时按 ConsumedPOIs 标 consumed（徽标变淡）。
 func computeMapResourcePOIs(state State) []MapPOI {
 	out := make([]MapPOI, 0, 16)
 	for _, tile := range state.Map.Tiles {
-		typeCode := resourceForTerrain(tile.Terrain)
-		if typeCode == "" {
-			continue
-		}
-		threshold := 0.12
-		if tile.Terrain == world.TerrainRuins {
-			threshold = 0.85 // 废墟≈古迹，近乎必产
-		}
-		if poiRoll(state.ID, tile.Coord, "resource") >= threshold {
+		typeCode, ok := resourcePOITypeAt(state.ID, tile.Terrain, tile.Coord)
+		if !ok {
 			continue
 		}
 		out = append(out, MapPOI{
@@ -83,6 +112,7 @@ func computeMapResourcePOIs(state State) []MapPOI {
 			Kind:     MapPOIResource,
 			TypeCode: typeCode,
 			LabelZH:  typeCode,
+			Consumed: isPOIConsumed(&state, tile.Coord.Q, tile.Coord.R),
 		})
 	}
 	return out
@@ -119,6 +149,8 @@ func computeMapNPCEventPOIs(state State, byID map[string]*unit.Record) []MapPOI 
 			TypeCode: typeCode,
 			LabelZH:  typeCode,
 			UnitID:   rec.ID,
+			// NPC 事件的消耗态跟人走（unitID 键）：NPC 游走后徽标仍保持「已探过」，不会在新格重新点亮。
+			Consumed: isNPCEventConsumed(&state, rec.ID),
 		})
 	}
 	return out

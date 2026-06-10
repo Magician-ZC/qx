@@ -1,16 +1,33 @@
-/* 文件说明：命运地图舞台（观战模式）——把战棋的 PixiBoard 搬进命运客户端作她日常生活的主舞台。
-   她随世界推进在六边形格子上移动；玩家**只是垂看的先祖**，不下令、不操控，故这里是纯观战：
-   - commanderFactionID 固定 "player"（按她的阵营着色），fogPerspectiveUnitID 留空（命运主世界雾已关、全可见），
-   - onTileClick 不再下令，只弹一张只读「这是谁」浮卡（lineage/faction），selectedTileCoord 用于浮卡定位/高亮。
+/* 文件说明：命运地图舞台（混合模型：观战为主 + 在线直驱）——把战棋的 PixiBoard 搬进命运客户端作她日常生活的主舞台。
+   她随世界推进在六边形格子上移动；玩家是垂看的先祖，但**上线时可直接操作她**：
+   - 点格子弹「这是什么地方 + 这里有谁」浮卡，附「让她去这里」直驱移动按钮；
+   - 浮卡同时 best-effort 拉该格**动作目录**（getTileAffordances，失败静默回退只读展示——旧后端 404 时面板不能坏），
+     渲染采集/建造/收获/锻造/探遭遇/交谈/交易等动作按钮：不可用置灰带 reason_zh 小字；
+   - 直发动作（gather/build/harvest/forge/upgrade/demolish）→ executeTileAction，结算摘要+明细内嵌小卡展示；
+   - POI 遭遇（poi_encounter）→ resolvePOIEncounter；撞上行商则展开「行商货单」交易小面板（买/卖对照 sell_price）；
+   - 普通 NPC 交易复用同款小面板但只开「卖」侧（基准卖价后端结算，前端不显示预估价）；
+   - 交谈：同阵营单位复用战棋 /dialogue 链路（talkToUnit）弹简易输入框；据点 NPC/野外散人不在该链路
+     鉴权范围内（router.go 校验 commander faction），降级把「与TA交谈」预填进指引草稿。
+   结果叙事同时经 WS fate_life_beat 冒进命运 feed（父层）；面板内嵌小卡是即时反馈、可「×」关掉。
    数据来自 GET /api/sessions/:id 的整块快照（getSession），与 FateView 文字命运卡同源同一会话。
    刷新节奏：自身挂载即拉一次 + 每隔若干秒轻量轮询；另接受 refreshSignal——父层在「世界往前走一拍」执行完后
    bump 该值，FateBoard 即重拉快照，board 随她移动重渲（PixiBoard 数据变化自动重渲）。
-   祖魂语气/宣纸墨色：本文件不可改 fate.css/styles.css，故浮卡等用内联样式贴合 .fate-* 墨色调；绝不出现指挥/下令 UI。*/
+   祖魂语气/宣纸墨色：本文件不可改 fate.css/styles.css，故浮卡/动作区/交易卡均用内联样式贴合 .fate-* 墨色调。*/
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getMapPOIs, getSession, moveUnit } from "../session/api";
-import type { MapPOI } from "../session/api";
-import type { BattleUnit, SessionSnapshot } from "../session/types";
+import {
+  executeTileAction,
+  getItemCatalog,
+  getMapPOIs,
+  getSession,
+  getTileAffordances,
+  moveUnit,
+  resolvePOIEncounter,
+  talkToUnit,
+  tradeWithUnit,
+} from "../session/api";
+import type { MapPOI, MerchantGood, POIEncounterResult, TileAction, TileAffordances } from "../session/api";
+import type { BattleUnit, InventoryItem, SessionSnapshot } from "../session/types";
 
 // LazyPixiBoard 与 App.tsx 同款懒加载 PixiBoard：让 Pixi 战场代码留在独立 chunk（不并进命运首屏主包），
 // 既复用 App 的代码分割收益，也消除「同一模块被静态+动态双导入」的打包合并告警。
@@ -18,7 +35,7 @@ const LazyPixiBoard = lazy(() => import("../game/PixiBoard").then((m) => ({ defa
 
 type Props = {
   sessionId: string;
-  // unitId：主角的单位 ID，仅用于在浮卡里标注「这就是她」。观战不依赖它做视野（雾已关）。
+  // unitId：主角的单位 ID，用于在浮卡里标注「这就是她」+ 动作目录/直驱动作以她为行动者。
   unitId: string;
   // refreshSignal：父层每推世界往前一拍并执行完后 bump 此值，FateBoard 据此重拉快照让 board 随她移动重渲。
   // 不传则只靠自身轮询刷新。
@@ -67,7 +84,7 @@ const TOWN_TERRAINS = new Set(["city", "village"]);
 // 取较慢节奏（避免高频拉整快照增成本）；父层 refreshSignal 才是「这拍刚跑完，立刻看她在哪」的精确刷新。
 const BOARD_POLL_MS = 8000;
 
-// 「这是谁」只读浮卡的内联样式（墨色宣纸调，叠在 PixiBoard 之上）。本文件不可改 css，故内联。
+// 「这是谁」浮卡的内联样式（墨色宣纸调，叠在 PixiBoard 之上）。本文件不可改 css，故内联。
 const whoCardStyle: React.CSSProperties = {
   position: "absolute",
   bottom: 16,
@@ -108,6 +125,102 @@ const whoCardCloseStyle: React.CSSProperties = {
   padding: 2,
 };
 
+// 动作目录滚动容器：动作列表自身限高滚动，避免把下方住户名单挤没（whoCard 整体已有 maxHeight）。
+const actionListStyle: React.CSSProperties = {
+  marginTop: 8,
+  maxHeight: 150,
+  overflowY: "auto",
+  display: "flex",
+  flexDirection: "column",
+  gap: 5,
+  paddingRight: 2,
+};
+
+// actionBtnStyle 动作按钮两态（可用/置灰）内联样式（墨色调）。
+function actionBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    display: "block",
+    width: "100%",
+    textAlign: "left",
+    padding: "5px 10px",
+    borderRadius: 8,
+    border: "1px solid rgba(140, 100, 50, 0.4)",
+    background: disabled ? "rgba(220, 210, 195, 0.55)" : "rgba(196, 132, 58, 0.14)",
+    color: disabled ? "#a99b82" : "#7a5226",
+    fontFamily: "inherit",
+    fontSize: 13,
+    cursor: disabled ? "default" : "pointer",
+  };
+}
+
+// 内嵌小卡（动作结果/交易/交谈共用）：比浮卡再深一档的墨色衬底，自带右上「×」。
+const resultCardStyle: React.CSSProperties = {
+  position: "relative",
+  marginTop: 8,
+  padding: "8px 24px 8px 10px",
+  borderRadius: 8,
+  background: "rgba(120, 90, 50, 0.08)",
+  border: "1px solid rgba(120, 90, 50, 0.25)",
+  fontSize: 12,
+  color: "#4a3417",
+  lineHeight: 1.6,
+};
+const subCloseStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 4,
+  right: 6,
+  border: "none",
+  background: "transparent",
+  color: "#a08a60",
+  fontSize: 14,
+  cursor: "pointer",
+  lineHeight: 1,
+  padding: 2,
+};
+
+// 交易小面板的一行（商品/行囊物品 + 买/卖按钮）。
+const tradeRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 6,
+  borderTop: "1px solid rgba(120, 90, 50, 0.14)",
+  paddingTop: 4,
+  marginTop: 4,
+};
+
+// tradeBtnStyle 买/卖小按钮两态内联样式。
+function tradeBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    flexShrink: 0,
+    padding: "2px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(140, 100, 50, 0.4)",
+    background: disabled ? "rgba(220, 210, 195, 0.55)" : "rgba(196, 132, 58, 0.16)",
+    color: disabled ? "#a99b82" : "#7a5226",
+    fontFamily: "inherit",
+    fontSize: 12,
+    cursor: disabled ? "default" : "pointer",
+  };
+}
+
+// 交谈输入框（textarea）内联样式。
+const talkInputStyle: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  marginTop: 6,
+  marginBottom: 4,
+  padding: "5px 8px",
+  borderRadius: 6,
+  border: "1px solid rgba(140, 100, 50, 0.35)",
+  background: "rgba(255, 252, 245, 0.9)",
+  color: "#4a3417",
+  fontFamily: "inherit",
+  fontSize: 12,
+  lineHeight: 1.5,
+  resize: "vertical",
+};
+
 // 舞台容器内联样式：相对定位以承载浮卡。**确定高度由 .fate-board-stage（fate.css）提供**——不能用 auto 高度
 // （minHeight），否则与 PixiBoard 的 resizeTo:container 形成「容器高=canvas 高」反馈循环致地图无限拉长。
 const boardWrapStyle: React.CSSProperties = {
@@ -132,8 +245,8 @@ const boardLoadingStyle: React.CSSProperties = {
   letterSpacing: "0.08em",
 };
 
-// allUnitsOf 把一份快照里四类单位（玩家/敌方/据点 NPC/野外散人）汇成一张「坐标 → 单位」可查表，
-// 供点格子时定位「这格上站的是谁」。同格多单位取第一个（观战只读，足够回答「这是谁」）。
+// allUnitsOf 把一份快照里四类单位（玩家/敌方/据点 NPC/野外散人）汇成可查列表，
+// 供点格子时定位「这格上站的是谁」与按 unit_id 反查名字。
 function allUnitsOf(snap: SessionSnapshot | null): BattleUnit[] {
   if (!snap) return [];
   return [
@@ -152,7 +265,7 @@ type TileOccupant = {
   isHer: boolean;
 };
 
-// TilePanel 是点格子弹出的「这是什么地方 + 这里有谁 + 有什么」只读面板内容。
+// TilePanel 是点格子弹出的「这是什么地方 + 这里有谁 + 有什么 + 能做什么」面板的本地拼装部分。
 type TilePanel = {
   q: number;
   r: number;
@@ -163,22 +276,105 @@ type TilePanel = {
   pois: { kind: string; label: string }[]; // 这格的兴趣点（资源/事件）
 };
 
+// ActionResultCard 是动作结算的内嵌即时反馈（中文一句话 + 增减明细行），可「×」关掉。
+type ActionResultCard = {
+  summary: string;
+  lines: string[];
+};
+
+// TradePanel 是交易小面板：行商带货单（可买可卖）；普通 NPC 无货单只开「卖」侧。
+type TradePanel = {
+  targetUnitId: string;
+  targetName: string;
+  goods: MerchantGood[];
+  isMerchant: boolean;
+};
+
+// TalkPanel 是与同阵营单位交谈的简易输入框目标。
+type TalkPanel = {
+  targetUnitId: string;
+  targetName: string;
+};
+
+// signedNum 把增减数值格式化成带符号明细（+3 / -2）。
+function signedNum(n: number): string {
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
+// ENCOUNTER_OUTCOME_ZH 把遭遇结果代码译成中文短语（未知回落原串）。
+const ENCOUNTER_OUTCOME_ZH: Record<string, string> = {
+  victory: "得胜而归",
+  defeat: "不敌败退",
+  escaped: "脱身而走",
+  retreat: "且战且退",
+};
+
+// effectLines 把直发动作的 effects 明细转成中文行（label ±delta）。
+function effectLines(effects: { kind: string; item_id?: string; label_zh: string; delta: number }[] | undefined): string[] {
+  return (effects ?? []).map((e) => `${e.label_zh} ${signedNum(e.delta)}`);
+}
+
+// outcomeLines 把 POI 遭遇 outcome 摘要成中文行（钱囊/饱腹/心绪/得物/受创/胜负/关系/战获）。
+function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<string, string>): string[] {
+  if (!outcome) return [];
+  const lines: string[] = [];
+  if (outcome.wallet_delta) lines.push(`钱囊 ${signedNum(outcome.wallet_delta)} 文`);
+  if (outcome.hunger_delta) lines.push(`饱腹 ${signedNum(outcome.hunger_delta)}`);
+  if (outcome.morale_delta) lines.push(`心绪 ${signedNum(outcome.morale_delta)}`);
+  const gainedName =
+    outcome.gained_item_name ||
+    (outcome.gained_item_id ? catalog.get(outcome.gained_item_id) || outcome.gained_item_id : "");
+  if (gainedName) lines.push(`得「${gainedName}」×${outcome.gained_item_qty ?? 1}`);
+  if (outcome.damage_taken && outcome.damage_taken > 0) lines.push(`受创 -${outcome.damage_taken}`);
+  if (outcome.encounter_outcome) lines.push(ENCOUNTER_OUTCOME_ZH[outcome.encounter_outcome] ?? outcome.encounter_outcome);
+  if (outcome.penalty_layer && outcome.penalty_layer > 0) lines.push(`受挫层级 D${outcome.penalty_layer}`);
+  if (outcome.relation_zh) lines.push(outcome.relation_zh);
+  if (outcome.effect_summary_zh) lines.push(outcome.effect_summary_zh);
+  if (outcome.awards && outcome.awards.length > 0) lines.push(`战获：${outcome.awards.join("、")}`);
+  return lines;
+}
+
 export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggested }: Props) {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
   // pois：地图兴趣点（地块资源 / 野外 NPC 事件），画在格子上的徽标 + 点击查看。
   const [pois, setPois] = useState<MapPOI[]>([]);
   // selected：当前点选的格子（用于 PixiBoard 高亮 + 浮卡定位锚点）。
   const [selected, setSelected] = useState<{ q: number; r: number } | null>(null);
-  // tile：点格子弹出的「这是什么地方 + 这里有谁」面板内容；null=不展示。
+  // tile：点格子弹出的「这是什么地方 + 这里有谁」面板的本地拼装内容；null=不展示。
   const [tile, setTile] = useState<TilePanel | null>(null);
   // mountedRef 守卫异步拉取返回时组件已卸载就不再 setState。
   const mountedRef = useRef(true);
+
+  // ── 动作面板状态（开发计划 2026-06-10 §3.7：TilePanel 只读 → 动作面板）──
+  // affordances：该格动作目录（best-effort；null=拉取失败/未拉到→回退只读展示，旧后端 404 时面板不能坏）。
+  const [affordances, setAffordances] = useState<TileAffordances | null>(null);
+  const [affLoading, setAffLoading] = useState(false);
+  // affSeqRef：快速连点不同格子时丢弃过期的 affordances 响应。
+  const affSeqRef = useRef(0);
+  // actionBusy：任一动作（直发/遭遇/交易/交谈）进行中——复用 moveBusy 模式，动作区全列表禁点。
+  const [actionBusy, setActionBusy] = useState(false);
+  // actionResult：动作结算的内嵌即时反馈卡（结果叙事同时经 WS fate_life_beat 冒进父层命运 feed）。
+  const [actionResult, setActionResult] = useState<ActionResultCard | null>(null);
+  // trade：交易小面板（行商货单 / 普通 NPC 卖侧）。
+  const [trade, setTrade] = useState<TradePanel | null>(null);
+  // talk：交谈输入框（仅同阵营单位走 /dialogue 链路）。
+  const [talk, setTalk] = useState<TalkPanel | null>(null);
+  const [talkDraft, setTalkDraft] = useState("");
+  const [talkReply, setTalkReply] = useState("");
+  // itemCatalog：物品 id→中文名（卖给行商区译名用），挂载时 best-effort 拉一次（失败回空 Map 退原 id）。
+  const [itemCatalog, setItemCatalog] = useState<Map<string, string>>(() => new Map());
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  useEffect(() => {
+    void getItemCatalog().then((map) => {
+      if (mountedRef.current) setItemCatalog(map);
+    });
   }, []);
 
   const refresh = useCallback(async () => {
@@ -207,8 +403,25 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  // 点格子（观战不下令）：弹一张只读面板，展示「这是什么地方」（地形 + 地标）+「这里有谁」（占据者名单）。
-  // 城镇（城市/村庄）会把住户当名单列出；空地也展示地形信息（不再是点了没反应）。
+  // fetchAffordances：best-effort 拉该格动作目录。失败静默置 null（面板回退只读展示，绝不报错打断）。
+  const fetchAffordances = useCallback(
+    async (q: number, r: number) => {
+      const seq = ++affSeqRef.current;
+      setAffLoading(true);
+      try {
+        const res = await getTileAffordances(sessionId, unitId, q, r);
+        if (mountedRef.current && affSeqRef.current === seq) setAffordances(res);
+      } catch {
+        // 旧后端进程没有该路由（404）/网络失败：静默回退只读展示。
+        if (mountedRef.current && affSeqRef.current === seq) setAffordances(null);
+      } finally {
+        if (mountedRef.current && affSeqRef.current === seq) setAffLoading(false);
+      }
+    },
+    [sessionId, unitId],
+  );
+
+  // 点格子：本地拼装只读信息（地形/地标/占据者/POI 徽标）+ 并行 best-effort 拉动作目录。
   const onTileClick = useCallback(
     (q: number, r: number) => {
       const mapTile = snap?.map?.tiles?.find((t) => t.coord.q === q && t.coord.r === r);
@@ -233,6 +446,14 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         occupants,
         pois: tilePois,
       });
+      // 换格子时清空上一格的动作面板余烬（结果卡/交易/交谈），再拉新目录。
+      setAffordances(null);
+      setActionResult(null);
+      setTrade(null);
+      setTalk(null);
+      setTalkDraft("");
+      setTalkReply("");
+      void fetchAffordances(q, r);
       // 指向型指引草稿：点中具名的人→「留意」她；点中地标/POI/地形→「去那看看」。上抛父层预填进指引框。
       if (onGuidanceSuggested) {
         const namedOther = occupants.find((o) => !o.isHer);
@@ -249,11 +470,14 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         onGuidanceSuggested(draft);
       }
     },
-    [snap, unitId, pois, onGuidanceSuggested],
+    [snap, unitId, pois, fetchAffordances, onGuidanceSuggested],
   );
 
   // moveBusy：玩家「让她去这里」直接移动进行中（防重复点）。
   const [moveBusy, setMoveBusy] = useState(false);
+  // busyAll：移动或任一动作进行中——浮卡上所有可点项统一禁点，防并发直驱写。
+  const busyAll = moveBusy || actionBusy;
+
   // onMoveHere：玩家在线直接把她移到点选的格子（混合模型：上线可操作）。成功后重拉快照让 board 追平。
   const onMoveHere = useCallback(
     async (q: number, r: number) => {
@@ -272,6 +496,161 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     [sessionId, unitId, refresh],
   );
 
+  // unitNameOf：按 unit_id 反查名字（优先动作目录的 occupants，回落整快照四类单位）。
+  const unitNameOf = useCallback(
+    (targetUnitId: string, fallback: string): string => {
+      const occ = affordances?.occupants?.find((o) => o.unit_id === targetUnitId);
+      if (occ?.name) return occ.name;
+      const u = allUnitsOf(snap).find((x) => x.id === targetUnitId);
+      return u?.identity?.name || u?.identity?.nickname || fallback;
+    },
+    [affordances, snap],
+  );
+
+  // herBackpack：她的行囊（卖给行商区数据源）。快照里 player_units 中 id===unitId 的 inventory.backpack。
+  const herBackpack = useMemo<InventoryItem[]>(() => {
+    const her = snap?.player_units?.find((u) => u.id === unitId);
+    return her?.inventory?.backpack ?? [];
+  }, [snap, unitId]);
+
+  // itemNameOf：行囊物品译名（custom_name 优先，其次物品目录，再退原 id）。
+  const itemNameOf = useCallback(
+    (it: InventoryItem): string => {
+      if (it.custom_name) return it.custom_name;
+      return itemCatalog.get(it.item_id) || it.item_id || "未知物品";
+    },
+    [itemCatalog],
+  );
+
+  // onAction：动作目录按钮分发。直发动作/POI 遭遇走后端结算并内嵌展示结果；交谈/交易打开各自小面板。
+  const onAction = useCallback(
+    async (a: TileAction) => {
+      if (!tile) return;
+      // 交谈：后端 POST /api/sessions/:id/dialogue（talkToUnit）仅鉴权放行**指挥阵营自家单位**
+      // （router.go 在 PlayerUnits/EnemyUnits 里查 faction 并比对 commander faction）。
+      // 同阵营单位（player_units 里能找到）→ 复用该链路弹输入框；
+      // 据点 NPC / 野外散人不在覆盖内 → 降级把「与TA交谈」预填进指引草稿，让她自治时找TA搭话。
+      // TODO：缺「她（玩家单位）→ 任意同格 NPC」的对话端点；待后端补 fate 作用域 dialogue 路由后接上。
+      if (a.action === "talk") {
+        const targetId = (a.target_unit_id ?? "").trim();
+        const name = targetId ? unitNameOf(targetId, "那人") : "那人";
+        const inPlayerUnits = Boolean(targetId && snap?.player_units?.some((u) => u.id === targetId));
+        if (inPlayerUnits) {
+          setTrade(null);
+          setActionResult(null);
+          setTalkDraft("");
+          setTalkReply("");
+          setTalk({ targetUnitId: targetId, targetName: name });
+        } else {
+          onGuidanceSuggested?.(`跟「${name}」说说话，听听TA的来历`);
+        }
+        return;
+      }
+      // 普通 NPC 交易（非行商）：无货单，只开「卖」侧（基准卖价后端结算，前端不显示预估价）。
+      if (a.action === "trade") {
+        const targetId = (a.target_unit_id ?? "").trim();
+        if (!targetId) return;
+        setTalk(null);
+        setActionResult(null);
+        setTrade({ targetUnitId: targetId, targetName: unitNameOf(targetId, "对方"), goods: [], isMerchant: false });
+        return;
+      }
+      setActionBusy(true);
+      try {
+        if (a.action === "poi_encounter") {
+          const res = await resolvePOIEncounter(sessionId, unitId, tile.q, tile.r);
+          setActionResult({ summary: res.summary_zh, lines: outcomeLines(res.outcome, itemCatalog) });
+          // 行商：带货单展开「行商货单」交易小面板（可买可卖）。
+          if (res.kind === "merchant" && res.merchant_unit_id && (res.merchant_goods?.length ?? 0) > 0) {
+            setTalk(null);
+            setTrade({
+              targetUnitId: res.merchant_unit_id,
+              targetName: unitNameOf(res.merchant_unit_id, "行商"),
+              goods: res.merchant_goods ?? [],
+              isMerchant: true,
+            });
+          }
+        } else {
+          // gather/build/harvest/forge/upgrade/demolish：直发地块动作，后端复用既有结算链。
+          const res = await executeTileAction(sessionId, unitId, {
+            action: a.action,
+            q: tile.q,
+            r: tile.r,
+            activity: a.activity,
+            structure_type: a.structure_type,
+            item_id: a.item_id,
+          });
+          setActionResult({ summary: res.summary_zh, lines: effectLines(res.effects) });
+        }
+        // 结算后重拉快照与 POI（钱包/背包/consumed 徽标追平），并重拉动作目录（可用性变化）。
+        await refresh();
+        void fetchAffordances(tile.q, tile.r);
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "这事没办成");
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [tile, snap, sessionId, unitId, itemCatalog, refresh, fetchAffordances, unitNameOf, onGuidanceSuggested],
+  );
+
+  // onTrade：与行商/NPC 买卖一件（quantity 恒 1，后端权威结算）。买成后货单本地扣减作即时反馈。
+  const onTrade = useCallback(
+    async (mode: "buy" | "sell", itemId: string) => {
+      if (!trade) return;
+      setActionBusy(true);
+      try {
+        const res = await tradeWithUnit(sessionId, unitId, {
+          target_unit_id: trade.targetUnitId,
+          mode,
+          item_id: itemId,
+          quantity: 1,
+        });
+        setActionResult({ summary: res.summary_zh, lines: [`钱囊余 ${res.wallet_after} 文`] });
+        if (mode === "buy") {
+          setTrade((cur) =>
+            cur
+              ? {
+                  ...cur,
+                  goods: cur.goods
+                    .map((g) => (g.item_id === itemId ? { ...g, quantity: g.quantity - 1 } : g))
+                    .filter((g) => g.quantity > 0),
+                }
+              : cur,
+          );
+        }
+        await refresh();
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "买卖没谈成");
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [trade, sessionId, unitId, refresh],
+  );
+
+  // onTalkSend：把话经 /dialogue 链路递给同阵营单位，对方回应叙事展示在面板内。
+  const onTalkSend = useCallback(async () => {
+    if (!talk) return;
+    const text = talkDraft.trim();
+    if (!text) return;
+    setActionBusy(true);
+    setTalkReply("她正与对方搭话…");
+    try {
+      const res = await talkToUnit(sessionId, talk.targetUnitId, text);
+      if (mountedRef.current) {
+        setSnap(res.session);
+        setTalkReply(`${res.reply.speaker || talk.targetName}：${res.reply.message}`);
+        setTalkDraft("");
+      }
+    } catch (e) {
+      if (mountedRef.current) setTalkReply("");
+      window.alert(e instanceof Error ? e.message : "这话没说上");
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [talk, talkDraft, sessionId]);
+
   // commanderFactionID：按她所属阵营给玩家暖色（snap 里有 player_faction_id 即用，缺则回落 "player"）。
   const commanderFactionID = useMemo(() => snap?.player_faction_id || "player", [snap?.player_faction_id]);
 
@@ -286,7 +665,8 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           onTileClick={onTileClick}
           spectator
           zoom={1.3}
-          pois={pois.map((p) => ({ q: p.q, r: p.r, kind: p.kind, label: p.label_zh }))}
+          focusUnitID={unitId}
+          pois={pois.map((p) => ({ q: p.q, r: p.r, kind: p.kind, label: p.label_zh, consumed: p.consumed }))}
         />
       </Suspense>
       {tile && (
@@ -306,22 +686,154 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           {/* 玩家在线操作：让她直接走到这里（混合模型——你可指挥她，世界也自治推进）。 */}
           <button
             type="button"
-            disabled={moveBusy}
+            disabled={busyAll}
             onClick={() => void onMoveHere(tile.q, tile.r)}
             style={{
               marginTop: 8,
               padding: "6px 12px",
               borderRadius: 8,
               border: "1px solid rgba(140, 100, 50, 0.5)",
-              background: moveBusy ? "rgba(220,210,195,0.7)" : "rgba(196, 132, 58, 0.16)",
+              background: busyAll ? "rgba(220,210,195,0.7)" : "rgba(196, 132, 58, 0.16)",
               color: "#7a5226",
               fontFamily: "inherit",
               fontSize: 13,
-              cursor: moveBusy ? "default" : "pointer",
+              cursor: busyAll ? "default" : "pointer",
             }}
           >
             {moveBusy ? "她正动身…" : "🚶 让她去这里"}
           </button>
+          {/* 动作目录：拉取中给一行占位；拉到即渲染按钮列表（不可用置灰带 reason_zh）；失败静默回退只读。
+              渲染前校验目录坐标与当前面板格一致——动作完成后的尾随重拉捕获的是旧格闭包，若玩家此间点了
+              新格，旧格目录可能后到并压过新格（seq 只防「旧响应覆盖新响应」，防不了「旧格的尾随请求」）。 */}
+          {affLoading && <div style={{ ...whoCardLineStyle, marginTop: 8 }}>她正打量这块地方…</div>}
+          {!affLoading && affordances && affordances.q === tile.q && affordances.r === tile.r && affordances.actions.length > 0 && (
+            <div style={actionListStyle} aria-label="她在这里能做的事">
+              {affordances.actions.map((a, i) => (
+                <div key={`${a.action}-${a.activity ?? ""}-${a.target_unit_id ?? ""}-${i}`}>
+                  <button
+                    type="button"
+                    style={actionBtnStyle(!a.available || busyAll)}
+                    disabled={!a.available || busyAll}
+                    onClick={() => void onAction(a)}
+                  >
+                    {a.label_zh}
+                  </button>
+                  {!a.available && a.reason_zh && (
+                    <div style={{ fontSize: 11, color: "#a99b82", padding: "1px 2px 0" }}>{a.reason_zh}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 动作结果内嵌小卡：即时反馈（同一叙事会经 WS fate_life_beat 冒进父层命运 feed），可「×」关掉。 */}
+          {actionResult && (
+            <div style={resultCardStyle} role="status" aria-label="动作结果">
+              <button style={subCloseStyle} aria-label="收起结果" onClick={() => setActionResult(null)}>
+                ×
+              </button>
+              <div>{actionResult.summary}</div>
+              {actionResult.lines.length > 0 && (
+                <div style={{ marginTop: 2, color: "#6b4a22" }}>
+                  {actionResult.lines.map((ln, i) => (
+                    <div key={i}>· {ln}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {/* 交易小面板：行商带货单（买/卖对照 sell_price）；普通 NPC 只开卖侧（基准价后端结算不预估）。 */}
+          {trade && (
+            <div style={resultCardStyle} aria-label="交易">
+              <button style={subCloseStyle} aria-label="收起交易" onClick={() => setTrade(null)}>
+                ×
+              </button>
+              <div style={{ fontSize: 13, color: "#6b4a22" }}>🪙 与「{trade.targetName}」交易</div>
+              {trade.isMerchant && trade.goods.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ fontSize: 11, color: "#8a7556" }}>行商货单</div>
+                  {trade.goods.map((g) => (
+                    <div key={g.item_id} style={tradeRowStyle}>
+                      <span>
+                        {g.display_name} ×{g.quantity} · {g.buy_price}文
+                      </span>
+                      <button
+                        type="button"
+                        style={tradeBtnStyle(busyAll)}
+                        disabled={busyAll}
+                        onClick={() => void onTrade("buy", g.item_id)}
+                      >
+                        买下
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 11, color: "#8a7556" }}>
+                  {trade.isMerchant ? "卖给行商" : "把行囊里的东西卖给TA"}
+                </div>
+                {herBackpack.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#8a7556", marginTop: 2 }}>她的行囊空空如也。</div>
+                ) : (
+                  herBackpack.map((it, i) => {
+                    // 行商只收货单上标了 sell_price 的物件（其余按钮禁用「不收」）；普通 NPC 全可卖、不显示预估价。
+                    const good = trade.isMerchant ? trade.goods.find((g) => g.item_id === it.item_id) : undefined;
+                    const sellPrice = good && good.sell_price > 0 ? good.sell_price : 0;
+                    const sellable = !trade.isMerchant || sellPrice > 0;
+                    return (
+                      <div key={`${it.item_id}-${i}`} style={tradeRowStyle}>
+                        <span>
+                          {itemNameOf(it)} ×{it.quantity}
+                          {sellPrice > 0 && <span style={{ color: "#8a7556" }}> · 可卖{sellPrice}文</span>}
+                        </span>
+                        <button
+                          type="button"
+                          style={tradeBtnStyle(busyAll || !sellable)}
+                          disabled={busyAll || !sellable}
+                          onClick={() => void onTrade("sell", it.item_id)}
+                        >
+                          {sellable ? "卖出" : "不收"}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+          {/* 交谈输入框：同阵营单位走 /dialogue 链路；回应叙事就地展示。 */}
+          {talk && (
+            <div style={resultCardStyle} aria-label="交谈">
+              <button
+                style={subCloseStyle}
+                aria-label="收起交谈"
+                onClick={() => {
+                  setTalk(null);
+                  setTalkReply("");
+                }}
+              >
+                ×
+              </button>
+              <div style={{ fontSize: 13, color: "#6b4a22" }}>💬 与「{talk.targetName}」交谈</div>
+              <textarea
+                value={talkDraft}
+                onChange={(e) => setTalkDraft(e.target.value)}
+                rows={2}
+                placeholder="想对TA说点什么…"
+                aria-label="交谈内容"
+                style={talkInputStyle}
+              />
+              <button
+                type="button"
+                style={tradeBtnStyle(busyAll || talkDraft.trim() === "")}
+                disabled={busyAll || talkDraft.trim() === ""}
+                onClick={() => void onTalkSend()}
+              >
+                {actionBusy ? "传话中…" : "发送"}
+              </button>
+              {talkReply && <div style={{ marginTop: 6, fontStyle: "italic" }}>{talkReply}</div>}
+            </div>
+          )}
           {tile.pois.length > 0 && (
             <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
               {tile.pois.map((p, i) => (

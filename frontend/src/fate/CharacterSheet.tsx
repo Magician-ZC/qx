@@ -1,6 +1,8 @@
-/* 文件说明：MMORPG 式「角色档案」只读浮层（命运客户端观察态）。把后端早已有的整条角色数据
-   （getUnitStatus 返回的 unit.Record）露给玩家：顶部 5 个 tab——状态 / 技能 / 背包 / 关系 / 编年史。
-   全部只读（这版不做穿装备/做任务等操作），仿 CharterEditor 的浮层定位/遮罩/关闭。
+/* 文件说明：MMORPG 式「角色档案」浮层（命运客户端，混合模型：观察为主 + 在线可操作）。把后端
+   整条角色数据（getUnitStatus 返回的 unit.Record）露给玩家：顶部 5 个 tab——状态 / 技能 / 背包 /
+   关系 / 编年史。背包 tab 支持在线操作：穿上装备（equipItem）/ 使用消耗品（useItem，A10，后端
+   只开 ration/healing_potion）/ 卸下装备（unequipItem，A11，slot=weapon|armor|shoes|accessory）；
+   其余只读。仿 CharterEditor 的浮层定位/遮罩/关闭。
    依赖注入风格沿用既有 components：本组件直接从 ../session/api 取 getUnitStatus/getUnitRelations/getItemCatalog
    （这些是本波新增/既有的纯读 wrapper），编年史 tab 复用 ChroniclePanel（注入 getChronicleFeed）。
    后端键名契约：unit.Record 有 json tag 小写——identity/stats{primary,derived}/skills{weapons,survival,social,specialties}
@@ -15,6 +17,9 @@ import {
   getItemCatalog,
   getUnitRelations,
   getUnitStatus,
+  unequipItem,
+  // useItem 起别名（不以 use 开头）：api 函数 `use` 前缀会被 eslint react-hooks/rules-of-hooks 误判为 React Hook。
+  useItem as apiUseItem,
   type UnitRelationView,
 } from "../session/api";
 
@@ -99,6 +104,11 @@ const SOCIAL_SKILLS: { key: string; label: string }[] = [
   { key: "trade", label: "经商" },
 ];
 
+// USABLE_ITEM_IDS：后端 PlayerUseItem 当前只开通这两条使用结算（ration 口粮补饥饿 +35 /
+// healing_potion 药剂补 HP +25，满血拒绝）；其余消耗品（药草包/解毒药/复活石）尚无玩家
+// 直驱用法，后端会中文报错，故不显示「使用」按钮。
+const USABLE_ITEM_IDS = new Set(["ration", "healing_potion"]);
+
 // 装备槽中文名（后端 inventory.equipment 的 slot 键，对齐 item.Slot 常量）。
 const SLOT_LABELS: Record<string, string> = {
   weapon: "武器",
@@ -175,6 +185,12 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
     };
   }, [unitId]);
 
+  // refreshUnit：在线操作（穿上/使用/卸下）成功后重拉整条档案，让数值/装备/行囊就地刷新。
+  const refreshUnit = useCallback(async () => {
+    const rec = await getUnitStatus(unitId);
+    if (rec) setUnit(rec);
+  }, [unitId]);
+
   // equipBusy：正在穿的物品 id（防重复点）。onEquip：玩家在线给她穿装备（混合模型可操作），成功后重拉档案。
   const [equipBusy, setEquipBusy] = useState("");
   const onEquip = useCallback(
@@ -182,15 +198,51 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
       setEquipBusy(itemID);
       try {
         await equipItem(sessionId, unitId, itemID);
-        const rec = await getUnitStatus(unitId);
-        if (rec) setUnit(rec);
+        await refreshUnit();
       } catch (e) {
         window.alert(e instanceof Error ? e.message : "穿不上这件");
       } finally {
         setEquipBusy("");
       }
     },
-    [sessionId, unitId],
+    [sessionId, unitId, refreshUnit],
+  );
+
+  // useBusy：正在使用的消耗品 id（防重复点）。onUse：玩家在线让她吃口粮/喝药（A10），
+  // 成功后重拉档案（气血/饥饿/行囊数量就地更新）；失败 alert 后端中文提示兜底。
+  const [useBusy, setUseBusy] = useState("");
+  const onUse = useCallback(
+    async (itemID: string) => {
+      setUseBusy(itemID);
+      try {
+        await apiUseItem(sessionId, unitId, itemID);
+        await refreshUnit();
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "这东西她用不了");
+      } finally {
+        setUseBusy("");
+      }
+    },
+    [sessionId, unitId, refreshUnit],
+  );
+
+  // unequipBusy：正在卸下的槽位（防重复点）。onUnequip：玩家在线让她卸下某槽装备回行囊（A11），
+  // slot 即后端 inventory.equipment 的键（weapon|armor|shoes|accessory）；成功后重拉档案。
+  const [unequipBusy, setUnequipBusy] = useState("");
+  const onUnequip = useCallback(
+    async (slot: string) => {
+      setUnequipBusy(slot);
+      try {
+        await unequipItem(sessionId, unitId, slot);
+        await refreshUnit();
+      } catch (e) {
+        // 后端最常见失败是「她的行囊已满，腾不出地方放这件装备」（卸下回包失败时装备保持原样）。
+        window.alert(e instanceof Error ? e.message : "这件卸不下来");
+      } finally {
+        setUnequipBusy("");
+      }
+    },
+    [sessionId, unitId, refreshUnit],
   );
 
   // 关系 tab 首次切入时懒加载。
@@ -273,7 +325,17 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
           )}
           {tab === "skills" && <SkillsTab skills={skills} />}
           {tab === "inventory" && (
-            <InventoryTab inventory={inventory} status={status} catalog={catalog} onEquip={onEquip} equipBusy={equipBusy} />
+            <InventoryTab
+              inventory={inventory}
+              status={status}
+              catalog={catalog}
+              onEquip={onEquip}
+              equipBusy={equipBusy}
+              onUse={onUse}
+              useBusy={useBusy}
+              onUnequip={onUnequip}
+              unequipBusy={unequipBusy}
+            />
           )}
           {tab === "relations" && (
             <RelationsTab loading={relLoading} error={relError} relations={relations} />
@@ -446,8 +508,12 @@ function InventoryTab(props: {
   catalog: Map<string, string>;
   onEquip?: (itemID: string) => void;
   equipBusy?: string;
+  onUse?: (itemID: string) => void;
+  useBusy?: string;
+  onUnequip?: (slot: string) => void;
+  unequipBusy?: string;
 }) {
-  const { inventory, status, catalog, onEquip, equipBusy } = props;
+  const { inventory, status, catalog, onEquip, equipBusy, onUse, useBusy, onUnequip, unequipBusy } = props;
   const wallet = asNum(status.wallet);
   const equipment = asRecord(inventory.equipment);
   const backpack = Array.isArray(inventory.backpack) ? (inventory.backpack as unknown[]) : [];
@@ -495,6 +561,21 @@ function InventoryTab(props: {
                   {lvl > 0 ? <span className="cs-equip-lvl"> +{lvl}</span> : null}
                   {renderBadges(it)}
                 </span>
+                {/* 玩家在线操作：卸下该槽位装备回行囊（A11）。slot 键本身即后端 unequip 契约
+                    字符串（weapon|armor|shoes|accessory）；item_id 为空视作空槽不给按钮。
+                    行囊满时后端拒绝且装备保持原样，alert 中文兜底。 */}
+                {onUnequip && asStr(it.item_id) ? (
+                  <button
+                    type="button"
+                    className="cs-equip-btn"
+                    // cs-equip-cell 是横向 flex（gap 8px），按钮收尾靠右；清掉 class 自带的 margin-left 免得间距叠成 16px。
+                    style={{ flex: "0 0 auto", marginLeft: 0 }}
+                    disabled={unequipBusy === slot}
+                    onClick={() => onUnequip(slot)}
+                  >
+                    {unequipBusy === slot ? "…" : "卸下"}
+                  </button>
+                ) : null}
               </div>
             );
           })}
@@ -510,23 +591,38 @@ function InventoryTab(props: {
             const it = asRecord(raw);
             const qty = asNum(it.quantity, 1);
             const lvl = asNum(it.level);
+            const itemID = asStr(it.item_id);
+            // 可直接使用的消耗品（后端只开 ration/healing_potion 两条结算）：显示「使用」；
+            // 消耗品穿不上（后端必拒「这件东西不是用来吃的」），故这两件不再显示死按钮「穿上」。
+            const usable = USABLE_ITEM_IDS.has(itemID);
             return (
-              <li className="cs-backpack-row" key={`${asStr(it.item_id)}-${i}`}>
+              <li className="cs-backpack-row" key={`${itemID}-${i}`}>
                 <span className="cs-backpack-name">
                   {itemName(it)}
                   {lvl > 0 ? <span className="cs-equip-lvl"> +{lvl}</span> : null}
                   {renderBadges(it)}
                 </span>
                 <span className="cs-backpack-qty">×{qty}</span>
-                {/* 玩家在线操作：从行囊把这件穿上（非装备类后端会拒，alert 兜底）。 */}
-                {onEquip ? (
+                {/* 玩家在线操作：使用消耗品（A10，吃口粮/喝药，成功后数值与数量就地刷新）。 */}
+                {usable && onUse ? (
                   <button
                     type="button"
                     className="cs-equip-btn"
-                    disabled={equipBusy === asStr(it.item_id)}
-                    onClick={() => onEquip(asStr(it.item_id))}
+                    disabled={useBusy === itemID}
+                    onClick={() => onUse(itemID)}
                   >
-                    {equipBusy === asStr(it.item_id) ? "…" : "穿上"}
+                    {useBusy === itemID ? "…" : "使用"}
+                  </button>
+                ) : null}
+                {/* 玩家在线操作：从行囊把这件穿上（非装备类后端会拒，alert 兜底）。 */}
+                {!usable && onEquip ? (
+                  <button
+                    type="button"
+                    className="cs-equip-btn"
+                    disabled={equipBusy === itemID}
+                    onClick={() => onEquip(itemID)}
+                  >
+                    {equipBusy === itemID ? "…" : "穿上"}
                   </button>
                 ) : null}
               </li>

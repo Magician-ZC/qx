@@ -204,6 +204,11 @@ const (
 	// （她做了什么/去哪/遇见谁/心情），被低调 surface 进命运 feed，让「她近来经历的」始终有内容。
 	// 流程事件（经 EmitProcessEvent，CategoryLifecycle，不改保护字段）；与 PENDING_DECISION 待决策区分（仅 feed 展示、不入收件箱）。
 	ReasonLifeBeat ReasonCode = "LIFE_BEAT"
+
+	// 地块事件系统（玩家直驱，开发计划 2026-06-10 §3）：玩家点地块直发动作/触发 POI 遭遇的流程痕迹。
+	// 两者皆流程事件（EmitProcessEvent 旁路，不改保护字段——实际状态变更由 execute*/Resolve* 内部经 Mutator 留痕）。
+	ReasonPlayerTileAction    ReasonCode = "PLAYER_TILE_ACTION"     // 玩家直发地块动作（采集/建造/锻造/收获/拆除）
+	ReasonPOIEncounterResolve ReasonCode = "POI_ENCOUNTER_RESOLVED" // 地图 POI 遭遇被玩家触发并结算（埋伏/行商/求助/奇遇/迷途）
 )
 
 // ReasonCodeDefinition 结构体用于承载该模块的核心数据。
@@ -330,6 +335,8 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossConsentTimeout, Category: CategoryLifecycle, DisplayName: "未及回应", DefaultReasonText: "她的命没来得及回应，那桩事自有了结", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
 		{Code: ReasonLifeBeat, Category: CategoryLifecycle, DisplayName: "她的日常", DefaultReasonText: "她又走过了寻常的一段日子", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 4},
+		{Code: ReasonPlayerTileAction, Category: CategoryLifecycle, DisplayName: "依你之意而为", DefaultReasonText: "她依你的指点，在这片土地上动了手", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 5},
+		{Code: ReasonPOIEncounterResolve, Category: CategoryLifecycle, DisplayName: "途中际遇", DefaultReasonText: "她在途中撞见了一桩际遇", StatDomains: []string{}, ImportanceMin: 2, ImportanceMax: 7},
 
 		// —— 发行安全门：输入侧越狱/prompt-injection 拦截（治理类目，流程留痕）——
 		{Code: ReasonInputInjectionBlocked, Category: CategoryGovernance, DisplayName: "输入拦截", DefaultReasonText: "一段输入试图越权改写设定，被挡了下来", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},

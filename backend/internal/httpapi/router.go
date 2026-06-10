@@ -5,6 +5,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -2666,8 +2667,22 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"event_id": id})
 	})
 
+	// 玩家直驱动作统一错误映射：执行互斥（异步执行飞行中）→ 409，找不到 → 404，其余校验失败 → 400 中文透传。
+	// 哨兵 error 来自 session 包（player_actions.go 的 ErrExecutionBusy、tile_actions.go 的 ErrTile* 一族）。
+	respondPlayerActionError := func(c *gin.Context, err error) {
+		switch {
+		case errors.Is(err, session.ErrExecutionBusy), errors.Is(err, session.ErrTileExecutionBusy):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, session.ErrTileUnitNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
+	}
+
 	// 玩家在线直接操作角色（命运混合模型：离线她自治，上线玩家可直接干预，与世界自治推进共存）。
-	// 直接移动：把她移到目标格（校验在界内/非水山阻挡/归属本会话），位置非受保护字段直改+持久化。
+	// 直接移动：把她移到目标格（校验在界内/非水山阻挡/限距/归属本会话），位置非受保护字段直改+持久化；
+	// 成功后 best-effort 接遭遇判定（开发计划 2026-06-10 A5）。
 	router.POST("/api/sessions/:id/units/:unitId/move", func(c *gin.Context) {
 		var body struct {
 			Q int `json:"q"`
@@ -2679,7 +2694,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		q, r, err := newSessionService().PlayerMoveUnit(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Q, body.R)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			respondPlayerActionError(c, err)
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"q": q, "r": r})
@@ -2694,10 +2709,103 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			return
 		}
 		if err := newSessionService().PlayerEquipItem(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.ItemID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			respondPlayerActionError(c, err)
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	// 直接卸下装备：槽位（weapon|armor|shoes|accessory）→ 背包 + 重算派生攻防（开发计划 A11，穿上的逆操作）。
+	router.POST("/api/sessions/:id/units/:unitId/unequip", func(c *gin.Context) {
+		var body struct {
+			Slot string `json:"slot"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := newSessionService().PlayerUnequipItem(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Slot); err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	// 直接使用消耗品（吃口粮/喝药，饥饿与 HP 恢复恒经 Mutator）。真实动作，零 LLM（开发计划 A10）。
+	router.POST("/api/sessions/:id/units/:unitId/use-item", func(c *gin.Context) {
+		var body struct {
+			ItemID string `json:"item_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := newSessionService().PlayerUseItem(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.ItemID); err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// ── 地块事件系统（开发计划 2026-06-10 §3：点地块→看「这里能做什么」→直发动作→既有链路结算）──
+	// 动作目录：该格地形/地标/POI/设施 + 按地形白名单与站位/材料门控的可用动作清单（决策零 LLM）。
+	router.GET("/api/sessions/:id/tile-affordances", func(c *gin.Context) {
+		q, errQ := strconv.Atoi(c.Query("q"))
+		r, errR := strconv.Atoi(c.Query("r"))
+		unitID := strings.TrimSpace(c.Query("unit_id"))
+		if errQ != nil || errR != nil || unitID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unit_id/q/r 参数不合法"})
+			return
+		}
+		affordances, err := newSessionService().TileAffordances(c.Request.Context(), c.Param("id"), unitID, q, r)
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, affordances)
+	})
+	// 直发地块动作（采集/建造/锻造/强化/收获/拆除）：复用 execute* 既有结算（饥饿/风险/背包恒经既有路径）。
+	router.POST("/api/sessions/:id/units/:unitId/tile-action", func(c *gin.Context) {
+		var body session.TileActionRequest
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().ExecuteTileAction(c.Request.Context(), c.Param("id"), c.Param("unitId"), body)
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	// 触发 POI 遭遇结算（埋伏→精英战 / 行商→货单 / 求助、奇遇→分支裁决 / 迷途→结识）。结算后标记消耗防重放。
+	router.POST("/api/sessions/:id/units/:unitId/poi-encounter", func(c *gin.Context) {
+		var body struct {
+			Q int `json:"q"`
+			R int `json:"r"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().ResolvePOIEncounter(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Q, body.R)
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	// 与同格/相邻 NPC 直接买卖（行商 POI 的结算出口；物品/金币走既有结算口径）。
+	router.POST("/api/sessions/:id/units/:unitId/trade", func(c *gin.Context) {
+		var body session.PlayerTradeRequest
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := newSessionService().PlayerTradeWithUnit(c.Request.Context(), c.Param("id"), c.Param("unitId"), body)
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	})
 
 	// 触发一次组队野外Boss遭遇（多回合消耗战→按贡献分赃含 epic 仲裁/失败各自分级惩罚→各自命运收件箱）。真实动作。

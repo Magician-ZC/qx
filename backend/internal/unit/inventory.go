@@ -138,6 +138,25 @@ func EquipBackpackItem(record *Record, itemID string) error {
 	return fmt.Errorf("equipment %s not found in backpack", itemID)
 }
 
+// UnequipBackpackItem 将指定槽位的装备卸下放回背包（EquipBackpackItem 的逆操作），并重算派生攻防。
+// 关键顺序：先回包成功才清槽位——背包满时装备保持穿戴原样、绝不凭空消失；回包保留自定义名称与强化等级
+//（走 addBackpackItemStack，与换装时旧装备回包同一路径）。返回被卸下的装备堆栈。
+func UnequipBackpackItem(record *Record, slot string) (ItemStack, error) {
+	if record == nil {
+		return ItemStack{}, fmt.Errorf("nil record")
+	}
+	stack, occupied := record.Inventory.Equipment[slot]
+	if !occupied || stack.ItemID == "" {
+		return ItemStack{}, fmt.Errorf("slot %s is empty", slot)
+	}
+	if err := addBackpackItemStack(&record.Inventory, stack); err != nil {
+		return ItemStack{}, err
+	}
+	delete(record.Inventory.Equipment, slot)
+	RecalculateDerivedStats(record)
+	return stack, nil
+}
+
 // UpgradeItem 强化一件已拥有装备；材料校验由会话生产层负责。
 func UpgradeItem(record *Record, itemID string) (ItemStack, error) {
 	for slot, stack := range record.Inventory.Equipment {

@@ -603,7 +603,11 @@ type State struct {
 	DirectiveHistory []Directive      `json:"directive_history"`
 	// UnitCharters 是每单位的离线宪章（unitID → OfflineCharter），玩家不在场时单位据此自治。
 	// 长效授权（区别于随回合刷新的 Directive），整块随 state_json 持久化；omitempty 保旧存档反序列化。
-	UnitCharters       map[string]OfflineCharter `json:"unit_charters,omitempty"`
+	UnitCharters map[string]OfflineCharter `json:"unit_charters,omitempty"`
+	// ConsumedPOIs 是已被「采完/探完」的地图兴趣点（"q,r" → 消耗时回合数）。POI 本体仍由 map_pois.go
+	// 哈希确定性派生（不落库），这里只记消耗态：下发时标 consumed 供前端徽标变淡，结算侧作幂等防重放闸。
+	// 整块随 state_json 持久化；omitempty 保旧存档反序列化（helper 见 poi_state.go）。
+	ConsumedPOIs       map[string]int            `json:"consumed_pois,omitempty"`
 	DialogueHistory    []DialogueMessage         `json:"dialogue_history"`
 	DecisionTraces     []DecisionTrace           `json:"decision_traces"`
 	LLMInteractions    []LLMInteraction          `json:"llm_interactions"`

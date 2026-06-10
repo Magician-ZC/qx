@@ -153,8 +153,10 @@ type SceneModel = {
   zoom?: number;
   // spectator=true（命运主世界全屏观战）：跳过战棋专属 HUD（回合卡/地形图例），地图更纯净。
   spectator?: boolean;
-  // pois：地图兴趣点（地块特殊资源 / 野外 NPC 身上的事件），在对应格子画小徽标。
-  pois?: Array<{ q: number; r: number; kind: string; label: string }>;
+  // focusUnitID：命运观战模式下「她」的单位 ID。首次拿到含该单位的快照时把相机居中到她的格子（仅一次，之后玩家拖动不被打断）。
+  focusUnitID?: string;
+  // pois：地图兴趣点（地块特殊资源 / 野外 NPC 身上的事件），在对应格子画小徽标。consumed=true 表示已采完/探完，徽标变淡。
+  pois?: Array<{ q: number; r: number; kind: string; label: string; consumed?: boolean }>;
   executionMarkers?: Array<{
     unitID: string;
     status: "started" | "completed";
@@ -243,6 +245,8 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
   let didDrag = false;
   let dragStart = { x: 0, y: 0 };
   let dragOrigin = { x: 0, y: 0 };
+  // didInitialFocus：首屏「以她为中心」只执行一次的标志——之后快照刷新/重绘绝不再重置相机，玩家拖动不被打断。
+  let didInitialFocus = false;
   let destroyed = false;
   let pendingRenderFrame = 0;
   let latestAssetVersion = 0;
@@ -322,6 +326,30 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
     }
 
     const placement = cachedPlacement ?? computeBoardPlacement(latest.session, width, height, zoom);
+    // 首屏相机以她为中心（仅 spectator 观战模式、仅首次拿到含该单位的快照时执行一次）：
+    // 主世界 24×16 图远大于视口，她默认出生在屏外左上角聚落，不居中就逼玩家「看人必先拖图」。
+    // 坐标系推导：boardLayer.position=boardOffset、boardLayer.scale=viewScale，
+    // 世界点 w 的屏幕坐标 = w×viewScale + boardOffset；要让她的 tile 中心落在画布中心，
+    // 即 screenCenter = herTileCenter×viewScale + boardOffset → boardOffset = screenCenter − herTileCenter×viewScale。
+    // 找不到该单位时静默跳过（不置标志，等后续含她的快照再试）。
+    if (latest.spectator && latest.focusUnitID && !didInitialFocus) {
+      const focusID = latest.focusUnitID;
+      const focusUnit = [
+        ...latest.session.player_units,
+        ...latest.session.enemy_units,
+        ...(latest.session.ambient_units ?? []),
+        ...(latest.session.wild_units ?? []),
+      ].find((unit) => unit.id === focusID);
+      if (focusUnit) {
+        const herCenter = tileCenter(focusUnit.status.position_q, focusUnit.status.position_r, placement);
+        boardOffset = {
+          x: width / 2 - herCenter.x * viewScale,
+          y: height / 2 - herCenter.y * viewScale,
+        };
+        boardLayer.position.set(boardOffset.x, boardOffset.y);
+        didInitialFocus = true;
+      }
+    }
     drawStructures(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
     drawBattlefieldRemnants(unitLayer, latest.session, placement, latest.commanderFactionID, latest.fogPerspectiveUnitID);
     // POI 徽标层：放在 drawUnits 之前，让站到 POI 上的单位 token 盖在徽标之上（人在前）。unitLayer 每帧重画，POI 即时刷新。
@@ -351,7 +379,8 @@ export async function mountPixiBoard(container: HTMLDivElement): Promise<Mounted
     if (!dragging) return;
     const deltaX = event.global.x - dragStart.x;
     const deltaY = event.global.y - dragStart.y;
-    if (Math.abs(deltaX) + Math.abs(deltaY) > 5) {
+    // 拖拽判定用欧氏距离 >9px（原 |dx|+|dy|>5 曼哈顿阈值过敏，触控板普通点击的微抖会被概率性误判成拖拽而吞掉点击）。
+    if (Math.hypot(deltaX, deltaY) > 9) {
       didDrag = true;
     }
     boardOffset = {
@@ -627,7 +656,7 @@ function poiEmoji(kind: string): string {
 // drawPOIs 在对应格子画 POI 小徽标（左下角色点 + emoji 图标），让出右下给 structure 徽章。纯展示、不拦截点击。
 function drawPOIs(
   layer: Container,
-  pois: Array<{ q: number; r: number; kind: string; label: string }>,
+  pois: Array<{ q: number; r: number; kind: string; label: string; consumed?: boolean }>,
   placement: BoardPlacement,
 ): void {
   for (const poi of pois) {
@@ -635,11 +664,14 @@ function drawPOIs(
     const badgeR = Math.max(6, placement.radius * 0.26);
     const cx = center.x - placement.radius * 0.5;
     const cy = center.y + placement.radius * 0.55;
+    // consumed=true（已采完/探完）：圆点与 emoji 整体变淡到 0.35——留痕可见但提示「这里已被掏过、不可重复触发」。
+    const badgeAlpha = poi.consumed ? 0.35 : 1;
     const dot = new Graphics();
     dot.lineStyle({ color: palette.panelLine, alpha: 0.9, width: 1.2 });
     dot.beginFill(poiColor(poi.kind), 0.92);
     dot.drawCircle(cx, cy, badgeR);
     dot.endFill();
+    dot.alpha = badgeAlpha;
     dot.eventMode = "none";
     layer.addChild(dot);
     const icon = new Text(
@@ -651,6 +683,7 @@ function drawPOIs(
     );
     icon.anchor.set(0.5);
     icon.position.set(cx, cy);
+    icon.alpha = badgeAlpha;
     icon.eventMode = "none";
     layer.addChild(icon);
   }
@@ -1086,8 +1119,13 @@ function drawUnits(
     tokenContainer.eventMode = "static";
     tokenContainer.cursor = "pointer";
     tokenContainer.hitArea = new Circle(center.x, center.y, tokenRadius + Math.max(8, placement.radius * 0.18));
-    tokenContainer.on("pointerdown", (event) => {
-      event.stopPropagation();
+    // 为什么是 pointertap 而非 pointerdown（开发计划 2026-06-10 §1，吸收态根因）：
+    // didDrag 全文件唯一复位点在 stage 的 pointerdown；token 若绑 pointerdown 且 stopPropagation，
+    // 会短路这次复位——拖一次图（didDrag=true）后点任何「人」永远没反应，且连续点人无法自愈。
+    // 改为与地形格一致的 pointertap 且不拦截冒泡：按下时 stage 正常复位 didDrag、还可从 token 起手拖图；
+    // 抬起构成 tap 才触发选中，真拖拽则被 handleTileClick 的 didDrag 防护吞掉。
+    // 注意：不得改成在 pointerup/endDrag 里清 didDrag——pointertap 在 pointerup 之后派发，先清会让防护彻底失效。
+    tokenContainer.on("pointertap", () => {
       model.onTileClick(unit.status.position_q, unit.status.position_r);
     });
 
@@ -1784,9 +1822,9 @@ function drawBubble(
     hitbox.eventMode = "static";
     hitbox.cursor = "pointer";
     hitbox.hitArea = new Rectangle(bubbleLeft + 6, ctaTop, bubbleWidth - 12, ctaHeight);
-    hitbox.on("pointerdown", (event) => {
-      event.stopPropagation();
-    });
+    // pointerdown 不再 stopPropagation（与单位 token 同理，开发计划 2026-06-10 §1）：
+    // 让 stage 的 pointerdown——didDrag 的唯一复位点——正常收到冒泡，避免「拖图后点击失效」吸收态，且可从 CTA 起手拖图。
+    // pointertap 保留 stopPropagation：tap 语义上 CTA 独占这次点击，防止冒泡穿透触发底下 tile/token 的选中。
     hitbox.on("pointertap", (event) => {
       event.stopPropagation();
       onOpenDialogues?.();
