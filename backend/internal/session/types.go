@@ -588,14 +588,20 @@ type State struct {
 	// Zones 是分区大世界的全部区域（设计 docs/分区大世界设计方案-2026-06-10.md §1）。
 	// 空 = 旧单图存档（向后兼容，Map 即唯一区域）；非空时 Map 恒是 CurrentZoneID 区域的投影拷贝
 	// （旧代码读 state.Map 照常工作，作用于「当前区域」）。整块随 state_json 持久化。
-	Zones         []world.Zone `json:"zones,omitempty"`
+	Zones []world.Zone `json:"zones,omitempty"`
 	// CurrentZoneID 是主角当前所在区域 id（空 = 单区/兼容旧档）；travel 切区时改它并把 Map 重投影为该区地图。
 	CurrentZoneID string `json:"current_zone_id,omitempty"`
-	CommandPower          CommandPowerState `json:"command_power"`
-	FactionRelations      []FactionRelation `json:"faction_relations"`
-	PlayerUnitIDs         []string          `json:"player_unit_ids"`
-	EnemyUnitIDs          []string          `json:"enemy_unit_ids"`
-	WildUnitIDs           []string          `json:"wild_unit_ids,omitempty"`
+	// SeededZoneIDs 是「已 lazy 播种过公共 NPC 的区域 id 集合」（阶段2 §1）。建局时出生区已播种 → 初始化含出生区 id；
+	// travel 进入某区后若不在此集合则 ensureZoneSeededBestEffort 播种 + 标 NPC.ZoneID + append。omitempty 保旧档兼容。
+	SeededZoneIDs []string `json:"seeded_zone_ids,omitempty"`
+	// DefeatedBosses 是「本世界周期内已被讨平的区域 id 集合」（阶段2 §3 防反复刷）。ChallengeZoneBoss 胜利后 append
+	// 对应 zoneID，已在集合内则拒绝再战。失败不入集合（可重试）。omitempty 保旧档兼容。
+	DefeatedBosses   []string          `json:"defeated_bosses,omitempty"`
+	CommandPower     CommandPowerState `json:"command_power"`
+	FactionRelations []FactionRelation `json:"faction_relations"`
+	PlayerUnitIDs    []string          `json:"player_unit_ids"`
+	EnemyUnitIDs     []string          `json:"enemy_unit_ids"`
+	WildUnitIDs      []string          `json:"wild_unit_ids,omitempty"`
 	// AmbientUnitIDs 是阵营开放世界出生点的「公共同阵营 NPC」单位 ID（faction_spawn.go SeedFactionSpawn 落库）。
 	// 这批 NPC **静态上图可见**（进 AmbientUnits 快照、有 hex 坐标），但**绝不自治、零 LLM**——
 	// 故**绝不进 PlayerUnitIDs/EnemyUnitIDs/WildUnitIDs**（那三者会进 buildExecutionOrderByATB 被唤醒决策，
@@ -613,22 +619,22 @@ type State struct {
 	// ConsumedPOIs 是已被「采完/探完」的地图兴趣点（"q,r" → 消耗时回合数）。POI 本体仍由 map_pois.go
 	// 哈希确定性派生（不落库），这里只记消耗态：下发时标 consumed 供前端徽标变淡，结算侧作幂等防重放闸。
 	// 整块随 state_json 持久化；omitempty 保旧存档反序列化（helper 见 poi_state.go）。
-	ConsumedPOIs       map[string]int            `json:"consumed_pois,omitempty"`
-	DialogueHistory    []DialogueMessage         `json:"dialogue_history"`
-	DecisionTraces     []DecisionTrace           `json:"decision_traces"`
-	LLMInteractions    []LLMInteraction          `json:"llm_interactions"`
-	PigeonQueue        []PigeonDispatch          `json:"pigeon_queue"`
-	Pregnancies        []PregnancyState          `json:"pregnancies,omitempty"`
-	BattleReports      []BattleReport            `json:"battle_reports"`
-	HallArchiveEntries []HallArchiveEntry        `json:"hall_archive_entries,omitempty"`
-	IntelAssets        []IntelAsset              `json:"intel_assets"`
-	IntelReports       []IntelReport             `json:"intel_reports"`
-	ModerationReports  []ModerationReport        `json:"moderation_reports"`
-	Metrics            SessionMetrics            `json:"metrics"`
-	RawEventLog        []RawEventEntry           `json:"raw_event_log"`
-	Logs               []LogEntry                `json:"logs"`
-	CreatedAt          time.Time                 `json:"created_at"`
-	UpdatedAt          time.Time                 `json:"updated_at"`
+	ConsumedPOIs       map[string]int     `json:"consumed_pois,omitempty"`
+	DialogueHistory    []DialogueMessage  `json:"dialogue_history"`
+	DecisionTraces     []DecisionTrace    `json:"decision_traces"`
+	LLMInteractions    []LLMInteraction   `json:"llm_interactions"`
+	PigeonQueue        []PigeonDispatch   `json:"pigeon_queue"`
+	Pregnancies        []PregnancyState   `json:"pregnancies,omitempty"`
+	BattleReports      []BattleReport     `json:"battle_reports"`
+	HallArchiveEntries []HallArchiveEntry `json:"hall_archive_entries,omitempty"`
+	IntelAssets        []IntelAsset       `json:"intel_assets"`
+	IntelReports       []IntelReport      `json:"intel_reports"`
+	ModerationReports  []ModerationReport `json:"moderation_reports"`
+	Metrics            SessionMetrics     `json:"metrics"`
+	RawEventLog        []RawEventEntry    `json:"raw_event_log"`
+	Logs               []LogEntry         `json:"logs"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
 }
 
 // Snapshot 是下发给前端/客户端的会话视图，不含仅服务端内部使用字段。

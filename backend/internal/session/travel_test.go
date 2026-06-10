@@ -87,10 +87,29 @@ func TestZoneFoundation_WorldGenAndTravel(t *testing.T) {
 		t.Fatalf("主角 ZoneID 应更新为晨曦城郊，得到 %q", heroAfter.Status.ZoneID)
 	}
 
-	// 5) 切区后快照：出生区 NPC 被过滤掉（新区暂无 NPC，阶段1 已知限制——但不崩）。
+	// 5) 切区后快照（阶段2 §1 lazy 播种）：出生区 NPC 被过滤掉；新区首次进入已 lazy 播种公共 NPC，
+	//    其 ZoneID=晨曦城郊、Growth.Level 落在该区等级带 [5,15] 内（设计 §1/§2/§3）。
 	snap2 := service.snapshotForSession(t, ctx, sessionID)
-	if len(snap2.AmbientUnits) != 0 {
-		t.Fatalf("切到晨曦城郊后不应显示出生区 NPC，得到 %d 个", len(snap2.AmbientUnits))
+	if len(snap2.AmbientUnits) == 0 {
+		t.Fatal("阶段2：首次进入晨曦城郊应 lazy 播种公共 NPC（得到 0 个）")
+	}
+	capIdx := findZoneIndex(&state2, "zone_freedom_capital")
+	if capIdx < 0 {
+		t.Fatal("应能找到晨曦城郊区域")
+	}
+	capZone := state2.Zones[capIdx]
+	for _, npc := range snap2.AmbientUnits {
+		if npc.Status.ZoneID != "zone_freedom_capital" {
+			t.Fatalf("晨曦城郊 lazy NPC %s 区域归属应为晨曦城郊，得到 %q", npc.ID, npc.Status.ZoneID)
+		}
+		if npc.Stats.Growth.Level < capZone.LevelMin || npc.Stats.Growth.Level > capZone.LevelMax {
+			t.Fatalf("晨曦城郊 lazy NPC %s 等级 %d 应落在区域带 [%d,%d]",
+				npc.ID, npc.Stats.Growth.Level, capZone.LevelMin, capZone.LevelMax)
+		}
+	}
+	// SeededZoneIDs 记录了晨曦城郊已播种（幂等门）。
+	if !zoneSeeded(&state2, "zone_freedom_capital") {
+		t.Fatal("travel 后 SeededZoneIDs 应记录晨曦城郊已播种")
 	}
 
 	// 6) 从晨曦城郊去自由荒野是 portal（城镇传送门）——阶段1 解锁门：portal 未解锁 → 被拒（带 UnlockTip）。

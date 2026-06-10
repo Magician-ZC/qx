@@ -219,6 +219,11 @@ func (service *Service) SeedFactionSpawn(ctx context.Context, sessionID string, 
 			rec.Status.PositionR = coord.R
 			occupied[coordString(coord)] = struct{}{}
 		}
+		// 区域归属（分区大世界阶段2）：NPC 的 Status.ZoneID 默认置为播种 regionID——使**区域级幂等守卫**
+		// （factionSpawnAlreadySeeded 按 ZoneID==regionID 判）有稳定锚，从而「出生区已播 → 其余 6 区仍可各播一次」。
+		// ZoneID 非受保护字段，直接写。出生区播种的调用方（mainworld）随后会把它覆写为出生区 id（spawnRegion≠zoneID，
+		// 那批 NPC 的真实归属是出生区）；lazy 播种传 regionID=zoneID，此处一步到位即正确归属（caller 再幂等重写同值+补等级）。
+		rec.Status.ZoneID = regionID
 
 		if err := service.units.Save(ctx, rec); err != nil {
 			return result, fmt.Errorf("save faction npc %d: %w", i, err)
@@ -265,7 +270,16 @@ func (service *Service) rememberFactionNPCSelf(ctx context.Context, rec *unit.Re
 	service.rememberUnitWithSourceBestEffort(ctx, rec, factionSpawnBirthTurn, summary, "faction_birth_self", 1)
 }
 
-// factionSpawnAlreadySeeded 判定本局是否已播种过阵营 NPC（任一单位 Lineage 命中阵营指纹前缀即算已播种）。
+// factionSpawnAlreadySeeded 判定本局**该区域**是否已播种过阵营 NPC（区域级幂等，分区大世界阶段2 必需）。
+// 区域级而非会话级：原会话级守卫（任一阵营 NPC 即算已播种）会让「出生区已播种 → 其余 6 区永远播不了」——
+// 分区世界要给每片区域各 lazy 播一次，故守卫须按 regionID 隔离。
+//
+// 判据：存在阵营 NPC 记录（Lineage 命中阵营指纹）且其 Status.ZoneID == regionID，即算「这片区域已播过」。
+//   - lazy 播种（ensureZoneSeededBestEffort）传 regionID=zoneID，落库 NPC 随后标 ZoneID=zoneID——同区第二次调用即被挡（实际由
+//     state.SeededZoneIDs 先挡，本守卫是次级安全网）；不同区 zoneID 不同 → 互不阻塞，各播各的。
+//   - 出生区播种（mainworld）传 regionID=spawnRegion（faction 据点 id，非 zoneID），其 NPC 随后被标 ZoneID=出生区 id ≠ spawnRegion；
+//     出生区播种每会话只调一次（上游 FindMainWorldSessionID 幂等），无「同会话重播」之虞，故 ZoneID≠regionID 不影响其正确性。
+//
 // 确定性、零 LLM：一次 ListBySession + 内存比对。读 DB 失败时保守返回 false（宁可后续 best-effort 重试播种）。
 func (service *Service) factionSpawnAlreadySeeded(ctx context.Context, sessionID string, regionID string) bool {
 	if service == nil || service.units == nil {
@@ -276,7 +290,7 @@ func (service *Service) factionSpawnAlreadySeeded(ctx context.Context, sessionID
 		return false
 	}
 	for i := range records {
-		if isFactionNPCRecord(&records[i]) {
+		if isFactionNPCRecord(&records[i]) && records[i].Status.ZoneID == regionID {
 			return true
 		}
 	}

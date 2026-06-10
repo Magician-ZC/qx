@@ -581,6 +581,9 @@ export type ZoneSummary = {
   is_current: boolean;
   reachable: boolean;
   portal_kind: string;
+  // boss_defeated=本区 boss 是否已被讨平（服务端权威 DefeatedBosses）。前端据此跨刷新/跨设备置灰挑战按钮；
+  // 旧后端无此字段反序列化为 undefined（按未讨平处理，与既有前端本地即时态并存）。
+  boss_defeated?: boolean;
 };
 
 // getZones 拉某会话的全部区域 + 当前区 id（世界地图渲染源）。
@@ -617,6 +620,69 @@ export async function travelToZone(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     },
+  );
+}
+
+// ── 分区大世界阶段2 §3/§4：区域 boss 挑战 + 区域副本进入（命运地图 tile 面板入口） ──
+
+// challengeZoneBoss 让主角挑战当前区域的 boss（POST …/zone-boss，无请求体——boss 由后端据当前区 BossCoord/BossLevel 派生）。
+// 真实动作：会真的改主角 HP/士气/钱包并落命运收件箱。链路同 elite（多回合消耗战→胜利分赃 / 失败分级惩罚→祖魂收件箱卡）。
+// 站位/归属/执行互斥等校验在后端；失败抛中文 APIError（如「得先走到「…」跟前」「「…」已被讨平」「这片天地没有可挑战的霸主」）。
+// 返回与 resolveEliteEncounter 同构（EliteEncounterResult，Go 大写键名）；缺失时回退安全零值（Outcome:"down"）。
+export async function challengeZoneBoss(
+  sessionID: string,
+  unitID: string,
+): Promise<EliteEncounterResult> {
+  const data = await request<{ encounter?: EliteEncounterResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/zone-boss`,
+    { method: "POST" },
+  );
+  return (
+    data.encounter ?? {
+      ThreatID: "",
+      Outcome: "down",
+      Rounds: 0,
+      DamageDealt: 0,
+      DamageTaken: 0,
+      Contribution: 0,
+      Awards: null,
+      PenaltyLayer: 0,
+      InboxCard: "",
+    }
+  );
+}
+
+// enterZoneDungeon 让主角进入当前区域城镇里的副本（POST …/zone-dungeon）。
+// floors 可选（≤0/缺省时由后端按 zone.LevelMax/5 派生，clamp[1,5]）；真实动作：会改参战单位 HP/士气/钱包并落命运收件箱。
+// 副本 flag（QUNXIANG_DUNGEON）关时后端返回 409 ErrDungeonDisabled（APIError.status=409、message 含「未启用」），调用方据此识别。
+// 站位（须站在本区某城镇）/归属/执行互斥校验在后端；失败抛中文 APIError。返回 DungeonResult（Go 大写键名），缺失时回退安全零值。
+export async function enterZoneDungeon(
+  sessionID: string,
+  unitID: string,
+  floors?: number,
+): Promise<DungeonResult> {
+  // floors 缺省/非法（≤0）时不传具体值（送 0），让后端按区域等级派生；传正整数时透传。
+  const body = { floors: typeof floors === "number" && floors > 0 ? Math.floor(floors) : 0 };
+  const data = await request<{ dungeon?: DungeonResult }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/zone-dungeon`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return (
+    data.dungeon ?? {
+      DungeonID: "",
+      Floors: 0,
+      FloorsClear: 0,
+      Outcome: "wiped",
+      FloorResults: null,
+      Awards: null,
+      Contribution: null,
+      PenaltyLayer: null,
+      InboxCards: null,
+    }
   );
 }
 

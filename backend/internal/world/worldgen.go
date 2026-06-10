@@ -19,24 +19,31 @@ const (
 
 // ZonePortal 是从本区通往另一区域的出口（传送门或边界口）。
 type ZonePortal struct {
-	AtCoord   string `json:"at_coord"`            // 本区出口坐标 "q,r"
-	ToZoneID  string `json:"to_zone_id"`          // 目标区域 id
-	ToCoord   string `json:"to_coord"`            // 目标区落点坐标 "q,r"
-	Kind      string `json:"kind"`                // portal(传送门,需解锁) / border(边界,走到即过)
-	UnlockTip string `json:"unlock_tip,omitempty"`// 未解锁时的中文提示（portal 用）
+	AtCoord   string `json:"at_coord"`             // 本区出口坐标 "q,r"
+	ToZoneID  string `json:"to_zone_id"`           // 目标区域 id
+	ToCoord   string `json:"to_coord"`             // 目标区落点坐标 "q,r"
+	Kind      string `json:"kind"`                 // portal(传送门,需解锁) / border(边界,走到即过)
+	UnlockTip string `json:"unlock_tip,omitempty"` // 未解锁时的中文提示（portal 用）
 }
 
 // Zone 是世界的一个区域：一张地图 + 阵营/等级/城镇/传送门元数据。
 type Zone struct {
 	ID          string       `json:"id"`
 	Name        string       `json:"name"`
-	FactionID   string       `json:"faction_id"`  // freedom/order/chaos/neutral
+	FactionID   string       `json:"faction_id"` // freedom/order/chaos/neutral
 	Kind        ZoneKind     `json:"kind"`
-	LevelMin    int          `json:"level_min"`   // 区域等级带（怪物等级范围）
+	LevelMin    int          `json:"level_min"` // 区域等级带（怪物等级范围）
 	LevelMax    int          `json:"level_max"`
 	Map         MapSnapshot  `json:"map"`
 	Portals     []ZonePortal `json:"portals"`
 	Settlements []string     `json:"settlements"` // 本区城镇坐标 "q,r"
+	// 阶段2：区域 boss（命运地图可挑战，设计 §4）。仅 capital/wild 区有，neutral/starter 区无（三者均为空）。
+	// 全部 omitempty——旧档（阶段1 存档）反序列化为空，向后兼容、零影响。
+	BossCoord string `json:"boss_coord,omitempty"` // 区域 boss 坐标 "q,r"（放区域中心或某 settlement）；空=本区无 boss
+	BossName  string `json:"boss_name,omitempty"`  // 区域 boss 名（祖魂语气威胁名）
+	BossLevel int    `json:"boss_level,omitempty"` // 区域 boss 等级（= LevelMax，威胁强度据此缩放）
+	// DungeonCoord 是本区副本入口坐标 "q,r"（设计 §4「副本」）。仅 capital 区有（标在某 settlement/城镇），其余区为空。
+	DungeonCoord string `json:"dungeon_coord,omitempty"`
 }
 
 // zoneSpec 是区域生成蓝图（worldgen 内部用）。
@@ -83,7 +90,50 @@ func GenerateWorld(seed int64) []Zone {
 		zones = append(zones, zone)
 	}
 	wireDefaultPortals(zones)
+	wireZoneContent(zones)
 	return zones
+}
+
+// bossNamesByFaction 给三阵营 capital/wild 区各派一个主题化的区域 boss 名（祖魂语气威胁名）。
+// 同阵营的 capital/wild 各用一名，避免重名混淆（前端命运地图可据 BossName 区分）。
+var bossNamesByFaction = map[string][2]string{
+	"freedom": {"晨曦平原之主·赤鬣兽王", "自由荒野的噬骨魔狼"},
+	"order":   {"铁律城郊的钢甲傀儡", "秩序荒野的肃刑巨像"},
+	"chaos":   {"裂隙城郊的混沌触手", "混乱荒野的虚空噬主"},
+}
+
+// wireZoneContent 给每个 capital/wild 区填充区域 boss（设计 §4）+ 给 capital 区标记副本入口。
+//   - 区域 boss：坐标放区域中心（地图中心格，避免落在城镇与功能性 NPC 抢位）；boss 名按阵营/kind 主题化；等级=LevelMax。
+//   - 副本入口：仅 capital 区，标在首个 settlement（城镇）坐标；无城镇则不标（前端无入口可点）。
+//   - neutral/starter 区无 boss、无副本（出生新手区保持低压力，留作引导）。
+//
+// 确定性：坐标只由地图尺寸/settlement 派生，无随机；同 seed 同世界同内容。
+func wireZoneContent(zones []Zone) {
+	for i := range zones {
+		zone := &zones[i]
+		switch zone.Kind {
+		case ZoneCapital, ZoneWild:
+			// 区域中心格作 boss 坐标（确定性、与城镇错开）。
+			zone.BossCoord = fmt.Sprintf("%d,%d", zone.Map.Width/2, zone.Map.Height/2)
+			zone.BossName = bossNameFor(zone.FactionID, zone.Kind)
+			zone.BossLevel = zone.LevelMax
+		}
+		// 副本入口：仅主城区，标在首个城镇坐标（功能性 NPC/任务锚点同处，符合「城镇里有副本入口」直觉）。
+		if zone.Kind == ZoneCapital && len(zone.Settlements) > 0 {
+			zone.DungeonCoord = zone.Settlements[0]
+		}
+	}
+}
+
+// bossNameFor 按阵营 + kind 取区域 boss 名。capital 用第 0 个、wild 用第 1 个；未知阵营回退通用名。
+func bossNameFor(factionID string, kind ZoneKind) string {
+	if names, ok := bossNamesByFaction[factionID]; ok {
+		if kind == ZoneWild {
+			return names[1]
+		}
+		return names[0]
+	}
+	return "盘踞此地的凶物"
 }
 
 // settlementCoordsOf 扫一张地图，收集城镇（city/village）坐标 "q,r"，供传送门/功能性NPC/任务锚定。
@@ -106,9 +156,10 @@ func portalAnchor(zone Zone) string {
 }
 
 // wireDefaultPortals 给默认 7 区连传送门：
-//   新手区 ↔ 三主城（border，走到即过，新手自由通往三阵营）；
-//   每主城 ↔ 同阵营野外（portal，城镇枢纽传送）；
-//   三主城两两 ↔（border，阵营边境战场，高风险通道）。
+//
+//	新手区 ↔ 三主城（border，走到即过，新手自由通往三阵营）；
+//	每主城 ↔ 同阵营野外（portal，城镇枢纽传送）；
+//	三主城两两 ↔（border，阵营边境战场，高风险通道）。
 func wireDefaultPortals(zones []Zone) {
 	byID := make(map[string]int, len(zones))
 	for i := range zones {

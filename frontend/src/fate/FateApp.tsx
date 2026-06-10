@@ -423,6 +423,10 @@ export function FateApp() {
           <WorldMap
             sessionId={saved.sessionId}
             unitId={saved.unitId}
+            // 主角等级（等级护栏难度色）：取 boardSnap 中主角的 stats.growth.level；转场清空/缺字段时兜底 Lv1。
+            playerLevel={
+              boardSnap?.player_units?.find((u) => u.id === saved.unitId)?.stats?.growth?.level ?? 1
+            }
             onClose={() => setWorldMapOpen(false)}
             onTraveled={() => {
               // 先清快照：避免「旧区地形图 + 新区主角坐标」的错位帧——Minimap 在 snap=null 时不渲染，

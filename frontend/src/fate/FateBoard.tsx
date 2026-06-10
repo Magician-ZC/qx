@@ -18,11 +18,14 @@
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  challengeZoneBoss,
+  enterZoneDungeon,
   executeTileAction,
   getItemCatalogFull,
   getMapPOIs,
   getSession,
   getTileAffordances,
+  getZones,
   moveUnit,
   resolvePOIEncounter,
   sellPriceOf,
@@ -30,12 +33,15 @@ import {
   tradeWithUnit,
 } from "../session/api";
 import type {
+  DungeonResult,
+  EliteEncounterResult,
   ItemCatalogEntry,
   MapPOI,
   MerchantGood,
   POIEncounterResult,
   TileAction,
   TileAffordances,
+  ZoneSummary,
 } from "../session/api";
 import type { BattleUnit, InventoryItem, SessionSnapshot } from "../session/types";
 
@@ -90,8 +96,57 @@ function terrainNameZH(code: string): string {
   return TERRAIN_NAME_ZH[(code ?? "").trim().toLowerCase()] ?? (code ?? "").trim() ?? "未知之地";
 }
 
-// 城镇类地形（点击展示「这里住着谁」名单）。
+// 城镇类地形（点击展示「这里住着谁」名单 + 主城区副本入口锚在此类地形）。
 const TOWN_TERRAINS = new Set(["city", "village"]);
+
+// ── 分区大世界阶段2 §3/§4：区域 boss / 副本入口的前端坐标推断 ──
+// 后端不在 /zones（ZoneSummary）或会话快照里暴露 BossCoord/DungeonCoord——它们只在 world.Zone 上。
+// 但 wireZoneContent（worldgen.go）是**确定性、无随机**的：boss 坐标恒为当前区地图中心格 (⌊W/2⌋,⌊H/2⌋)，
+// 仅 capital/wild 区有；副本入口锚在 capital 区的城镇格。故前端可据「getZones 拿当前区 kind/faction/level + 快照 map 尺寸」
+// 等价复算，无需后端新端点；后端 ChallengeZoneBoss/EnterZoneDungeon 仍是站位/归属/防刷的唯一权威（前端推断只决定按钮露不露）。
+
+// ZONE_BOSS_NAMES 与后端 worldgen.go 的 bossNamesByFaction 表逐字对齐（capital 用第 0 个、wild 用第 1 个）。
+// 仅用于在按钮上预显 boss 名（成交叙事仍以后端结算为准）；阵营/kind 查不到时回退通用名。
+const ZONE_BOSS_NAMES: Record<string, [string, string]> = {
+  freedom: ["晨曦平原之主·赤鬣兽王", "自由荒野的噬骨魔狼"],
+  order: ["铁律城郊的钢甲傀儡", "秩序荒野的肃刑巨像"],
+  chaos: ["裂隙城郊的混沌触手", "混乱荒野的虚空噬主"],
+};
+
+// 有区域 boss 的区域类型（与后端 wireZoneContent 一致：capital/wild 才填 boss；副本入口仅 capital）。
+const BOSS_ZONE_KINDS = new Set(["capital", "wild"]);
+
+// ZONE_BOSS_LEVEL_GUARD_GAP 与后端 zoneBossLevelGuardGap 对齐：boss 高出主角 ≥5 级即「此地凶险」（软门）。
+// 前端据此把按钮标红 + 预显凶险提示（后端 ChallengeZoneBoss 是唯一权威，点下去会返回中文拒绝消息）。
+const ZONE_BOSS_LEVEL_GUARD_GAP = 5;
+
+// playerLevelOf 从快照取主角等级（player_units 中 id===unitId 的 stats.growth.level）。
+// 缺字段（旧后端/未填）兜底 Lv1——与后端 pregame 初始 Level=1 一致。
+function playerLevelOf(snap: SessionSnapshot | null, unitId: string): number {
+  const her = snap?.player_units?.find((u) => u.id === unitId);
+  const lvl = her?.stats?.growth?.level;
+  return typeof lvl === "number" && lvl > 0 ? lvl : 1;
+}
+
+// zoneBossNameFor 按阵营 + kind 取区域 boss 名（与后端 bossNameFor 同口径，未知回退通用名）。
+function zoneBossNameFor(factionID: string, kind: string): string {
+  const names = ZONE_BOSS_NAMES[(factionID ?? "").trim().toLowerCase()];
+  if (!names) return "盘踞此地的霸主";
+  return kind === "wild" ? names[1] : names[0];
+}
+
+// ZoneContentInfo 是从 getZones 当前区 + 快照地图尺寸推断出的「本区 boss / 副本」露出信息。
+type ZoneContentInfo = {
+  zoneID: string;
+  // bossCoord：区域 boss 坐标（地图中心格）；null=本区无 boss（neutral/starter 区，或无地图尺寸）。
+  bossCoord: { q: number; r: number } | null;
+  bossName: string;
+  bossLevel: number;
+  // hasDungeon：本区是否有副本入口（capital 区且城镇可下副本）；副本入口锚在城镇格（city/village）。
+  hasDungeon: boolean;
+  // bossDefeated：本区 boss 是否已被讨平（服务端权威 ZoneSummary.boss_defeated）——使置灰态跨刷新/跨设备持久。
+  bossDefeated: boolean;
+};
 
 // BOARD_POLL_MS：观战自身轮询间隔。她在执行阶段被唤醒移动后，board 至多滞后这一拍即追平。
 // 取较慢节奏（避免高频拉整快照增成本）；父层 refreshSignal 才是「这拍刚跑完，立刻看她在哪」的精确刷新。
@@ -362,6 +417,50 @@ function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<strin
   return lines;
 }
 
+// ELITE_OUTCOME_ZH 把 elite/区域 boss 结局代码译成中文（未知回落原串）。
+const ELITE_OUTCOME_ZH: Record<string, string> = {
+  defeated: "讨平了它",
+  fled: "且战且退，脱身而走",
+  down: "力竭倒地，败下阵来",
+};
+
+// DUNGEON_OUTCOME_ZH 把副本整体结局译成中文（未知回落原串）。
+const DUNGEON_OUTCOME_ZH: Record<string, string> = {
+  cleared: "通关而归",
+  fled: "见好就收，半途折返",
+  wiped: "折戟沉沙，败退而出",
+};
+
+// eliteResultCard 把区域 boss 结算（EliteEncounterResult，Go 大写键名）转成内嵌结果卡（一句话 + 明细行）。
+function eliteResultCard(name: string, res: EliteEncounterResult): ActionResultCard {
+  const outcomeZH = ELITE_OUTCOME_ZH[res.Outcome] ?? res.Outcome;
+  const lines: string[] = [`鏖战 ${res.Rounds} 回合`];
+  if (res.DamageDealt > 0) lines.push(`予敌 ${res.DamageDealt} 伤`);
+  if (res.DamageTaken > 0) lines.push(`受创 -${res.DamageTaken}`);
+  if (res.PenaltyLayer > 0) lines.push(`受挫层级 D${res.PenaltyLayer}`);
+  if (res.Awards && res.Awards.length > 0) {
+    lines.push(`战获：${res.Awards.map((a) => `${a.ItemID}×${a.Quantity}`).join("、")}`);
+  }
+  if (res.InboxCard) lines.push(res.InboxCard);
+  return { summary: `与「${name}」一战：${outcomeZH}`, lines };
+}
+
+// dungeonResultCard 把副本结算（DungeonResult，Go 大写键名）转成内嵌结果卡（一句话 + 逐层/分赃明细）。
+function dungeonResultCard(res: DungeonResult, unitId: string): ActionResultCard {
+  const outcomeZH = DUNGEON_OUTCOME_ZH[res.Outcome] ?? res.Outcome;
+  const lines: string[] = [`闯过 ${res.FloorsClear}/${res.Floors} 层`];
+  // 分赃：只挑落到主角名下的（按 UnitID 匹配），避免把全队战获堆给她。
+  const myAwards = (res.Awards ?? []).filter((a) => a.UnitID === unitId);
+  if (myAwards.length > 0) {
+    lines.push(`战获：${myAwards.map((a) => `${a.ItemID}×${a.Quantity}`).join("、")}`);
+  }
+  const myPenalty = res.PenaltyLayer?.[unitId];
+  if (typeof myPenalty === "number" && myPenalty > 0) lines.push(`受挫层级 D${myPenalty}`);
+  const myCard = res.InboxCards?.[unitId];
+  if (myCard) lines.push(myCard);
+  return { summary: `探秘境：${outcomeZH}`, lines };
+}
+
 export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggested, onSnapshot }: Props) {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
   // pois：地图兴趣点（地块资源 / 野外 NPC 事件），画在格子上的徽标 + 点击查看。
@@ -396,6 +495,12 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
   // itemCatalog：物品 id→完整目录条目（译名 + 买价 price + 卖价折算用），挂载时 best-effort 拉一次
   // （失败回空 Map：译名退原 id、价格退显「—」）。买卖双向都要查 price，故拉完整目录而非仅译名表。
   const [itemCatalog, setItemCatalog] = useState<Map<string, ItemCatalogEntry>>(() => new Map());
+  // zones/currentZoneID：本会话区域摘要 + 当前区 id（best-effort）。用于推断当前区 boss 坐标/副本入口（露出按钮用）。
+  // 后端不在快照/affordances 里暴露 boss/dungeon 坐标，故另拉 getZones 拿当前区 kind/faction/level，再据快照地图尺寸等价复算。
+  const [zones, setZones] = useState<ZoneSummary[]>([]);
+  const [currentZoneID, setCurrentZoneID] = useState("");
+  // bossDone：本次挂载内已讨平的区域 id 集合（前端即时反馈把按钮置「已讨平」；后端 DefeatedBosses 是权威防刷）。
+  const [bossDone, setBossDone] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -409,6 +514,17 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
       if (mountedRef.current) setItemCatalog(map);
     });
   }, []);
+
+  // 拉区域摘要（best-effort，失败回空→不露 boss/副本按钮）。挂载即拉 + refreshSignal 变化时重拉
+  // （父层「前往新区」成功后 bump refreshSignal，使当前区随之切换，boss/副本入口跟着换区）。
+  useEffect(() => {
+    void getZones(sessionId).then((res) => {
+      if (mountedRef.current) {
+        setZones(res.zones);
+        setCurrentZoneID(res.current_zone_id);
+      }
+    });
+  }, [sessionId, refreshSignal]);
 
   const refresh = useCallback(async () => {
     try {
@@ -548,6 +664,92 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     const her = snap?.player_units?.find((u) => u.id === unitId);
     return her?.inventory?.backpack ?? [];
   }, [snap, unitId]);
+
+  // zoneContent：据当前区 ZoneSummary（kind/faction/level）+ 快照地图尺寸，等价复算本区 boss 坐标/副本入口
+  // （与后端 wireZoneContent 同口径）。当前区未知 / 中立新手区 → boss 坐标 null、无副本（不露按钮）。
+  const zoneContent = useMemo<ZoneContentInfo | null>(() => {
+    const zone = zones.find((z) => z.id === currentZoneID && z.is_current) ?? zones.find((z) => z.is_current);
+    if (!zone) return null;
+    const kind = (zone.kind ?? "").trim().toLowerCase();
+    const width = snap?.map?.width ?? 0;
+    const height = snap?.map?.height ?? 0;
+    // boss：capital/wild 区才有，坐标=地图中心格（⌊W/2⌋,⌊H/2⌋，与后端一致）。无地图尺寸则不露。
+    const hasBoss = BOSS_ZONE_KINDS.has(kind) && width > 0 && height > 0;
+    return {
+      zoneID: zone.id,
+      bossCoord: hasBoss ? { q: Math.floor(width / 2), r: Math.floor(height / 2) } : null,
+      bossName: zoneBossNameFor(zone.faction_id, kind),
+      bossLevel: zone.level_max,
+      // 副本入口仅 capital 区（city/village 城镇格可下副本）。
+      hasDungeon: kind === "capital",
+      // 权威已讨平态（跨刷新持久）；旧后端无此字段 → undefined → 按未讨平处理。
+      bossDefeated: Boolean(zone.boss_defeated),
+    };
+  }, [zones, currentZoneID, snap?.map?.width, snap?.map?.height]);
+
+  // bossAlreadyDefeated：本区 boss 是否已被讨平。取「服务端权威 boss_defeated（跨刷新/跨设备持久）」
+  // ∪「本次挂载内本地即时态 bossDone（刚讨平、getZones 尚未重拉时也立刻置灰）」——两者皆有则置灰。
+  const bossAlreadyDefeated = useMemo(
+    () => Boolean(zoneContent && (zoneContent.bossDefeated || bossDone.has(zoneContent.zoneID))),
+    [zoneContent, bossDone],
+  );
+
+  // bossPerilous：本区 boss 是否「此地凶险」——boss 等级高出主角 ≥ZONE_BOSS_LEVEL_GUARD_GAP 级（与后端软门同口径）。
+  // 前端据此把挑战按钮标红 + 预显凶险提示；后端 ChallengeZoneBoss 仍是唯一权威（点下去会被中文拒绝）。
+  const bossPerilous = useMemo(() => {
+    if (!zoneContent) return false;
+    const playerLevel = playerLevelOf(snap, unitId);
+    return zoneContent.bossLevel - playerLevel >= ZONE_BOSS_LEVEL_GUARD_GAP;
+  }, [zoneContent, snap, unitId]);
+
+  // tileIsBoss：当前点选的 tile 是否就是本区 boss 坐标格（露「挑战区域 boss」按钮的判据）。
+  const tileIsBoss = useMemo(() => {
+    if (!tile || !zoneContent?.bossCoord) return false;
+    return tile.q === zoneContent.bossCoord.q && tile.r === zoneContent.bossCoord.r;
+  }, [tile, zoneContent]);
+
+  // tileIsDungeon：当前点选的 tile 是否是本区可下副本的城镇格（capital 区 + city/village 地形）。
+  // 用快照地形判（与后端「副本入口锚在城镇」一致）；后端再校验主角是否真站在城镇格。
+  const tileIsDungeon = useMemo(() => {
+    if (!tile || !zoneContent?.hasDungeon) return false;
+    const mapTile = snap?.map?.tiles?.find((t) => t.coord.q === tile.q && t.coord.r === tile.r);
+    return TOWN_TERRAINS.has((mapTile?.terrain ?? "").toLowerCase());
+  }, [tile, zoneContent, snap?.map?.tiles]);
+
+  // onChallengeBoss：玩家在线让她挑战当前区域 boss（真实动作：改 HP/士气/钱包 + 落收件箱）。
+  // 复用 actionBusy 模式；结算内嵌展示，成功（讨平）后本地记入 bossDone 把按钮置「已讨平」；任意结局后 refresh() 追平 HP/士气。
+  const onChallengeBoss = useCallback(async () => {
+    if (!zoneContent) return;
+    const name = zoneContent.bossName;
+    setActionBusy(true);
+    try {
+      const res = await challengeZoneBoss(sessionId, unitId);
+      setActionResult(eliteResultCard(name, res));
+      if (res.Outcome === "defeated" && mountedRef.current) {
+        setBossDone((cur) => new Set(cur).add(zoneContent.zoneID));
+      }
+      await refresh();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "这一战没打成");
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [zoneContent, sessionId, unitId, refresh]);
+
+  // onEnterDungeon：玩家在线让她进入本区城镇副本（floors 不传，由后端按区域等级派生）。
+  // 副本 flag 关时后端 409（message 含「未启用」）——alert 兜底提示。结算内嵌展示，结束后 refresh() 追平。
+  const onEnterDungeon = useCallback(async () => {
+    setActionBusy(true);
+    try {
+      const res = await enterZoneDungeon(sessionId, unitId);
+      setActionResult(dungeonResultCard(res, unitId));
+      await refresh();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "这趟秘境没探成");
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [sessionId, unitId, refresh]);
 
   // buildBuyGoods：组装某 NPC 的「可买货单」（Bug1 买侧）——读对方背包（ambient_units / wild_units 里 target 那个
   // 单位的 inventory.backpack），每件查目录得买价（price）与中文名。查不到目录的（罕见）也列出、买价记 0
@@ -784,6 +986,78 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           >
             {moveBusy ? "她正动身…" : "🚶 让她去这里"}
           </button>
+          {/* 区域 boss 挑战（阶段2 §3/§4）：点中本区 boss 坐标格（地图中心）才露。已讨平置灰；
+              未讨平时按「等级护栏」分难度色——bossPerilous(boss 高出主角 ≥5 级)标暗红「此地凶险」，否则常态。
+              坐标由 getZones 当前区 kind + 快照地图尺寸前端等价复算（后端不暴露 BossCoord）；后端再校验站位(≤1)/等级护栏/防刷，是唯一权威。 */}
+          {tileIsBoss && zoneContent && (
+            <>
+              <button
+                type="button"
+                disabled={busyAll || bossAlreadyDefeated}
+                onClick={() => void onChallengeBoss()}
+                style={{
+                  marginTop: 8,
+                  padding: "6px 12px",
+                  borderRadius: 8,
+                  border: `1px solid ${bossAlreadyDefeated ? "rgba(150, 70, 50, 0.5)" : bossPerilous ? "rgba(120, 30, 20, 0.7)" : "rgba(150, 70, 50, 0.5)"}`,
+                  background: busyAll || bossAlreadyDefeated ? "rgba(220,210,195,0.7)" : bossPerilous ? "rgba(120, 28, 20, 0.18)" : "rgba(168, 58, 40, 0.14)",
+                  color: bossAlreadyDefeated ? "#a99b82" : bossPerilous ? "#7a1c14" : "#8a3422",
+                  fontFamily: "inherit",
+                  fontSize: 13,
+                  cursor: busyAll || bossAlreadyDefeated ? "default" : "pointer",
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                }}
+              >
+                {bossAlreadyDefeated
+                  ? `✔ 「${zoneContent.bossName}」已讨平`
+                  : actionBusy
+                    ? "鏖战中…"
+                    : `${bossPerilous ? "☠ " : "⚔ "}挑战区域boss「${zoneContent.bossName}」(Lv${zoneContent.bossLevel})`}
+              </button>
+              {/* 凶险预警（等级护栏前置提示，设计 §3）：未讨平且 boss 高出主角 ≥5 级时显「此地凶险」。
+                  这是软提示，按钮仍可点；点下去后端会返回中文拒绝消息（走 onChallengeBoss 的 alert 兜底）。 */}
+              {!bossAlreadyDefeated && bossPerilous && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    fontSize: 12,
+                    color: "#9a2c1e",
+                    fontStyle: "italic",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  此地凶险——她（Lv{playerLevelOf(snap, unitId)}）还远未到能撼动这头霸主的时候，先去低等级带历练吧。
+                </div>
+              )}
+            </>
+          )}
+          {/* 区域副本进入（阶段2 §4）：点中本区城镇格（capital 区 city/village）才露。floors 由后端按区域等级派生。
+              副本 flag 关时后端 409（「未启用」），alert 兜底。后端校验主角是否真站在城镇格，是唯一权威。 */}
+          {tileIsDungeon && (
+            <button
+              type="button"
+              disabled={busyAll}
+              onClick={() => void onEnterDungeon()}
+              style={{
+                marginTop: 8,
+                padding: "6px 12px",
+                borderRadius: 8,
+                border: "1px solid rgba(120, 90, 50, 0.5)",
+                background: busyAll ? "rgba(220,210,195,0.7)" : "rgba(132, 96, 58, 0.16)",
+                color: "#6b4a22",
+                fontFamily: "inherit",
+                fontSize: 13,
+                cursor: busyAll ? "default" : "pointer",
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+              }}
+            >
+              {actionBusy ? "探秘境中…" : "🏰 进入副本"}
+            </button>
+          )}
           {/* 动作目录：拉取中给一行占位；拉到即渲染按钮列表（不可用置灰带 reason_zh）；失败静默回退只读。
               渲染前校验目录坐标与当前面板格一致——动作完成后的尾随重拉捕获的是旧格闭包，若玩家此间点了
               新格，旧格目录可能后到并压过新格（seq 只防「旧响应覆盖新响应」，防不了「旧格的尾随请求」）。 */}

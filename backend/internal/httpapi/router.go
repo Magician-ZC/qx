@@ -2820,6 +2820,36 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	// 挑战当前区域 boss（阶段2 §4）：主角站在区域 boss 坐标附近→按区域 BossLevel 构造 Threat→全链结算→胜利标记防刷。真实动作。
+	router.POST("/api/sessions/:id/units/:unitId/zone-boss", func(c *gin.Context) {
+		result, err := newSessionService().ChallengeZoneBoss(c.Request.Context(), c.Param("id"), c.Param("unitId"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"encounter": result})
+	})
+
+	// 进入当前区域城镇里的副本（阶段2 §4）：主角站在本区某城镇→floors 按区域等级派生→逐层副本全链。真实动作，QUNXIANG_DUNGEON 默认关。
+	router.POST("/api/sessions/:id/units/:unitId/zone-dungeon", func(c *gin.Context) {
+		var body struct {
+			Floors int `json:"floors"`
+		}
+		// floors 可选（缺省/0 时由区域等级派生）；body 非法不致命，按零值（自动派生）继续。
+		_ = c.ShouldBindJSON(&body)
+		result, err := newSessionService().EnterZoneDungeon(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.Floors)
+		if err != nil {
+			// 副本未启用（ErrDungeonDisabled）→ 409；其余玩家直驱错误（站位/归属/执行互斥）走统一映射。
+			if err == session.ErrDungeonDisabled {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"dungeon": result})
+	})
+
 	// 与同格/相邻 NPC 直接买卖（行商 POI 的结算出口；物品/金币走既有结算口径）。
 	router.POST("/api/sessions/:id/units/:unitId/trade", func(c *gin.Context) {
 		var body session.PlayerTradeRequest

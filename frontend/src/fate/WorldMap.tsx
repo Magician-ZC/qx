@@ -12,6 +12,9 @@ import { getZones, travelToZone, type ZoneSummary } from "../session/api";
 type Props = {
   sessionId: string;
   unitId: string;
+  // playerLevel 主角当前等级（用于「等级护栏」难度色：区域 boss 等级 - 主角等级 越大越凶险）。
+  // 缺省 1（旧调用方/未知时按新手处理）。设计 §3：region 等级带 > 角色等级时此地凶险。
+  playerLevel?: number;
   onClose: () => void;
   // onTraveled 成功前往后回调（让父级刷新快照/区域地图）。
   onTraveled?: () => void;
@@ -43,6 +46,24 @@ function kindLabel(kind: string): string {
   }
 }
 
+// 难度色（等级护栏，设计 §3）：以「区域等级带上限 - 主角等级」的差值分四档，
+// 给区域块的等级带文字上色 + 标签，引导玩家按等级带推进（魔兽式分级体验）。
+//   - gap ≤ 0   ：可轻取（绿）——区域等级带不高于主角。
+//   - gap 1-4   ：有挑战（橙）。
+//   - gap 5-9   ：凶险（暗红）——与后端 zoneBossLevelGuardGap=5 软门对齐，挑战 boss 会被拒。
+//   - gap ≥ 10  ：致命（深红）。
+// 中立新手区（无 boss）不显难度档（返回 null）。
+function zonePeril(zone: ZoneSummary, playerLevel: number): { label: string; color: string } | null {
+  if ((zone.faction_id ?? "") === "neutral" || zone.kind === "starter") {
+    return null;
+  }
+  const gap = zone.level_max - playerLevel;
+  if (gap <= 0) return { label: "可轻取", color: "#3f7a4a" };
+  if (gap < 5) return { label: "有挑战", color: "#b87a2a" };
+  if (gap < 10) return { label: "此地凶险", color: "#a3433f" };
+  return { label: "致命凶地", color: "#7a1c14" };
+}
+
 // 阵营分列顺序（中立单独居顶；三阵营左中右）。
 const FACTION_COLUMNS: { id: string; label: string }[] = [
   { id: "freedom", label: "自由" },
@@ -50,7 +71,7 @@ const FACTION_COLUMNS: { id: string; label: string }[] = [
   { id: "chaos", label: "混乱" },
 ];
 
-export function WorldMap({ sessionId, unitId, onClose, onTraveled }: Props) {
+export function WorldMap({ sessionId, unitId, playerLevel = 1, onClose, onTraveled }: Props) {
   const [zones, setZones] = useState<ZoneSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -179,6 +200,7 @@ export function WorldMap({ sessionId, unitId, onClose, onTraveled }: Props) {
                       <ZoneCard
                         key={z.id}
                         zone={z}
+                        playerLevel={playerLevel}
                         busy={Boolean(busyZoneID)}
                         busyHere={busyZoneID === z.id}
                         onTravel={handleTravel}
@@ -202,6 +224,7 @@ export function WorldMap({ sessionId, unitId, onClose, onTraveled }: Props) {
                           <ZoneCard
                             key={z.id}
                             zone={z}
+                            playerLevel={playerLevel}
                             busy={Boolean(busyZoneID)}
                             busyHere={busyZoneID === z.id}
                             onTravel={handleTravel}
@@ -223,17 +246,21 @@ export function WorldMap({ sessionId, unitId, onClose, onTraveled }: Props) {
 // ZoneCard 渲染单个区域块。
 function ZoneCard({
   zone,
+  playerLevel,
   busy,
   busyHere,
   onTravel,
 }: {
   zone: ZoneSummary;
+  playerLevel: number;
   busy: boolean;
   busyHere: boolean;
   onTravel: (z: ZoneSummary) => void;
 }) {
   const meta = factionMeta(zone.faction_id);
   const isCurrent = zone.is_current;
+  // 难度档（等级护栏）：据「区域等级带上限 - 主角等级」分档上色（中立新手区无 boss → null）。
+  const peril = zonePeril(zone, playerLevel);
   // 不可达类型：portal=>未开通锁，""=>路不通；border/可达正常。
   const lockedPortal = !zone.reachable && zone.portal_kind === "portal";
   const noRoad = !zone.reachable && zone.portal_kind === "";
@@ -256,7 +283,14 @@ function ZoneCard({
         <span style={kindChipStyle}>{kindLabel(zone.kind)}</span>
       </div>
       <div style={zoneNameStyle}>{zone.name || zone.id}</div>
-      <div style={levelBandStyle}>Lv {zone.level_min}-{zone.level_max}</div>
+      <div style={levelBandRowStyle}>
+        <span style={levelBandStyle}>Lv {zone.level_min}-{zone.level_max}</span>
+        {peril ? (
+          <span style={{ ...perilChipStyle, color: peril.color, borderColor: peril.color }}>
+            {peril.label}
+          </span>
+        ) : null}
+      </div>
 
       <div style={zoneActionStyle}>
         {isCurrent ? (
@@ -459,10 +493,25 @@ const zoneNameStyle: React.CSSProperties = {
   letterSpacing: 1,
 };
 
+const levelBandRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+};
+
 const levelBandStyle: React.CSSProperties = {
   fontSize: 12,
   color: "#6f5f48",
   fontFamily: "ui-monospace, SFMono-Regular, monospace",
+};
+
+// 难度档徽标（等级护栏色，文字色 + 边框由 zonePeril 给）。
+const perilChipStyle: React.CSSProperties = {
+  fontSize: 11,
+  border: "1px solid",
+  borderRadius: 6,
+  padding: "0px 6px",
+  fontWeight: 600,
 };
 
 const zoneActionStyle: React.CSSProperties = {

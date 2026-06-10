@@ -130,6 +130,13 @@ export type BattleUnit = {
       vision?: number;
       carry_weight?: number;
     };
+    // growth.level 是角色等级（后端 unit.Stats.Growth.Level）——分区大世界用于「等级护栏 / 难度色」前端提示。
+    // 旧后端快照无此字段反序列化为 undefined（按 Lv1 兜底处理）。
+    growth?: {
+      level?: number;
+      experience?: number;
+      skill_points?: number;
+    };
   };
   skills?: {
     weapons?: {

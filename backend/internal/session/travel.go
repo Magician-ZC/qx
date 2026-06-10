@@ -25,6 +25,9 @@ type ZoneSummary struct {
 	IsCurrent  bool   `json:"is_current"`  // 主角当前所在
 	Reachable  bool   `json:"reachable"`   // 从当前区有传送门/边界直达
 	PortalKind string `json:"portal_kind"` // 直达方式 border/portal（reachable 时有）
+	// BossDefeated 是本区 boss 是否已被讨平（来自服务端权威 state.DefeatedBosses）——
+	// 暴露给前端做「已讨平」置灰的权威依据，使置灰态跨页面刷新/跨设备持久（不再只靠前端本地即时态）。
+	BossDefeated bool `json:"boss_defeated"`
 }
 
 // ZonesOverview 返回世界全部区域摘要 + 当前区域 id（前端世界地图据此渲染 + 高亮 + 可达判定）。
@@ -61,6 +64,8 @@ func (service *Service) ZonesOverview(ctx context.Context, sessionID string) ([]
 			// 且 Reachable==false 画「锁」）。与 TravelToZone 的解锁门契约一致，阶段3 接任务解锁后同步放开。
 			Reachable:  has && zonePortalUnlocked(portal),
 			PortalKind: portal.Kind, // 仍暴露（has=false 时为空串），供前端区分边界/传送门/不通
+			// 权威防刷态：本区 boss 是否已讨平（state.DefeatedBosses）——前端据此跨刷新置灰挑战按钮。
+			BossDefeated: zoneBossDefeated(&state, zone.ID),
 		})
 	}
 	return summaries, state.CurrentZoneID, nil
@@ -111,6 +116,10 @@ func (service *Service) TravelToZone(ctx context.Context, sessionID, unitID, toZ
 	if err != nil {
 		return err
 	}
+	// 阶段2 §1：首次进入某区则 lazy 播种公共 NPC（复用 SeedFactionSpawn，标 ZoneID + 等级带派生 + 入 AmbientUnitIDs）。
+	// 须在 setCurrentZone 之后（state.Map 已投影为目标区）、saveSessionMergingExternalEvents 之前调，使新增的
+	// AmbientUnitIDs / SeededZoneIDs 随本次 session Save 一并落库。best-effort：播种失败绝不阻断 travel。
+	service.ensureZoneSeededBestEffort(ctx, &state, toZoneID)
 	coord, ok := parseCoordKey(coordKey)
 	if !ok || !inBounds(state.Map, coord) {
 		coord = world.Coord{Q: zone.Map.Width / 2, R: zone.Map.Height / 2}

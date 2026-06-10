@@ -163,18 +163,18 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	selectedMapSize := battlefieldSizeByID(BattlefieldSizeWorld)
 
 	state := State{
-		ID:                   sessionID,
-		AccountID:            accountID, // 账号绑定（随 state_json + account_id 列落库），resume 的 (account_id, world_id) 查询键
-		Mode:                 ModeSinglePlayer,
-		RandomSeed:           seed,
-		PlayerFactionID:      "player",
-		EnemyFactionID:       "enemy",
-		SetupPhase:           SetupPhaseReady,
-		DraftRequiredPick:    1, // 命运入口主角 1 人（非选秀）
-		TurnState:            turns.NewState(now, turns.DefaultBudgets()),
-		Outcome:              OutcomeOngoing,
-		VictoryPath:          VictoryPathNone,
-		Weather:              weatherForTurnBySeed(seed, 1),
+		ID:                sessionID,
+		AccountID:         accountID, // 账号绑定（随 state_json + account_id 列落库），resume 的 (account_id, world_id) 查询键
+		Mode:              ModeSinglePlayer,
+		RandomSeed:        seed,
+		PlayerFactionID:   "player",
+		EnemyFactionID:    "enemy",
+		SetupPhase:        SetupPhaseReady,
+		DraftRequiredPick: 1, // 命运入口主角 1 人（非选秀）
+		TurnState:         turns.NewState(now, turns.DefaultBudgets()),
+		Outcome:           OutcomeOngoing,
+		VictoryPath:       VictoryPathNone,
+		Weather:           weatherForTurnBySeed(seed, 1),
 		// 分区大世界：state.Map 由下方 setCurrentZone 投影为出生区地图填充（不在此生成战场图——
 		// 否则那张图会被 setCurrentZone 立即覆盖，纯浪费）。MapScript/Size 元数据保留（命运客户端 spectator 不据此渲染）。
 		Map:                  world.MapSnapshot{},
@@ -282,6 +282,8 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	// 也不能在此早 Save，会触发并发降生唯一索引 TOCTOU 报错，绕过 W-E 的冲突兜底）。
 	ambientNPCIDs := service.SeedFactionSpawnBestEffort(ctx, sessionID, chosenFaction, spawnRegion, seed+1, state.Map)
 	state.AmbientUnitIDs = append(state.AmbientUnitIDs, ambientNPCIDs...)
+	// 阶段2 §1：出生区在此已播种 → 记入 SeededZoneIDs，使 travel 时的 lazy 播种不重复给出生区造人。
+	appendSeededZone(&state, startZoneID)
 
 	if err := service.syncCombatFlags(ctx, &state, nil); err != nil {
 		return MainWorldCharacter{}, err
@@ -311,6 +313,8 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	state = loadedState
 	// 分区世界：把出生区落库的公共 NPC（ambient）标记区域归属=出生区，使快照按主角当前区过滤 NPC 显示生效。best-effort。
 	service.tagAmbientZoneBestEffort(ctx, state.CurrentZoneID, state.AmbientUnitIDs, units)
+	// 阶段2 §2：出生区 NPC 也按出生区等级带派生 Growth.Level（与 lazy 播种同口径，确定性 FNV）。best-effort。
+	service.tagZoneCreatureLevelsBestEffort(ctx, &state, state.CurrentZoneID, state.AmbientUnitIDs)
 	if len(state.EnemyUnitIDs) > 0 {
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		if err := service.sessions.Save(ctx, &state); err != nil {
