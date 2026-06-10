@@ -2793,6 +2793,33 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	// ── 分区大世界（设计 docs/分区大世界设计方案-2026-06-10.md §8）：世界由多区域组成，主角在区域间穿行 ──
+	// 区域总览：世界全部区域摘要（阵营/等级/当前区/从当前区可达）——前端世界地图据此渲染 + 高亮 + 可达判定。
+	router.GET("/api/sessions/:id/zones", func(c *gin.Context) {
+		zones, current, err := newSessionService().ZonesOverview(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"zones": zones, "current_zone_id": current})
+	})
+	// 区域穿行：把主角从当前区域传送/过境到目标区域（校验当前区有传送门/边界通向目标）。
+	router.POST("/api/sessions/:id/units/:unitId/travel", func(c *gin.Context) {
+		var body struct {
+			ToZoneID string `json:"to_zone_id"`
+			ToCoord  string `json:"to_coord"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := newSessionService().TravelToZone(c.Request.Context(), c.Param("id"), c.Param("unitId"), body.ToZoneID, body.ToCoord); err != nil {
+			respondPlayerActionError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	// 与同格/相邻 NPC 直接买卖（行商 POI 的结算出口；物品/金币走既有结算口径）。
 	router.POST("/api/sessions/:id/units/:unitId/trade", func(c *gin.Context) {
 		var body session.PlayerTradeRequest

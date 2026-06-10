@@ -383,6 +383,11 @@ func (service *Service) wanderAmbientUnits(ctx context.Context, state *State, un
 		if rec == nil {
 			continue
 		}
+		// 分区大世界：只游走主角当前区的 NPC——snapshot=state.Map 是当前区地图，用它给别区 NPC 算落点会
+		// 把别区居民按无关区的地形/占用挪动（分区一致性漏洞）。CurrentZoneID 为空（旧单图档）不过滤。
+		if state.CurrentZoneID != "" && rec.Status.ZoneID != "" && rec.Status.ZoneID != state.CurrentZoneID {
+			continue
+		}
 		if ambientWanderRoll(state.ID, turn, npcID, "move") >= wanderMoveChance {
 			continue // 本拍不挪（低概率游走）。
 		}

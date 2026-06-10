@@ -585,6 +585,12 @@ type State struct {
 	VictoryPath           VictoryPath       `json:"victory_path,omitempty"`
 	Weather               WeatherState      `json:"weather"`
 	Map                   world.MapSnapshot `json:"map"`
+	// Zones 是分区大世界的全部区域（设计 docs/分区大世界设计方案-2026-06-10.md §1）。
+	// 空 = 旧单图存档（向后兼容，Map 即唯一区域）；非空时 Map 恒是 CurrentZoneID 区域的投影拷贝
+	// （旧代码读 state.Map 照常工作，作用于「当前区域」）。整块随 state_json 持久化。
+	Zones         []world.Zone `json:"zones,omitempty"`
+	// CurrentZoneID 是主角当前所在区域 id（空 = 单区/兼容旧档）；travel 切区时改它并把 Map 重投影为该区地图。
+	CurrentZoneID string `json:"current_zone_id,omitempty"`
 	CommandPower          CommandPowerState `json:"command_power"`
 	FactionRelations      []FactionRelation `json:"faction_relations"`
 	PlayerUnitIDs         []string          `json:"player_unit_ids"`

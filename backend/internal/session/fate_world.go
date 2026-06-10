@@ -148,6 +148,11 @@ func (service *Service) surfaceEncounterBeatBestEffort(
 		if w == nil {
 			continue
 		}
+		// 分区过滤（与 zoneVisibleUnits 同口径）：只对主角当前区的野外 NPC 判遭遇，避免挂在别区的散人
+		// 因坐标数值相邻冒假遭遇。CurrentZoneID 为空（旧单图档）不过滤；空 ZoneID 视作当前区（兜旧迁移残留）。
+		if state.CurrentZoneID != "" && w.Status.ZoneID != "" && w.Status.ZoneID != state.CurrentZoneID {
+			continue
+		}
 		if unit.HexDistance(aq, ar, w.Status.PositionQ, w.Status.PositionR) > 1 {
 			continue
 		}

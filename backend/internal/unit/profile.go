@@ -112,6 +112,7 @@ type Status struct {
 	Wallet          int      `json:"wallet"`
 	PositionQ       int      `json:"position_q"`
 	PositionR       int      `json:"position_r"`
+	ZoneID          string   `json:"zone_id,omitempty"` // 分区大世界：该单位所在区域 id（空=出生区/兼容旧档）；快照按主角当前区过滤 NPC 显示
 	InCombat        bool     `json:"in_combat"`
 	Injuries        []string `json:"injuries"`
 	Debuffs         []string `json:"debuffs"`

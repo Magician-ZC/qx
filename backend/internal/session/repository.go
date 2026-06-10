@@ -215,6 +215,9 @@ func (repository *Repository) Get(ctx context.Context, sessionID string) (State,
 		}
 	}
 	ensureCommandPower(&state)
+	// 分区大世界：强制把 state.Map 重投影为当前区地图（把「Map 恒等于当前区地图」从约定升级为 load 时强制；
+	// 旧单图档 Zones 空时 no-op）。幂等，置于其他归一化之后。
+	reprojectCurrentZone(&state)
 	state.GlobalDirective.Kind = normalizeDirectiveKind(state.GlobalDirective.Kind)
 	if state.GlobalDirective.Priority == "" {
 		state.GlobalDirective.Priority = "normal"

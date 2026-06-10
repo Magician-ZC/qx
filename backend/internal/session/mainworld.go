@@ -175,7 +175,9 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		Outcome:              OutcomeOngoing,
 		VictoryPath:          VictoryPathNone,
 		Weather:              weatherForTurnBySeed(seed, 1),
-		Map:                  generateBattlefieldWithSize(sessionID, seed, selectedMapScriptID, selectedMapSize.ID),
+		// 分区大世界：state.Map 由下方 setCurrentZone 投影为出生区地图填充（不在此生成战场图——
+		// 否则那张图会被 setCurrentZone 立即覆盖，纯浪费）。MapScript/Size 元数据保留（命运客户端 spectator 不据此渲染）。
+		Map:                  world.MapSnapshot{},
 		MapScriptID:          selectedMapScriptID,
 		MapScriptName:        selectedMapScriptName,
 		MapSizeID:            selectedMapSize.ID,
@@ -201,6 +203,16 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		UpdatedAt:            now,
 	}
 
+	// 分区大世界（设计 docs/分区大世界设计方案-2026-06-10.md §1/§2）：生成多区域世界，出生区（Zones[0]=
+	// 中立新手区）作当前区，state.Map 经 setCurrentZone 投影为出生区地图——旧代码读 state.Map 即读出生区，
+	// 渲染/移动/采集/POI/威胁等所有现有逻辑天然作用于「当前区域」，无需改动。
+	worldZones := world.GenerateWorld(seed)
+	state.Zones = worldZones
+	startZoneID := worldZones[0].ID
+	if _, err := setCurrentZone(&state, startZoneID); err != nil {
+		return MainWorldCharacter{}, err
+	}
+
 	// 阵营开放世界 F1：解析玩家阵营（空/非法 → 据出身/夙愿启发选，最终恒落三阵营之一），
 	// 并据 faction + seed 确定性选出生据点 region。
 	chosenFaction := resolveBirthFaction(in)
@@ -219,6 +231,7 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	// 玩家角色的阵营 + 道德轴（=该阵营道德基准）：非保护字段，直接写（不走 Mutator，仿 Ambition）。
 	hero.Faction = chosenFaction
 	hero.MoralAlignment = faction.BaselineFor(chosenFaction)
+	hero.Status.ZoneID = startZoneID // 分区世界：主角降生在出生区（快照按区过滤的归属锚）
 	if err := service.units.Save(ctx, hero); err != nil {
 		return MainWorldCharacter{}, err
 	}
@@ -296,6 +309,8 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 		return MainWorldCharacter{}, err
 	}
 	state = loadedState
+	// 分区世界：把出生区落库的公共 NPC（ambient）标记区域归属=出生区，使快照按主角当前区过滤 NPC 显示生效。best-effort。
+	service.tagAmbientZoneBestEffort(ctx, state.CurrentZoneID, state.AmbientUnitIDs, units)
 	if len(state.EnemyUnitIDs) > 0 {
 		service.refreshEnemyGlobalDirectiveForDeploymentPhase(ctx, &state, units, "deployment_phase_started")
 		if err := service.sessions.Save(ctx, &state); err != nil {

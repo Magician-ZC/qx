@@ -1004,6 +1004,9 @@ func createChildUnit(state State, left unit.Record, right unit.Record, coord wor
 	child.Social.Wildling = factionID == FactionWildling
 	// 新生儿战斗基础属性初始化经白名单辅助函数（statuslint 合规），等价于直赋 HP=60/Attack=4/Defense=2/Move=3。
 	unit.SetNewbornBattleStats(&child, 60, 4, 2, 3)
+	// 分区大世界：子嗣降生在主角当前区（与 zoneVisibleUnits/遭遇过滤同口径，避免空 ZoneID 跨区误显/假遭遇）。
+	// 旧单图档 CurrentZoneID=="" 时保持空 ZoneID，下游短路不过滤、行为不变。位置/区域字段非受保护，直改合规。
+	child.Status.ZoneID = state.CurrentZoneID
 	return child
 }
 

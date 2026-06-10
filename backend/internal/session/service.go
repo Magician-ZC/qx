@@ -3976,8 +3976,8 @@ func buildSnapshot(state State, units []unit.Record) Snapshot {
 		Logs:                state.Logs,
 		PlayerUnits:         playerUnits,
 		EnemyUnits:          enemyUnits,
-		WildUnits:           orderedUnits(state.WildUnitIDs, byID),
-		AmbientUnits:        orderedUnits(state.AmbientUnitIDs, byID), // 出生点公共 NPC 静态上图（不进执行 order，零 LLM）
+		WildUnits:           zoneVisibleUnits(&state, state.WildUnitIDs, byID),     // 分区世界：只显示主角当前区域的野外散人
+		AmbientUnits:        zoneVisibleUnits(&state, state.AmbientUnitIDs, byID),  // 出生点公共 NPC 静态上图（按当前区过滤；不进执行 order，零 LLM）
 	}
 }
 
