@@ -32,14 +32,15 @@ var (
 )
 
 // TileActionRequest 是玩家直驱地块动作的请求体。
+// 动作族（共享大世界，玩家不能在地图上建造/拆除建筑）：gather（从地形采集）、harvest（收割世界已有己方农田）、
+// forge/upgrade（在世界已有己方铁匠铺锻造/强化）。build/demolish 已移除（2026-06-10 设计修正）。
 // ItemID 可选：forge/upgrade 指定目标装备，留空则取目录默认（首个可锻/可强化件）。
 type TileActionRequest struct {
-	Action        string `json:"action"` // gather/harvest/build/forge/upgrade/demolish
-	Q             int    `json:"q"`
-	R             int    `json:"r"`
-	Activity      string `json:"activity,omitempty"`       // gather 专用：fish/forage/hunt/mine
-	StructureType string `json:"structure_type,omitempty"` // build 专用
-	ItemID        string `json:"item_id,omitempty"`        // forge/upgrade 可选
+	Action   string `json:"action"` // gather/harvest/forge/upgrade
+	Q        int    `json:"q"`
+	R        int    `json:"r"`
+	Activity string `json:"activity,omitempty"` // gather 专用：fish/forage/hunt/mine
+	ItemID   string `json:"item_id,omitempty"`  // forge/upgrade 可选
 }
 
 // TileActionEffect 是一条结算后的增减明细（物品或状态）。
@@ -98,7 +99,6 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 	coord := world.Coord{Q: req.Q, R: req.R}
 	logStart := len(state.Logs)
 	baseline := captureTileEffectBaseline(*actor)
-	hostileDemolish := false
 
 	switch req.Action {
 	case "gather":
@@ -110,6 +110,8 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 			return TileActionResult{}, fmt.Errorf("tile action (gather): %w", err)
 		}
 	case "harvest":
+		// 收割：使用世界中已存在的己方农田（NPC 自治建造的阵营设施）。玩家不能自建农田（共享地图不私人建造），
+		// 但可收割世界里现成的己方农田——故本动作仅在该格有完工己方农田时由目录给出。
 		structure := structureAt(state.Structures, coord)
 		if structure == nil {
 			return TileActionResult{}, fmt.Errorf("这里没有农田")
@@ -120,20 +122,6 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 		}
 		if err := service.executeGather(ctx, &state, actor, decision); err != nil {
 			return TileActionResult{}, fmt.Errorf("tile action (harvest): %w", err)
-		}
-	case "build":
-		decision := unitDecisionPayload{Action: DecisionActionBuild, StructureType: StructureType(strings.TrimSpace(req.StructureType))}
-		// 本格已有己方未完工设施 → 续建（与 buildEconomyCandidates 的续建候选同口径）。
-		if current := structureAt(state.Structures, coord); current != nil &&
-			current.FactionID == actor.FactionID && !structureReady(*current) {
-			decision.StructureID = current.ID
-			decision.StructureType = current.Type
-		}
-		if err := validateProductionDecision(state, actor, decision); err != nil {
-			return TileActionResult{}, fmt.Errorf("此地做不得这事：%w", err)
-		}
-		if err := service.executeBuild(ctx, &state, actor, decision); err != nil {
-			return TileActionResult{}, fmt.Errorf("tile action (build): %w", err)
 		}
 	case "forge":
 		itemID := strings.TrimSpace(req.ItemID)
@@ -163,25 +151,9 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 		if err := service.executeUpgrade(ctx, &state, actor, decision); err != nil {
 			return TileActionResult{}, fmt.Errorf("tile action (upgrade): %w", err)
 		}
-	case "demolish":
-		structure := structureAt(state.Structures, coord)
-		if structure == nil {
-			return TileActionResult{}, fmt.Errorf("脚下没有设施")
-		}
-		if structure.FactionID == actor.FactionID {
-			decision := unitDecisionPayload{Action: DecisionActionDemolish, StructureID: structure.ID}
-			if err := service.executeDemolish(ctx, &state, actor, decision); err != nil {
-				return TileActionResult{}, fmt.Errorf("tile action (demolish): %w", err)
-			}
-		} else {
-			// 敌对设施经战斗摧毁（structure_actions.go 口径：确定性掷骰，可能落空）。affordance 已校验战争状态。
-			hostileDemolish = true
-			index := structureIndexByID(state.Structures, structure.ID)
-			if err := service.applyAttackToStructure(ctx, &state, actor, index, normalAttackStyle, ""); err != nil {
-				return TileActionResult{}, fmt.Errorf("tile action (demolish hostile): %w", err)
-			}
-		}
 	default:
+		// build（建造）/ demolish（拆除）已移除：共享大世界所有人共用一张地图，玩家不得单独在地图上
+		// 建造或拆除建筑（2026-06-10 设计修正）。地块动作只保留「从世界采集」与「使用世界中已有的己方设施」。
 		return TileActionResult{}, fmt.Errorf("不认识的动作 %q", req.Action)
 	}
 
@@ -196,7 +168,7 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 	appendLog(&state, "player_tile_action",
 		fmt.Sprintf("依你的指点，%s在 (%d,%d) %s。", actor.DisplayName(), req.Q, req.R, entry.LabelZH),
 		actor.ID, "")
-	service.emitTileActionTraceBestEffort(ctx, &state, actor, req, entry, summary, hostileDemolish)
+	service.emitTileActionTraceBestEffort(ctx, &state, actor, req, entry, summary)
 	service.pushRealtime(state.ID, "fate_life_beat", map[string]any{
 		"unit_id":   actor.ID,
 		"narrative": summary,
@@ -215,16 +187,13 @@ func (service *Service) ExecuteTileAction(ctx context.Context, sessionID string,
 	}, nil
 }
 
-// matchTileAffordance 在动作目录里找与请求匹配的条目（gather 还须 activity 一致、build 须 structure_type 一致）。
+// matchTileAffordance 在动作目录里找与请求匹配的条目（gather 还须 activity 一致）。
 func matchTileAffordance(affordances TileAffordances, req TileActionRequest) (TileAction, bool) {
 	for _, action := range affordances.Actions {
 		if action.Action != req.Action {
 			continue
 		}
 		if req.Action == "gather" && action.Activity != strings.TrimSpace(req.Activity) {
-			continue
-		}
-		if req.Action == "build" && action.StructureType != strings.TrimSpace(req.StructureType) {
 			continue
 		}
 		return action, true
@@ -237,14 +206,10 @@ func tileActionLogKinds(action string) []string {
 	switch action {
 	case "gather", "harvest":
 		return []string{"gather"}
-	case "build":
-		return []string{"build"}
 	case "forge":
 		return []string{"forge"}
 	case "upgrade":
 		return []string{"upgrade"}
-	case "demolish":
-		return []string{"demolish", "attack", "attack_miss", "hold"}
 	default:
 		return nil
 	}
@@ -346,7 +311,6 @@ func (service *Service) emitTileActionTraceBestEffort(
 	req TileActionRequest,
 	entry TileAction,
 	summary string,
-	hostileDemolish bool,
 ) {
 	if service == nil || service.db == nil || state == nil || actor == nil {
 		return
@@ -355,10 +319,6 @@ func (service *Service) emitTileActionTraceBestEffort(
 	switch req.Action {
 	case "gather", "harvest":
 		importance = 2
-	case "demolish":
-		if hostileDemolish {
-			importance = 4
-		}
 	}
 	_, _ = events.EmitProcessEvent(ctx, service.db, events.ProcessEvent{
 		SessionID:   state.ID,
@@ -366,15 +326,14 @@ func (service *Service) emitTileActionTraceBestEffort(
 		Code:        events.ReasonPlayerTileAction,
 		Category:    events.CategoryLifecycle,
 		Payload: map[string]any{
-			"action":         req.Action,
-			"activity":       strings.TrimSpace(req.Activity),
-			"structure_type": strings.TrimSpace(req.StructureType),
-			"q":              req.Q,
-			"r":              req.R,
-			"label_zh":       entry.LabelZH,
-			"summary":        summary,
-			"importance":     importance,
-			"turn":           state.TurnState.Turn,
+			"action":     req.Action,
+			"activity":   strings.TrimSpace(req.Activity),
+			"q":          req.Q,
+			"r":          req.R,
+			"label_zh":   entry.LabelZH,
+			"summary":    summary,
+			"importance": importance,
+			"turn":       state.TurnState.Turn,
 		},
 		WorldID:  state.WorldID,
 		RegionID: state.ID,

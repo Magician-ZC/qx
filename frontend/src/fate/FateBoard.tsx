@@ -2,8 +2,9 @@
    她随世界推进在六边形格子上移动；玩家是垂看的先祖，但**上线时可直接操作她**：
    - 点格子弹「这是什么地方 + 这里有谁」浮卡，附「让她去这里」直驱移动按钮；
    - 浮卡同时 best-effort 拉该格**动作目录**（getTileAffordances，失败静默回退只读展示——旧后端 404 时面板不能坏），
-     渲染采集/建造/收获/锻造/探遭遇/交谈/交易等动作按钮：不可用置灰带 reason_zh 小字；
-   - 直发动作（gather/build/harvest/forge/upgrade/demolish）→ executeTileAction，结算摘要+明细内嵌小卡展示；
+     渲染采集/收割/锻造/探遭遇/交谈/交易等动作按钮：不可用置灰带 reason_zh 小字；
+     （共享大世界：玩家不能在共用地图上建造/拆除建筑，故无建造/拆除；收割/锻造仅「使用」世界已有的己方设施。）
+   - 直发动作（gather/harvest/forge/upgrade）→ executeTileAction，结算摘要+明细内嵌小卡展示；
    - POI 遭遇（poi_encounter）→ resolvePOIEncounter；撞上行商则展开「行商货单」交易小面板（买/卖对照 sell_price）；
    - 普通 NPC 交易复用同款小面板但只开「卖」侧（基准卖价后端结算，前端不显示预估价）；
    - 交谈：同阵营单位复用战棋 /dialogue 链路（talkToUnit）弹简易输入框；据点 NPC/野外散人不在该链路
@@ -571,14 +572,12 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
             });
           }
         } else {
-          // gather/build/harvest/forge/upgrade/demolish：直发地块动作，后端复用既有结算链。
+          // gather/harvest/forge/upgrade：直发地块动作，后端复用既有结算链（forge/upgrade 的目标装备由后端取目录默认）。
           const res = await executeTileAction(sessionId, unitId, {
             action: a.action,
             q: tile.q,
             r: tile.r,
             activity: a.activity,
-            structure_type: a.structure_type,
-            item_id: a.item_id,
           });
           setActionResult({ summary: res.summary_zh, lines: effectLines(res.effects) });
         }

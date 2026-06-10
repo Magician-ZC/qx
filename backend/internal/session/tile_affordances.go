@@ -1,10 +1,11 @@
 package session
 
 // 文件说明：地块事件系统——「点开一格地图，看她在这里能做什么」的动作目录（affordances）。
-// 只读、零 LLM、确定性：动作白名单与 LLM 自治决策完全同口径（复用 production.go 的
-// terrainSupportsActivity / terrainSupportsStructure / canBuildStructure 与 structure_actions.go 的拆除口径，
+// 只读、零 LLM、确定性：动作白名单与 LLM 自治决策完全同口径（复用 production.go 的 terrainSupportsActivity 等谓词，
 // 绝不另写第二套规则）。不可用的动作也返回（available=false + reason_zh），供前端置灰展示原因。
 // talk/trade 仅列目录（由对话/交易专用端点结算）；poi_encounter 由 poi_encounter.go 的专用端点结算。
+// 共享大世界设计修正（2026-06-10）：玩家不能在共用地图上建造/拆除建筑，故目录不含 build/demolish；
+// harvest/forge/upgrade 只「使用」世界里已存在的己方设施（NPC 自治建造产生），不创造/改变建筑。
 
 import (
 	"context"
@@ -46,13 +47,12 @@ type TileOccupant struct {
 
 // TileAction 是动作目录里的一项（不可用也下发，前端置灰展示 reason_zh）。
 type TileAction struct {
-	Action        string `json:"action"`                   // gather/build/harvest/forge/upgrade/demolish/poi_encounter/talk/trade
-	Activity      string `json:"activity,omitempty"`       // gather 专用：fish/forage/hunt/mine
-	StructureType string `json:"structure_type,omitempty"` // build 专用
-	TargetUnitID  string `json:"target_unit_id,omitempty"` // talk/trade 专用
-	LabelZH       string `json:"label_zh"`
-	Available     bool   `json:"available"`
-	ReasonZH      string `json:"reason_zh,omitempty"` // 不可用时的中文原因
+	Action       string `json:"action"`                   // gather/harvest/forge/upgrade/poi_encounter/talk/trade
+	Activity     string `json:"activity,omitempty"`       // gather 专用：fish/forage/hunt/mine
+	TargetUnitID string `json:"target_unit_id,omitempty"` // talk/trade 专用
+	LabelZH      string `json:"label_zh"`
+	Available    bool   `json:"available"`
+	ReasonZH     string `json:"reason_zh,omitempty"` // 不可用时的中文原因
 }
 
 // TileAffordances 是「她在这一格能做什么」的完整目录（只读 DTO）。
@@ -233,8 +233,10 @@ func requireOnTile(onTile bool, available bool, reason string) (bool, string) {
 }
 
 // buildTileActions 生成动作目录。动作族与可用性谓词全部复用既有结算路径的口径：
-// gather → terrainSupportsActivity；build → terrainSupportsStructure + buildCosts；
-// harvest/forge/upgrade → 农田/铁匠铺既有前置；demolish → structure_actions.go 口径。
+// gather → terrainSupportsActivity；harvest/forge/upgrade → 世界中已有的己方农田/铁匠铺前置。
+// 共享大世界（所有人共用一张地图）下，玩家不得在地图上建造/拆除建筑——故 build/demolish 不进目录
+// （2026-06-10 设计修正）；harvest/forge/upgrade 只「使用」世界里已存在的己方设施（NPC 自治建造产生），
+// 不创造/改变建筑：本格没有相应己方设施时这些动作自然不出现。
 func buildTileActions(
 	state *State,
 	actor *unit.Record,
@@ -291,55 +293,7 @@ func buildTileActions(
 		})
 	}
 
-	// —— build：空地新建（5 设施按地形 + 材料）或己方未完工设施续建 ——
-	if structure == nil {
-		buildEmoji := map[StructureType]string{
-			StructureTypeFarmland:   "🌾",
-			StructureTypeForge:      "⚒",
-			StructureTypeTrap:       "🪤",
-			StructureTypeTurret:     "💥",
-			StructureTypeWatchtower: "🗼",
-		}
-		for _, structureType := range []StructureType{
-			StructureTypeFarmland,
-			StructureTypeForge,
-			StructureTypeTrap,
-			StructureTypeTurret,
-			StructureTypeWatchtower,
-		} {
-			if !terrainSupportsStructure(terrain, structureType) {
-				continue
-			}
-			available, reason := true, ""
-			if missing := missingBuildCostText(*actor, structureType); missing != "" {
-				available, reason = false, "材料不够："+missing
-			}
-			available, reason = requireOnTile(onTile, available, reason)
-			actions = append(actions, TileAction{
-				Action:        "build",
-				StructureType: string(structureType),
-				LabelZH: fmt.Sprintf("%s %s%s",
-					buildEmoji[structureType],
-					structureBuildVerb(structureType),
-					structureDisplayName(structureType),
-				),
-				Available: available,
-				ReasonZH:  reason,
-			})
-		}
-	} else if structure.FactionID == actor.FactionID && !structureReady(*structure) {
-		available, reason := requireOnTile(onTile, true, "")
-		actions = append(actions, TileAction{
-			Action:        "build",
-			StructureType: string(structure.Type),
-			LabelZH: fmt.Sprintf("🔨 继续修建%s（%d/%d）",
-				structureDisplayName(structure.Type), structure.BuildProgress, structure.BuildRequired),
-			Available: available,
-			ReasonZH:  reason,
-		})
-	}
-
-	// —— forge / upgrade：本格己方完工铁匠铺 ——
+	// —— forge / upgrade：使用世界中已有的己方完工铁匠铺（玩家不能自建，仅利用现成设施）——
 	if structure != nil && structure.FactionID == actor.FactionID &&
 		structure.Type == StructureTypeForge && structureReady(*structure) {
 		if forgeable := forgeableEquipmentIDs(*actor); len(forgeable) > 0 {
@@ -372,35 +326,6 @@ func buildTileActions(
 				LabelZH:   "🛠 强化装备",
 				Available: false,
 				ReasonZH:  "材料不够",
-			})
-		}
-	}
-
-	// —— demolish：己方设施直接拆；敌方设施须处战争状态、经战斗摧毁（structure_actions.go 口径）——
-	if structure != nil {
-		switch {
-		case structure.FactionID == actor.FactionID:
-			available, reason := requireOnTile(onTile, true, "")
-			actions = append(actions, TileAction{
-				Action:    "demolish",
-				LabelZH:   fmt.Sprintf("🧹 拆除%s", structureDisplayName(structure.Type)),
-				Available: available,
-				ReasonZH:  reason,
-			})
-		case structureHostileToActor(*state, actor, *structure):
-			available, reason := requireOnTile(onTile, true, "")
-			actions = append(actions, TileAction{
-				Action:    "demolish",
-				LabelZH:   fmt.Sprintf("⚔ 捣毁敌方%s", structureDisplayName(structure.Type)),
-				Available: available,
-				ReasonZH:  reason,
-			})
-		default:
-			actions = append(actions, TileAction{
-				Action:    "demolish",
-				LabelZH:   fmt.Sprintf("⚔ 捣毁%s", structureDisplayName(structure.Type)),
-				Available: false,
-				ReasonZH:  "两家尚未开战，不便动手",
 			})
 		}
 	}
@@ -467,17 +392,6 @@ func poiEncounterLabel(poi TilePOIInfo) string {
 	default:
 		return fmt.Sprintf("🔍 探一探那桩%s", poi.TypeCode)
 	}
-}
-
-// missingBuildCostText 返回建造材料缺口的中文清单（空串=材料齐备）。口径同 consumeBuildCosts。
-func missingBuildCostText(record unit.Record, structureType StructureType) string {
-	parts := make([]string, 0, 3)
-	for _, cost := range buildCosts(structureType) {
-		if !hasBackpackQuantity(record, cost.ItemID, cost.Quantity) {
-			parts = append(parts, fmt.Sprintf("%s x%d", displayItemName(cost.ItemID), cost.Quantity))
-		}
-	}
-	return strings.Join(parts, "、")
 }
 
 // defaultUpgradeTarget 返回第一件「材料够、可强化」的装备（口径同 buildEquipmentCandidates 的 upgrade 候选）。

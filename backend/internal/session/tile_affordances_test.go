@@ -82,7 +82,7 @@ func TestUnconsumedResourcePOIGate(t *testing.T) {
 }
 
 // TestComputeTileAffordancesGating 校验目录门：不在场动作置灰（她还没走到那里）、
-// 站上去后山地 gather:mine 可用、无武器打猎不在山地目录（山地不支持 hunt）、材料不够的建造置灰。
+// 站上去后山地 gather:mine 可用；并校验共享大世界设计——build/demolish 不再进目录（玩家不能在地图上建造/拆除）。
 func TestComputeTileAffordancesGating(t *testing.T) {
 	state, coord := poiTestState(t)
 	actor := unit.Record{ID: "u-test", FactionID: "player"}
@@ -99,21 +99,19 @@ func TestComputeTileAffordancesGating(t *testing.T) {
 	if affordances.POI == nil || affordances.POI.TypeCode != "矿脉" || affordances.POI.Consumed {
 		t.Fatalf("POI info = %+v, want unconsumed 矿脉", affordances.POI)
 	}
-	var mine, forge *TileAction
+	var mine *TileAction
 	for i := range affordances.Actions {
 		action := &affordances.Actions[i]
 		if action.Action == "gather" && action.Activity == "mine" {
 			mine = action
 		}
-		if action.Action == "build" && action.StructureType == string(StructureTypeForge) {
-			forge = action
+		// 共享大世界：玩家不得在地图上建造/拆除建筑，目录绝不含 build/demolish。
+		if action.Action == "build" || action.Action == "demolish" {
+			t.Fatalf("build/demolish 应已从动作目录移除，得到 %+v", action)
 		}
 	}
 	if mine == nil || !mine.Available {
 		t.Fatalf("on-tile mine should be available, got %+v", mine)
-	}
-	if forge == nil || forge.Available || forge.ReasonZH == "" {
-		t.Fatalf("forge build without materials should be unavailable with reason, got %+v", forge)
 	}
 
 	// 把她挪远一格：所有站位动作置灰、原因统一。
@@ -135,11 +133,11 @@ func TestComputeTileAffordancesGating(t *testing.T) {
 	}
 }
 
-// TestMatchTileAffordance 校验请求与目录条目的匹配口径（gather 须 activity 一致、build 须 structure_type 一致）。
+// TestMatchTileAffordance 校验请求与目录条目的匹配口径（gather 须 activity 一致；其余动作按 action 名匹配）。
 func TestMatchTileAffordance(t *testing.T) {
 	affordances := TileAffordances{Actions: []TileAction{
 		{Action: "gather", Activity: "mine", Available: true},
-		{Action: "build", StructureType: "forge", Available: false},
+		{Action: "forge", Available: false},
 		{Action: "harvest", Available: true},
 	}}
 	if _, ok := matchTileAffordance(affordances, TileActionRequest{Action: "gather", Activity: "fish"}); ok {
@@ -148,10 +146,11 @@ func TestMatchTileAffordance(t *testing.T) {
 	if entry, ok := matchTileAffordance(affordances, TileActionRequest{Action: "gather", Activity: "mine"}); !ok || !entry.Available {
 		t.Fatal("gather:mine should match available entry")
 	}
-	if entry, ok := matchTileAffordance(affordances, TileActionRequest{Action: "build", StructureType: "forge"}); !ok || entry.Available {
-		t.Fatal("build:forge should match the unavailable entry")
+	if entry, ok := matchTileAffordance(affordances, TileActionRequest{Action: "forge"}); !ok || entry.Available {
+		t.Fatal("forge should match the unavailable entry")
 	}
-	if _, ok := matchTileAffordance(affordances, TileActionRequest{Action: "demolish"}); ok {
-		t.Fatal("demolish should not match any entry")
+	// build 已移除：任何 build 请求都不应匹配到目录条目（兜底防绕过）。
+	if _, ok := matchTileAffordance(affordances, TileActionRequest{Action: "build"}); ok {
+		t.Fatal("build should not match any entry (已移除)")
 	}
 }

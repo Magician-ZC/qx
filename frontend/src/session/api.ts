@@ -568,12 +568,11 @@ export async function getSessionExecutionInProgress(sessionID: string): Promise<
 // ── 地块事件系统客户端（开发计划 2026-06-10 §3.7）：点地块→动作目录→直发动作/POI 遭遇/交易 ──
 
 // TileAction 是动作目录里的一个可点条目（available=false 时置灰并展示 reason_zh）。
+// 共享大世界：玩家不能在地图上建造/拆除建筑，故无 build/demolish；harvest/forge/upgrade 仅「使用」世界已有的己方设施。
 export type TileAction = {
-  action: "gather" | "build" | "harvest" | "forge" | "upgrade" | "demolish" | "poi_encounter" | "talk" | "trade" | string;
+  action: "gather" | "harvest" | "forge" | "upgrade" | "poi_encounter" | "talk" | "trade" | string;
   activity?: string;
-  structure_type?: string;
   target_unit_id?: string;
-  item_id?: string;
   label_zh: string;
   available: boolean;
   reason_zh?: string;
@@ -618,11 +617,11 @@ export type TileActionResult = {
   effects?: { kind: string; item_id?: string; label_zh: string; delta: number }[];
 };
 
-// executeTileAction 直发地块动作（采集/建造/锻造/强化/收获/拆除），后端复用既有结算链。
+// executeTileAction 直发地块动作（采集/收割/锻造/强化），后端复用既有结算链。
 export async function executeTileAction(
   sessionID: string,
   unitID: string,
-  payload: { action: string; q: number; r: number; activity?: string; structure_type?: string; item_id?: string },
+  payload: { action: string; q: number; r: number; activity?: string; item_id?: string },
 ): Promise<TileActionResult> {
   return request<TileActionResult>(
     `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/tile-action`,
