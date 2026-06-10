@@ -137,7 +137,12 @@ func Open(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	// world_bosses 单世界至多一头 active 的硬兜底（L4，best-effort：存量重复 active 行致建索引失败时吞错，NOT EXISTS 仍守）。
+	// world_bosses 单世界单区至多一头 active 的硬兜底（L4，best-effort：存量重复 active 行致建索引失败时吞错，NOT EXISTS 仍守）。
+	// Phase4 共享进度：约束键 (world_id)→(world_id, region_id) 让多区 boss 可并存。CREATE...IF NOT EXISTS 对同名旧索引是 no-op，
+	// 故先 DROP 旧的 (world_id) 单键 index 再建新键（存量库升级路径）；两步皆 best-effort，失败只 log、NOT EXISTS 主护栏仍守。
+	if _, err := db.ExecContext(ctx, dbmigrate.WorldBossActiveUniqueIndexDropOldSQLite); err != nil {
+		log.Printf("drop legacy world_boss active unique index best-effort failed: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, dbmigrate.WorldBossActiveUniqueIndexSQLite); err != nil {
 		log.Printf("ensure world_boss active unique index best-effort failed: %v", err)
 	}

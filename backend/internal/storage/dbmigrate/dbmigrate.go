@@ -134,6 +134,60 @@ func EnsureSinglePlayerAccountWorldUnique(ctx context.Context, db *sql.DB) error
 	return err
 }
 
+// EnsureWorldBossActiveUnique 给 world_bosses 建「每世界每区至多一头 active」的唯一硬兜底（评审 Phase4 major #1）。
+//
+// 背景：Phase4 共享进度把 zone boss 从 ops 单次 spawn 改成玩家直驱 get-or-create（ensureSharedZoneBoss），
+// 每次挑战都可能并发首插——MySQL gap-lock 下两个并发 `WHERE NOT EXISTS` 子查询都见 0 → 都 INSERT → 同区两头
+// active 共享 boss、劈裂共享血池（破坏 Phase4 核心验收）。SQLite 侧有 partial unique index 硬兜底（store.go），
+// 但 MySQL 无 partial index，本方案部署目标恰是 MySQL，故必须为 MySQL 也建一道等价唯一约束。
+//
+// MySQL 无 partial index 的等价手法：加一个 STORED 生成列 active_region_key——status='active' 时取 region_id，
+// 否则取各异的主键 id（defeated/inactive 行各取自身 id → 互不相同 → 不参与「同区唯一」约束），再对
+// (world_id, active_region_key) 建唯一键。等价于「同 (world_id, region_id) 至多一行 active」：
+//   - 两头并发 INSERT 同区 active → active_region_key 都=region_id → 唯一键冲突，第二头被拒（isDupKeyErr 收敛兜底）。
+//   - 多区 active（region_id 各异）→ active_region_key 各异 → 并存（Phase4 多区 boss 不冲突）。
+//   - 任意多头 defeated/inactive（active_region_key=各自 id 各异）→ 不冲突（历史行可堆积）。
+//   - 全世界自治 boss（region_id=''）active 时 active_region_key='' → 占 (world_id,'') 单槽，与 zone boss（非空）不撞。
+//
+// best-effort：存量库若已有同区重复 active 行，加列/建索引会失败——吞错即可（WHERE NOT EXISTS 仍是主护栏，
+// 且 SQLite 侧 partial index 各自独立守）。幂等：生成列/索引已存在则跳过；可在每次 Open 安全重复执行。
+// 仅 MySQL 需要本兜底；SQLite 由 WorldBossActiveUniqueIndexSQLite 的 partial unique index 承担，本函数对 SQLite no-op。
+func EnsureWorldBossActiveUnique(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("ensure world boss unique: nil db")
+	}
+	if !dbdialect.IsMySQL(db) {
+		return nil // SQLite 走 partial unique index（store.go 的 WorldBossActiveUniqueIndexSQLite），此处 no-op
+	}
+	// ① 加 STORED 生成列 active_region_key（已存在则跳过）：active→region_id，否则→id（各异，不参与同区唯一）。
+	cols, err := existingColumns(ctx, db, "world_bosses")
+	if err != nil {
+		return err
+	}
+	if !cols["active_region_key"] {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE world_bosses ADD COLUMN active_region_key VARCHAR(191)
+			   AS (CASE WHEN status = 'active' THEN region_id ELSE id END) STORED`); err != nil {
+			return fmt.Errorf("add world_bosses.active_region_key: %w", err)
+		}
+	}
+	// ② 对 (world_id, active_region_key) 建唯一键（已存在则跳过）：等价「同 (world_id, region_id) 至多一行 active」。
+	var count int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'world_bosses' AND index_name = 'uq_world_boss_active'`,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("inspect uq_world_boss_active: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX uq_world_boss_active ON world_bosses (world_id, active_region_key)`); err != nil {
+		return fmt.Errorf("create uq_world_boss_active: %w", err)
+	}
+	return nil
+}
+
 // existingColumns 返回某表已存在的列集合（双驱动）。
 func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	out := map[string]bool{}
@@ -574,11 +628,21 @@ CREATE TABLE IF NOT EXISTS translation_templates (
   UNIQUE KEY uq_translation_rc_ak (reason_code, anchor_kind)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
-// WorldBossActiveUniqueIndexSQLite 是「每世界至多一头 active boss」的 SQLite partial unique index
+// WorldBossActiveUniqueIndexSQLite 是「每世界每区至多一头 active boss」的 SQLite partial unique index
 // （评审 L4：给默认驱动一道硬兜底，NOT EXISTS 之外再加唯一冲突拦截）。best-effort 执行：
 // 存量库已有重复 active 行时建索引会失败——吞错即可（NOT EXISTS 仍是主护栏）。MySQL 无 partial index，
-// 不在此补（gap-lock 理论竞态属 flag-off 低危 documented residual）。
-const WorldBossActiveUniqueIndexSQLite = `CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id) WHERE status='active'`
+// 等价兜底见 EnsureWorldBossActiveUnique（STORED 生成列 active_region_key + 唯一键），Phase4 评审 #1 已补——
+// 故「共享 zone boss 在 MySQL 下被并发劈裂血池」不再是 documented residual，两驱动均有唯一硬兜底。
+//
+// Phase4 共享进度：约束键从 (world_id) 升级为 (world_id, region_id)——让共享世界**每个 zone**（region_id=worldID#zoneID）
+// 各自至多一头 active 共享 boss、多区 boss 可并存；全世界自治 boss（region_id=''）仍占 (world_id,'') 单槽不冲突。
+const WorldBossActiveUniqueIndexSQLite = `CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id, region_id) WHERE status='active'`
+
+// WorldBossActiveUniqueIndexDropOldSQLite 删除旧的 (world_id) 单键 partial unique index（Phase4 升级前的旧定义）。
+// CREATE UNIQUE INDEX IF NOT EXISTS 对**同名已存在**的旧索引是 no-op（不会改定义），故存量库须先 DROP 旧索引再建新的
+// (world_id, region_id) 键；否则升级后旧约束仍生效、多区 boss 第二头会被旧 (world_id) 唯一键误拒。
+// 全 best-effort：DROP/重建任一步失败只吞错（NOT EXISTS 主护栏仍守、零状态变化）。
+const WorldBossActiveUniqueIndexDropOldSQLite = `DROP INDEX IF EXISTS uq_world_boss_active`
 
 // ProductEventAnalyticsColumns 给 product_events 补北极星/A-B 口径列（全可空 TEXT，与游戏状态解耦）：
 // user_id（按用户聚合留存/北极星）、ab_bucket（A-B 实验分桶）、client_ts（客户端原始时间戳，校时漂移分析）、

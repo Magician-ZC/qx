@@ -188,3 +188,39 @@ func TestUnitsRegionIndexRenameUsesIndex(t *testing.T) {
 		t.Fatalf("修复后查询应命中 idx_units_region_active（SEARCH USING INDEX），实得：%s", detail)
 	}
 }
+
+// TestEnsureWorldBossActiveUniqueSQLiteNoOp 评审 #4 配套：EnsureWorldBossActiveUnique 在 SQLite 上是安全 no-op
+// （SQLite 侧由 store.go 的 partial unique index 承担「每世界每区至多一头 active」；本迁移函数仅给 MySQL 补等价兜底）。
+// 锁住：① SQLite 调用不报错、不加生成列 active_region_key、不建 uq_world_boss_active；② 幂等（重复调用无副作用）。
+func TestEnsureWorldBossActiveUniqueSQLiteNoOp(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("打开内存 sqlite 失败: %v", err)
+	}
+	defer db.Close()
+	dbdialect.Register(db, dbdialect.DialectSQLite)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE world_bosses (
+		id TEXT PRIMARY KEY, world_id TEXT NOT NULL, name TEXT NOT NULL,
+		hp_max INTEGER NOT NULL, hp_remaining INTEGER NOT NULL,
+		status TEXT NOT NULL DEFAULT 'active', region_id TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+
+	// 两次调用（幂等）——SQLite 下都应是 no-op、不报错。
+	for i := 0; i < 2; i++ {
+		if err := EnsureWorldBossActiveUnique(ctx, db); err != nil {
+			t.Fatalf("SQLite 下 EnsureWorldBossActiveUnique 应 no-op 不报错（第 %d 次）：%v", i, err)
+		}
+	}
+
+	// 不应加生成列 active_region_key（那是 MySQL 专用等价手法）。
+	cols, err := existingColumns(ctx, db, "world_bosses")
+	if err != nil {
+		t.Fatalf("查列失败: %v", err)
+	}
+	if cols["active_region_key"] {
+		t.Fatalf("SQLite 下不应加生成列 active_region_key（该列是 MySQL 无 partial index 时的等价手法）")
+	}
+}

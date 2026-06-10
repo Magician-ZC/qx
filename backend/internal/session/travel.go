@@ -25,9 +25,14 @@ type ZoneSummary struct {
 	IsCurrent  bool   `json:"is_current"`  // 主角当前所在
 	Reachable  bool   `json:"reachable"`   // 从当前区有传送门/边界直达
 	PortalKind string `json:"portal_kind"` // 直达方式 border/portal（reachable 时有）
-	// BossDefeated 是本区 boss 是否已被讨平（来自服务端权威 state.DefeatedBosses）——
-	// 暴露给前端做「已讨平」置灰的权威依据，使置灰态跨页面刷新/跨设备持久（不再只靠前端本地即时态）。
+	// BossDefeated 是本区 boss 是否已被讨平——暴露给前端做「已讨平」置灰的权威依据，使置灰态跨页面刷新/跨设备持久。
+	// 取值来源按局型分叉（评审 #4）：
+	//   - 私有局：来自 per-session 权威 state.DefeatedBosses；
+	//   - 共享局（inSharedWorld）：来自 world 级共享事实 world_bosses status='defeated'（A 打掉 → B 无需点击即正确置灰）。
 	BossDefeated bool `json:"boss_defeated"`
+	// SharedBoss 标记本区 boss 是否为 world 级共享实例（共享局恒 true，私有局 false）——
+	// 供前端区分「共享讨伐/协力」与单人 elite 的文案与交互。
+	SharedBoss bool `json:"shared_boss"`
 }
 
 // ZonesOverview 返回世界全部区域摘要 + 当前区域 id（前端世界地图据此渲染 + 高亮 + 可达判定）。
@@ -49,9 +54,27 @@ func (service *Service) ZonesOverview(ctx context.Context, sessionID string) ([]
 			portals[portal.ToZoneID] = portal
 		}
 	}
+	// 共享局：一次性取该 world 全部「已 world 级讨平」的复合 region_id 集合（评审 #4）——
+	// 让 /zones 在共享局返回 world 级真·已讨平（A 打掉 B 无需点击即正确置灰），而非恒 false 的 per-session state.DefeatedBosses。
+	// 私有局/flag 关：shared=false、defeatedRegions 为空，下方维持 zoneBossDefeated(state) 旧口径，逐字节不变。
+	shared := inSharedWorld(&state)
+	var defeatedRegions map[string]bool
+	if shared {
+		regions, err := service.sharedDefeatedRegionIDs(ctx, strings.TrimSpace(state.WorldID))
+		if err != nil {
+			return nil, "", fmt.Errorf("zones overview (shared defeated): %w", err)
+		}
+		defeatedRegions = regions
+	}
 	summaries := make([]ZoneSummary, 0, len(state.Zones))
 	for _, zone := range state.Zones {
 		portal, has := portals[zone.ID]
+		// BossDefeated 口径分叉：共享局用 world 级共享事实（defeatedRegions 含本区复合 region_id 即已讨平），
+		// 私有局用 per-session state.DefeatedBosses。
+		bossDefeated := zoneBossDefeated(&state, zone.ID)
+		if shared {
+			bossDefeated = defeatedRegions[sharedRegionID(strings.TrimSpace(state.WorldID), zone.ID)]
+		}
 		summaries = append(summaries, ZoneSummary{
 			ID:        zone.ID,
 			Name:      zone.Name,
@@ -62,10 +85,10 @@ func (service *Service) ZonesOverview(ctx context.Context, sessionID string) ([]
 			IsCurrent: zone.ID == state.CurrentZoneID,
 			// Reachable 反映「解锁后可达」：border 恒可达；portal 阶段1 未解锁 → 不可达（前端据 PortalKind=="portal"
 			// 且 Reachable==false 画「锁」）。与 TravelToZone 的解锁门契约一致，阶段3 接任务解锁后同步放开。
-			Reachable:  has && zonePortalUnlocked(&state, portal),
-			PortalKind: portal.Kind, // 仍暴露（has=false 时为空串），供前端区分边界/传送门/不通
-			// 权威防刷态：本区 boss 是否已讨平（state.DefeatedBosses）——前端据此跨刷新置灰挑战按钮。
-			BossDefeated: zoneBossDefeated(&state, zone.ID),
+			Reachable:    has && zonePortalUnlocked(&state, portal),
+			PortalKind:   portal.Kind, // 仍暴露（has=false 时为空串），供前端区分边界/传送门/不通
+			BossDefeated: bossDefeated,
+			SharedBoss:   shared, // 共享局：本区 boss 是 world 级共享实例（前端据此区分文案/交互）
 		})
 	}
 	return summaries, state.CurrentZoneID, nil

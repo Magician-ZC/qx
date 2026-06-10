@@ -56,10 +56,6 @@ func (service *Service) ChallengeZoneBoss(ctx context.Context, sessionID, unitID
 	if zone.BossCoord == "" || zone.BossLevel <= 0 {
 		return EliteEncounterResult{}, fmt.Errorf("这片天地没有可挑战的霸主")
 	}
-	// 防反复刷：本世界周期内该区 boss 已被讨平则拒绝再战（失败局不入集合，仍可重试）。
-	if zoneBossDefeated(&state, zone.ID) {
-		return EliteEncounterResult{}, fmt.Errorf("「%s」已被讨平，这片天地暂时太平了", zone.BossName)
-	}
 	// 站位校验：主角必须站在 boss 坐标附近（≤1 格）才能开战——不能隔着半张图遥控刷 boss。
 	bossCoord, ok := parseCoordKey(zone.BossCoord)
 	if !ok {
@@ -73,6 +69,20 @@ func (service *Service) ChallengeZoneBoss(ctx context.Context, sessionID, unitID
 	// 非硬锁；前端可据此中文消息做确认弹窗（现走 window.alert 兜底）。主角等级取 Growth.Level（非受保护字段，只读不改）。
 	if msg, perilous := zoneBossPerilGuard(zone.BossName, zone.BossLevel, rec.Stats.Growth.Level); perilous {
 		return EliteEncounterResult{}, fmt.Errorf("%s", msg)
+	}
+
+	// ── Phase4 共享进度分叉 ──
+	// 共享世界局（inSharedWorld：QUNXIANG_SHARED_WORLD 开 + world_id==共享世代）：zone boss 升级为 world 级共享实例——
+	// 一次攻击对**共享血池**扣血（多玩家谁打都扣同一池）、血池清零按贡献分赃、world 级「已讨平」（A 打掉 B 看到）。
+	// 不再走单人 ResolveEliteEncounter / state.DefeatedBosses（那是私有档路径，下方维持）。
+	if inSharedWorld(&state) {
+		return service.challengeSharedZoneBoss(ctx, &state, rec, zone)
+	}
+
+	// ── 私有档/flag 关：维持原单人 elite 路径（Phase2 前行为，逐字节不变）──
+	// 防反复刷：本世界周期内该区 boss 已被讨平则拒绝再战（失败局不入集合，仍可重试）。
+	if zoneBossDefeated(&state, zone.ID) {
+		return EliteEncounterResult{}, fmt.Errorf("「%s」已被讨平，这片天地暂时太平了", zone.BossName)
 	}
 
 	// 按区域 BossLevel 构造 Threat（强度据等级缩放；RegionID=zoneID 让败北后果可走家乡遭劫扇出）。

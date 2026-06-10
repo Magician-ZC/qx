@@ -103,9 +103,21 @@ export type FateCard = {
 export type EliteAward = EncounterAward;
 
 // EliteEncounterResult 与后端 session.EliteEncounterResult 对齐（无 json tag，键名为 Go 字段名）。
+//
+// 共享世界 Phase4「共享进度」：同一接口在共享世界局（QUNXIANG_SHARED_WORLD 开 + world_id==共享世代）下复用——
+// 此时 ChallengeZoneBoss 走 challengeSharedZoneBoss，区域 boss 升级为 world 级共享血池实例，一次攻击=对**共享血池**
+// 原子扣血一下（不是单人多回合消耗战），多玩家谁打都扣同一池。该路径下各字段语义：
+//   - Outcome："ongoing"（这一击只 chip 了共享血池、boss 仍活）/ "defeated"（这一击/此前某人把它打死了）。
+//     注意 "ongoing" 是共享路径**独有**的新结局码（单人 elite 只有 defeated/fled/down）。
+//   - DamageDealt：本次这一击对共享血池造成的伤害（rec.Status.Attack）。
+//   - Rounds / DamageTaken / Contribution / PenaltyLayer：共享 chip 无多回合消耗战、无承伤，恒 0（前端据此抑制误导性「鏖战 N 回合」行）。
+//   - Awards：仅**结算者**（落下最后一击、抢到闩锁的那次出手）填充全员分赃；非结算者即使 Outcome=defeated 也为空。
+//   - InboxCard：祖魂语气进度卡。共享 "ongoing" 时其文案内含「还余 N 口气」剩余血量（结构化字段不另暴露 HPRemaining，
+//     剩余血量只在此叙事里）。
+// 已被 world 级讨平后再挑战 → 后端 ensureSharedZoneBoss 抛中文 APIError（「『…』已被讨平…」），走调用方 catch 兜底。
 export type EliteEncounterResult = {
   ThreatID: string;
-  Outcome: string; // defeated / fled / down
+  Outcome: string; // defeated / fled / down（共享世界另有 "ongoing"：chip 了共享血池、boss 仍活）
   Rounds: number;
   DamageDealt: number;
   DamageTaken: number;
@@ -581,9 +593,15 @@ export type ZoneSummary = {
   is_current: boolean;
   reachable: boolean;
   portal_kind: string;
-  // boss_defeated=本区 boss 是否已被讨平（服务端权威 DefeatedBosses）。前端据此跨刷新/跨设备置灰挑战按钮；
+  // boss_defeated=本区 boss 是否已被讨平。前端据此跨刷新/跨设备置灰挑战按钮；
   // 旧后端无此字段反序列化为 undefined（按未讨平处理，与既有前端本地即时态并存）。
+  //
+  // 共享世界 Phase4（评审 #4 修复后）：后端 ZonesOverview 在共享局已改用 **world 级共享事实**填本字段
+  // （查 world_bosses status='defeated'，不再用恒 false 的 per-session state.DefeatedBosses）——
+  // 故共享局下「别玩家打掉了 boss」时 boss_defeated 即为 true、按钮无需点击即正确置灰。私有局仍取 state.DefeatedBosses。
   boss_defeated?: boolean;
+  // shared_boss=本区 boss 是否为 world 级共享实例（共享局 true、私有局 false）。供前端区分「协力讨伐」与单人 elite 文案。
+  shared_boss?: boolean;
 };
 
 // getZones 拉某会话的全部区域 + 当前区 id（世界地图渲染源）。

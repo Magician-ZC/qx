@@ -116,6 +116,18 @@ const ZONE_BOSS_NAMES: Record<string, [string, string]> = {
 // 有区域 boss 的区域类型（与后端 wireZoneContent 一致：capital/wild 才填 boss；副本入口仅 capital）。
 const BOSS_ZONE_KINDS = new Set(["capital", "wild"]);
 
+// SHARED_WORLD_ID 与后端 session.sharedWorldID（world_link.go）逐字对齐：共享世界世代固定 ID。
+// 共享世界局下区域 boss 升级为 world 级共享血池实例（Phase4）——挑战=协力扣血、已讨平=world 级共享。
+const SHARED_WORLD_ID = "world_shared_v1";
+
+// isSharedWorldSnap 判本局是否「共享世界局」：快照 world_id==共享世代。
+// 后端 inSharedWorld 还含 QUNXIANG_SHARED_WORLD flag（前端读不到）——但只有 flag 开 + 共享世代降生的局才会被打上
+// 该 world_id，故 world_id==共享世代即等价「共享世界局」，足以决定前端 boss 文案/置灰口径。私有档 world_id 为
+// 空或 world_default → false，维持单人 boss 展示不变。
+function isSharedWorldSnap(snap: SessionSnapshot | null): boolean {
+  return (snap?.world_id ?? "").trim() === SHARED_WORLD_ID;
+}
+
 // ZONE_BOSS_LEVEL_GUARD_GAP 与后端 zoneBossLevelGuardGap 对齐：boss 高出主角 ≥5 级即「此地凶险」（软门）。
 // 前端据此把按钮标红 + 预显凶险提示（后端 ChallengeZoneBoss 是唯一权威，点下去会返回中文拒绝消息）。
 const ZONE_BOSS_LEVEL_GUARD_GAP = 5;
@@ -426,10 +438,12 @@ function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<strin
 }
 
 // ELITE_OUTCOME_ZH 把 elite/区域 boss 结局代码译成中文（未知回落原串）。
+// ongoing 是共享世界 Phase4 路径独有的结局：这一击只 chip 了共享血池、boss 仍活（多玩家协力消耗中）。
 const ELITE_OUTCOME_ZH: Record<string, string> = {
   defeated: "讨平了它",
   fled: "且战且退，脱身而走",
   down: "力竭倒地，败下阵来",
+  ongoing: "她落下狠狠一击（这头东西，得众人合力才撼得动）",
 };
 
 // DUNGEON_OUTCOME_ZH 把副本整体结局译成中文（未知回落原串）。
@@ -440,12 +454,30 @@ const DUNGEON_OUTCOME_ZH: Record<string, string> = {
 };
 
 // eliteResultCard 把区域 boss 结算（EliteEncounterResult，Go 大写键名）转成内嵌结果卡（一句话 + 明细行）。
-function eliteResultCard(name: string, res: EliteEncounterResult): ActionResultCard {
+//
+// 两种语义共用此卡：
+//   - 单人 elite/私有档：多回合消耗战——展示「鏖战 N 回合 / 予敌 X 伤 / 受创 / 受挫层级 / 战获」。
+//   - 共享世界 Phase4 共享 boss：一次攻击 = 对共享血池 chip 一下（Rounds/DamageTaken 恒 0），多玩家协力消耗。
+//     展示「你对共享boss造成 X 伤害」+ InboxCard（其文案内含「还余 N 口气」剩余血量，故不再单列回合数避免误导）。
+// sharedWorld：本局是否共享世界局（由调用方据 snapshot.world_id 判定并传入）。为 true 走共享 chip 文案——
+// 这是权威口径（不靠从结果形状推断）；另以 Outcome==="ongoing"（共享路径独有结局）作兜底，二者任一即视为共享 chip。
+function eliteResultCard(name: string, res: EliteEncounterResult, sharedWorld: boolean): ActionResultCard {
   const outcomeZH = ELITE_OUTCOME_ZH[res.Outcome] ?? res.Outcome;
-  const lines: string[] = [`鏖战 ${res.Rounds} 回合`];
-  if (res.DamageDealt > 0) lines.push(`予敌 ${res.DamageDealt} 伤`);
-  if (res.DamageTaken > 0) lines.push(`受创 -${res.DamageTaken}`);
-  if (res.PenaltyLayer > 0) lines.push(`受挫层级 D${res.PenaltyLayer}`);
+  // 共享 chip：本局是共享世界局，或 Outcome=ongoing（共享路径独有，boss 仍活）。
+  // 共享路径一次出手=对共享血池 chip 一下（Rounds/DamageTaken 恒 0），非单人多回合消耗战。
+  const sharedChip = sharedWorld || res.Outcome === "ongoing";
+  const lines: string[] = [];
+  if (sharedChip) {
+    // 共享世界：协力扣血。她这一击对共享血池造成的伤害；剩余血量在 InboxCard 叙事里（后端不另暴露结构化 HPRemaining）。
+    if (res.DamageDealt > 0) lines.push(`你对共享boss造成 ${res.DamageDealt} 伤害（协力消耗中）`);
+  } else {
+    // 单人多回合消耗战：保留原回合制战报。
+    lines.push(`鏖战 ${res.Rounds} 回合`);
+    if (res.DamageDealt > 0) lines.push(`予敌 ${res.DamageDealt} 伤`);
+    if (res.DamageTaken > 0) lines.push(`受创 -${res.DamageTaken}`);
+    if (res.PenaltyLayer > 0) lines.push(`受挫层级 D${res.PenaltyLayer}`);
+  }
+  // 战获：共享路径仅「结算者（落最后一击者）」填充，非结算者即便 defeated 也为空——有则展示，无则不显。
   if (res.Awards && res.Awards.length > 0) {
     lines.push(`战获：${res.Awards.map((a) => `${a.ItemID}×${a.Quantity}`).join("、")}`);
   }
@@ -703,8 +735,16 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     };
   }, [zones, currentZoneID, snap?.map?.width, snap?.map?.height]);
 
+  // sharedWorld：本局是否共享世界局（world_id==共享世代）。Phase4 下区域 boss 是 world 级共享血池实例——
+  // 挑战=对共享血池协力扣血（一击 chip 而非单人多回合战）、「已讨平」是 world 级共享事实（讨平者们共同讨平）。
+  const sharedWorld = useMemo(() => isSharedWorldSnap(snap), [snap]);
+
   // bossAlreadyDefeated：本区 boss 是否已被讨平。取「服务端权威 boss_defeated（跨刷新/跨设备持久）」
   // ∪「本次挂载内本地即时态 bossDone（刚讨平、getZones 尚未重拉时也立刻置灰）」——两者皆有则置灰。
+  //
+  // 共享世界 Phase4（评审 #4 修复后）：后端 /zones 的 boss_defeated 在共享局已改用 world 级共享事实（查 world_bosses
+  // status='defeated'，不再恒 false）——故「别玩家打掉了 boss」时下次 getZones 即返回 boss_defeated=true、按钮无需点击即置灰。
+  // 本地 bossDone 仍保留作「本人刚讨平、getZones 尚未重拉」窗口期的即时反馈（与服务端权威态并存，谁先到谁置灰）。
   const bossAlreadyDefeated = useMemo(
     () => Boolean(zoneContent && (zoneContent.bossDefeated || bossDone.has(zoneContent.zoneID))),
     [zoneContent, bossDone],
@@ -740,7 +780,9 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     setActionBusy(true);
     try {
       const res = await challengeZoneBoss(sessionId, unitId);
-      setActionResult(eliteResultCard(name, res));
+      // 共享世界局：一次出手只 chip 共享血池，Outcome=ongoing（仍活）/ defeated（这一击/此前某人打死了）。
+      // eliteResultCard 据 sharedWorld 切「你对共享boss造成 X 伤害」文案；仅 defeated 才置灰（chip 不置灰，可继续协力）。
+      setActionResult(eliteResultCard(name, res, sharedWorld));
       if (res.Outcome === "defeated" && mountedRef.current) {
         setBossDone((cur) => new Set(cur).add(zoneContent.zoneID));
       }
@@ -750,7 +792,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [zoneContent, sessionId, unitId, refresh]);
+  }, [zoneContent, sessionId, unitId, refresh, sharedWorld]);
 
   // onEnterDungeon：玩家在线让她进入本区城镇副本（floors 不传，由后端按区域等级派生）。
   // 副本 flag 关时后端 409（message 含「未启用」）——alert 兜底提示。结算内嵌展示，结束后 refresh() 追平。
@@ -1004,7 +1046,9 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           </button>
           {/* 区域 boss 挑战（阶段2 §3/§4）：点中本区 boss 坐标格（地图中心）才露。已讨平置灰；
               未讨平时按「等级护栏」分难度色——bossPerilous(boss 高出主角 ≥5 级)标暗红「此地凶险」，否则常态。
-              坐标由 getZones 当前区 kind + 快照地图尺寸前端等价复算（后端不暴露 BossCoord）；后端再校验站位(≤1)/等级护栏/防刷，是唯一权威。 */}
+              坐标由 getZones 当前区 kind + 快照地图尺寸前端等价复算（后端不暴露 BossCoord）；后端再校验站位(≤1)/等级护栏/防刷，是唯一权威。
+              共享世界 Phase4：区域 boss 是 world 级共享血池实例——按钮文案改「协力讨伐」、已讨平改「讨平者们共同讨平」、
+              一击=对共享血池 chip（多玩家协力消耗），下方加一行共享态说明。私有档/flag 关维持单人 boss 文案不变。 */}
           {tileIsBoss && zoneContent && (
             <>
               <button
@@ -1027,11 +1071,32 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
                 }}
               >
                 {bossAlreadyDefeated
-                  ? `✔ 「${zoneContent.bossName}」已讨平`
+                  ? sharedWorld
+                    ? `✔ 「${zoneContent.bossName}」已被讨平者们共同讨平`
+                    : `✔ 「${zoneContent.bossName}」已讨平`
                   : actionBusy
-                    ? "鏖战中…"
-                    : `${bossPerilous ? "☠ " : "⚔ "}挑战区域boss「${zoneContent.bossName}」(Lv${zoneContent.bossLevel})`}
+                    ? sharedWorld
+                      ? "出手中…"
+                      : "鏖战中…"
+                    : sharedWorld
+                      ? `${bossPerilous ? "☠ " : "⚔ "}协力讨伐「${zoneContent.bossName}」(Lv${zoneContent.bossLevel})`
+                      : `${bossPerilous ? "☠ " : "⚔ "}挑战区域boss「${zoneContent.bossName}」(Lv${zoneContent.bossLevel})`}
               </button>
+              {/* 共享态说明（Phase4）：未讨平的共享世界局下，提示这是 world 级共享血池——多玩家谁打都扣同一池、
+                  一击只 chip 一刀、血池清零按贡献分赃。让玩家理解这不是单人多回合战，而是协力消耗。 */}
+              {!bossAlreadyDefeated && sharedWorld && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    fontSize: 11,
+                    color: "#8a6a3a",
+                    fontStyle: "italic",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  这是全区共担的霸主——你这一击与众人协力扣同一池血，血池清零后按各自出力分赃。
+                </div>
+              )}
               {/* 凶险预警（等级护栏前置提示，设计 §3）：未讨平且 boss 高出主角 ≥5 级时显「此地凶险」。
                   这是软提示，按钮仍可点；点下去后端会返回中文拒绝消息（走 onChallengeBoss 的 alert 兜底）。 */}
               {!bossAlreadyDefeated && bossPerilous && (

@@ -115,6 +115,15 @@ func Open(dsn string) (*sql.DB, error) {
 	if err := dbmigrate.EnsureSinglePlayerAccountWorldUnique(ctx, db); err != nil {
 		log.Printf("ensure single_player account-world unique index best-effort failed: %v", err)
 	}
+	// 共享世界 Phase4「共享进度」#1：world_bosses「每世界每区至多一头 active」唯一硬兜底（MySQL 侧）。
+	// SQLite 用 partial unique index（sqlite/store.go），MySQL 无 partial index → 用 STORED 生成列 active_region_key
+	// （active→region_id，否则→id）+ (world_id, active_region_key) 唯一键等价之。Phase4 把 zone boss 改成玩家直驱
+	// get-or-create（每次挑战都可能并发首插），MySQL gap-lock 下两个 `WHERE NOT EXISTS` 都见 0→双插劈裂共享血池——
+	// 此唯一键让第二头必触冲突，由 ensureSharedZoneBoss 的 isDupKeyErr 分支收敛兜底（再查既有行）。
+	// best-effort：存量库若已有同区重复 active 行致建索引失败，吞错即可（NOT EXISTS 仍是主护栏）。
+	if err := dbmigrate.EnsureWorldBossActiveUnique(ctx, db); err != nil {
+		log.Printf("ensure world_boss active unique index best-effort failed: %v", err)
+	}
 	// 相关性锚持久表（存量旧库补建；fresh 库 schema.sql 已建）——否则持久锚 silently 永不落库/加载。
 	if err := dbmigrate.EnsureTable(ctx, db, dbmigrate.RelevanceAnchorsTableSQLite, dbmigrate.RelevanceAnchorsTableMySQL); err != nil {
 		_ = db.Close()

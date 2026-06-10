@@ -660,9 +660,11 @@ CREATE INDEX IF NOT EXISTS idx_gm_events_audit_world ON gm_events_audit(world_id
 -- relevance_anchors 反向索引（设计 §1.5 NPC 锚加权预算需「查所有以 X 为锚的角色」做锚密度计算）。
 CREATE INDEX IF NOT EXISTS idx_relevance_anchors_ref ON relevance_anchors(anchor_ref, anchor_kind);
 
--- world_bosses「每世界至多一头 active」硬约束（评审 L4：NOT EXISTS 在 MySQL gap-lock 下理论可双插；
+-- world_bosses「每世界每区至多一头 active」硬约束（评审 L4：NOT EXISTS 在 MySQL gap-lock 下理论可双插；
 -- SQLite partial unique index 给默认驱动一道硬兜底——第二并发 INSERT 必触唯一冲突，由 world_boss.go best-effort 收敛）。
-CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id) WHERE status='active';
+-- Phase4 共享进度升级：约束键从 (world_id) 改为 (world_id, region_id)——让同一共享世界里**每个 zone**（region_id=worldID#zoneID）
+-- 各自至多一头 active 共享 boss，多区 boss 可并存；自动刷新的全世界 boss（region_id=''）仍占 (world_id,'') 单槽，与 zone boss 互不冲突。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_world_boss_active ON world_bosses(world_id, region_id) WHERE status='active';
 
 -- GM 后台运行时 flag 覆盖表（GM管理后台：运行时开关层持久化）。
 -- 把 GM 在运行时设的游戏 flag override 落库，使「不重启即可灰度开关」在进程重启后存活。

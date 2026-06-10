@@ -16,7 +16,9 @@ package session
 // 已知残留（需后续系统支撑，非本切片可独立修复，见 docs/开发进度.md）：
 //   - 结算（闩锁之后）的发钱+广播未与闩锁同事务（status.Mutator 尚不支持外部事务）：极小概率 DB 故障可致已死 Boss 仅部分分赃。
 //   - strike 端点无鉴权/幂等：贡献伪造与频率刷需上层行动力/鉴权层（finding antip2w/robustness）。
-//   - 跨分片参战者的金币只记 awards、不在本库发放（跨分片结算是后续课题）。
+//   - 跨分片参战者的金币只记 awards、不在本库发放（跨分片结算是后续课题）。单库部署下 GetByID 必命中、本残留不触发
+//     （实发=应发）；多分片前须落地 pending_cross_shard_awards 待结算表，否则 awards 是分配账面、跨分片部分未必已入钱包。
+//     现已在发钱循环对未命中的 award 落结构化 warn（evt #2），让对账能发现「分配了未发放」的金额，而非静默 continue。
 
 import (
 	"context"
@@ -145,6 +147,23 @@ func (service *Service) StrikeWorldBossParty(ctx context.Context, worldID string
 		}
 	}
 
+	// 解锁后落入共享扣血核心（与区域共享 boss Phase4 完全复用同一套原子扣血 + 闩锁 + 分赃）；
+	// world_boss 的掉落规格用 worldBossLootSpec（货币=hp_max、遗物=world_boss_relic）。
+	return service.strikeSharedBossCore(ctx, worldID, bossID, attacker, result, func(hpMax int) bossLootSpec {
+		return worldBossLootSpec(hpMax)
+	})
+}
+
+// strikeSharedBossCore 是「共享血池 boss 一次出手」的**结算核心**（设计 §5/§7）：原子扣血 + 记贡献账本（strikeTx）→
+// 血池清零抢单次结算闩锁 → settleWorldBoss 按贡献全员分赃（排他遗物走 arbitration 胜率∝贡献、可分件按贡献瓜分、钱包经 Mutator）。
+// 它被两个入口复用，**不含任何单人物理锁判定**（锁是入口职责）：
+//   - 全世界 world_boss（StrikeWorldBossParty，先过单人锁再入此核心）；
+//   - 区域共享 zone boss（Phase4 challengeSharedZoneBoss，field_boss 档可单人 chip，不过单人锁，直接入此核心）。
+//
+// lootFor 把 boss 的 hp_max 映射为掉落规格（world_boss 用货币=hp_max+world_boss_relic；zone boss 用缩放货币+zone_boss_relic）。
+// 并发安全（与 world_boss 原版逐字节同源）：strikeTx 的原子扣血（UPDATE...WHERE status='active'）防把血扣成负/复活已死 boss；
+// 血池清零后 UPDATE status='defeated' WHERE status='active' 的 RowsAffected==1 单次结算闩锁防并发双结算。
+func (service *Service) strikeSharedBossCore(ctx context.Context, worldID, bossID string, attacker *unit.Record, result WorldBossStrikeResult, lootFor func(hpMax int) bossLootSpec) (WorldBossStrikeResult, error) {
 	damage := attacker.Status.Attack
 	if damage < 1 {
 		damage = 1 // 伤害来自角色已练就的数值，非付费——付费不进贡献
@@ -176,7 +195,7 @@ func (service *Service) StrikeWorldBossParty(ctx context.Context, worldID string
 	}
 	result.SettledByMe = true
 
-	if err := service.settleWorldBoss(ctx, worldID, bossID, bossName, hpMax, &result); err != nil {
+	if err := service.settleWorldBoss(ctx, worldID, bossID, bossName, lootFor(hpMax), &result); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -386,8 +405,22 @@ func (service *Service) surfaceWorldBossSoloLock(ctx context.Context, worldID st
 	return card
 }
 
-// settleWorldBoss 读世界总线的贡献账本，按贡献全员分赃，并广播讨平事件。
-func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bossID string, bossName string, hpMax int, result *WorldBossStrikeResult) error {
+// bossLootSpec 描述一头共享 boss 讨平时的掉落规格（排他遗物 + 货币池 + loot key 标签），让 settleWorldBoss
+// 在「全世界 world_boss」与「区域共享 zone boss」（Phase4 共享进度）之间复用同一套贡献账本读取 + 分赃 + 仲裁 + 发钱链路，
+// 仅掉落物/key 不同。反 P2W：货币池来自 hp_max（战力派生），绝不含 wallet/billing。
+type bossLootSpec struct {
+	RelicID  string // 排他遗物 ID（走 arbitration 胜率∝贡献归属）
+	GoldQty  int    // 可分割货币总量（按贡献 SplitProportional 瓜分）
+	KeyTag   string // loot key 里的档位标签（worldboss / zoneboss），保证不同档 boss 的仲裁 key 不撞
+}
+
+// worldBossLootSpec 是全世界 world_boss 的默认掉落规格（与历史行为逐字节一致）。
+func worldBossLootSpec(hpMax int) bossLootSpec {
+	return bossLootSpec{RelicID: worldBossEpicRelicID, GoldQty: hpMax, KeyTag: "worldboss"}
+}
+
+// settleWorldBoss 读世界总线的贡献账本，按贡献全员分赃，并广播讨平事件。掉落规格由 loot 给（world_boss / zone boss 复用）。
+func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bossID string, bossName string, loot bossLootSpec, result *WorldBossStrikeResult) error {
 	// 读**完整**贡献账本（不设 LIMIT，否则成熟世界里早期出手会被截断而少分赃）。
 	busEvents, err := worldbus.ListByWorldKind(ctx, service.db, worldID, worldbus.KindWorldBossStrike)
 	if err != nil {
@@ -422,12 +455,12 @@ func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bos
 	result.Participants = len(participants)
 
 	// 掉落：货币按血量规模给（可分割，按贡献瓜分）+ 一件唯一遗物（排他，走 arbitration 胜率∝贡献）。
-	loot := []encounter.LootItem{
-		{ID: "gold", Rarity: encounter.Common, Quantity: hpMax},
-		{ID: worldBossEpicRelicID, Rarity: encounter.Epic, Quantity: 1},
+	lootItems := []encounter.LootItem{
+		{ID: "gold", Rarity: encounter.Common, Quantity: loot.GoldQty},
+		{ID: loot.RelicID, Rarity: encounter.Epic, Quantity: 1},
 	}
-	key := fmt.Sprintf("%s|worldboss|%s", worldID, bossID)
-	awards := encounter.AllocateLoot(key, loot, participants, fieldBossMinMeaningful)
+	key := fmt.Sprintf("%s|%s|%s", worldID, loot.KeyTag, bossID)
+	awards := encounter.AllocateLoot(key, lootItems, participants, fieldBossMinMeaningful)
 	result.Awards = awards
 
 	// H2：唯一遗物(world_boss_relic)经 arbitration 决出归属后，给胜/败方各留可审计零和争夺事件（CROSS_CONTEST_WIN/LOSE）。
@@ -457,7 +490,14 @@ func (service *Service) settleWorldBoss(ctx context.Context, worldID string, bos
 		}
 		actor, err := service.units.GetByID(ctx, unitID)
 		if err != nil {
-			continue // 跨分片/非本库角色：只在账本与 awards 里留痕，不在本库发钱
+			// 跨分片/非本库角色：award 已写进 result.Awards（玩家/审计可见的分配账面），但本库无此 unit → 无法经 Mutator 发钱。
+			// 评审 #2：单库部署下 GetByID 按 unitID 全表查、无 shard 过滤，所有出手者必命中、本分支不触发（实发=应发）；
+			// 一旦演进到真·物理多分片，跨分片贡献者金币会静默蒸发而 awards 仍显示「分到了」→ 发放总额<分配总额。
+			// 故此处不再静默 continue，而是落一条结构化 warn（unitID + 应发金额 + boss），让对账能发现「分配了未发放」的金额。
+			// 中期落地跨分片发放（pending_cross_shard_awards 待结算表，目标分片异步认领经其本侧 Mutator 入账）见 docs/PvE威胁系统.md。
+			slog.Warn("world boss gold award not granted: unit not in local store (cross-shard residual)",
+				"world", worldID, "boss", bossID, "unit", unitID, "gold", gold)
+			continue
 		}
 		if _, err := service.mutator.Apply(ctx, status.Mutation{
 			UnitID:     unitID,
@@ -559,6 +599,8 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 
 	// 原子条件 INSERT：仅当该 world 当前**无** active Boss 时才插入；判定与插入在一条 SQL 内原子完成，杜绝 COUNT→INSERT 的 TOCTOU。
 	// created_at 沿用列默认值（与 SpawnWorldBoss 一致）：SQLite 用 CURRENT_TIMESTAMP、MySQL 用空串默认，不在此列显式赋值。
+	// 全世界自治 boss 占 region_id='' 槽：NOT EXISTS 须按 (world_id, region_id='') 判，否则会被某个 zone boss
+	// （region_id=worldID#zoneID 非空）误挡（Phase4 多区 boss 并存后，单看 world_id 的「已有 active」恒为真）。
 	var query string
 	if dbdialect.IsMySQL(service.db) {
 		// MySQL 不允许 INSERT ... SELECT 直接省略 FROM，需 FROM DUAL 才能挂 WHERE NOT EXISTS。
@@ -566,19 +608,20 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 			INSERT INTO world_bosses (id, world_id, name, hp_max, hp_remaining, status, region_id)
 			SELECT ?, ?, ?, ?, ?, 'active', ''
 			FROM DUAL
-			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND status = 'active')`
+			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND region_id = '' AND status = 'active')`
 	} else {
 		query = `
 			INSERT INTO world_bosses (id, world_id, name, hp_max, hp_remaining, status, region_id)
 			SELECT ?, ?, ?, ?, ?, 'active', ''
-			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND status = 'active')`
+			WHERE NOT EXISTS (SELECT 1 FROM world_bosses WHERE world_id = ? AND region_id = '' AND status = 'active')`
 	}
 	res, err := service.db.ExecContext(ctx, query, id, worldID, name, hp, hp, worldID)
 	if err != nil {
-		// L4 唯一兜底：WHERE NOT EXISTS 是主护栏，partial unique index uq_world_boss_active 是硬兜底。
+		// L4 唯一兜底：WHERE NOT EXISTS 是主护栏，唯一约束 uq_world_boss_active 是硬兜底（两驱动均有）。
 		// 两个并发 INSERT 的 NOT EXISTS 子查询可能都见 0（彼此尚未提交）→ 都尝试插入 → 后者触发 UNIQUE 约束冲突。
 		// 这等价于「已有 active Boss」——视为正常兜底（类 INSERT IGNORE 语义），返回 nil、不外抛、不中断回合推进。
-		// MySQL 的 gap-lock 理论竞态属 documented residual（flag 默认关）。
+		// SQLite 走 partial unique index、MySQL 走 STORED 生成列 active_region_key + 唯一键（Phase4 评审 #1 补齐，
+		// 见 dbmigrate.EnsureWorldBossActiveUnique）——MySQL gap-lock 双插不再是 documented residual。
 		if isDupKeyErr(err) {
 			return nil
 		}
