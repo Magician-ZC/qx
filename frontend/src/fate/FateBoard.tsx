@@ -48,10 +48,13 @@ type Props = {
   // unitId：主角的单位 ID，用于在浮卡里标注「这就是她」+ 动作目录/直驱动作以她为行动者。
   unitId: string;
   // refreshSignal：父层每推世界往前一拍并执行完后 bump 此值，FateBoard 据此重拉快照让 board 随她移动重渲。
-  // 不传则只靠自身轮询刷新。
+  // 不传则只靠自身轮询刷新。父层「世界地图前往新区」成功后也 bump 此值，使 board 重拉切到新区地图（state.map 已投影）。
   refreshSignal?: number;
   // onGuidanceSuggested：点地图格子/人时，把一句祖魂语气的「指向型指引草稿」上抛父层（父层预填进 FateView 指引框）。
   onGuidanceSuggested?: (text: string) => void;
+  // onSnapshot：每次快照更新（挂载首拉 / 轮询 / refreshSignal 重拉 / 动作结算后重拉）后，把最新整快照上抛父层。
+  // 让父层把同一份快照喂给小地图 Minimap（避免再起一条独立 getSession 轮询，两者同源不漂移）。可选。
+  onSnapshot?: (snap: SessionSnapshot) => void;
 };
 
 // FACTION_NAME_ZH 把阵营 id 译成中文名（与 FateView 同口径，未知 id 回落原串）。
@@ -359,7 +362,7 @@ function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<strin
   return lines;
 }
 
-export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggested }: Props) {
+export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggested, onSnapshot }: Props) {
   const [snap, setSnap] = useState<SessionSnapshot | null>(null);
   // pois：地图兴趣点（地块资源 / 野外 NPC 事件），画在格子上的徽标 + 点击查看。
   const [pois, setPois] = useState<MapPOI[]>([]);
@@ -369,6 +372,10 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
   const [tile, setTile] = useState<TilePanel | null>(null);
   // mountedRef 守卫异步拉取返回时组件已卸载就不再 setState。
   const mountedRef = useRef(true);
+  // onSnapshotRef 持最新的 onSnapshot 回调：让 refresh/onTalkSend 在 setSnap 处统一上抛快照，
+  // 而不必把 onSnapshot 列进 refresh 的依赖（避免父层每渲染换函数引用就重建 refresh、重置轮询）。
+  const onSnapshotRef = useRef(onSnapshot);
+  onSnapshotRef.current = onSnapshot;
 
   // ── 动作面板状态（开发计划 2026-06-10 §3.7：TilePanel 只读 → 动作面板）──
   // affordances：该格动作目录（best-effort；null=拉取失败/未拉到→回退只读展示，旧后端 404 时面板不能坏）。
@@ -406,7 +413,10 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
   const refresh = useCallback(async () => {
     try {
       const res = await getSession(sessionId);
-      if (mountedRef.current) setSnap(res.session);
+      if (mountedRef.current) {
+        setSnap(res.session);
+        onSnapshotRef.current?.(res.session);
+      }
     } catch {
       // 观战快照拉取失败不致命（轮询/下次 refreshSignal 会再试），保持上一帧、不打断她的舞台。
     }
@@ -699,6 +709,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
       const res = await talkToUnit(sessionId, talk.targetUnitId, text);
       if (mountedRef.current) {
         setSnap(res.session);
+        onSnapshotRef.current?.(res.session);
         setTalkReply(`${res.reply.speaker || talk.targetName}：${res.reply.message}`);
         setTalkDraft("");
       }

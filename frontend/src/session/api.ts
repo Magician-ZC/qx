@@ -565,6 +565,61 @@ export async function getSessionExecutionInProgress(sessionID: string): Promise<
   return Boolean(data.session?.execution_in_progress);
 }
 
+// ── 分区大世界导航（三层地图 §8）：世界地图列区域 + 区域间前往/传送 ──
+
+// ZoneSummary 是世界地图上的一个区域块（对齐后端 GET …/zones 的 json tag）。
+// faction_id ∈ freedom/order/chaos/neutral；kind ∈ starter/capital/wild；
+// reachable=从当前区可前往（border 恒可达；portal 阶段1锁→false）；
+// portal_kind ∈ border/portal/""（""=与当前区不通）。
+export type ZoneSummary = {
+  id: string;
+  name: string;
+  faction_id: string;
+  kind: string;
+  level_min: number;
+  level_max: number;
+  is_current: boolean;
+  reachable: boolean;
+  portal_kind: string;
+};
+
+// getZones 拉某会话的全部区域 + 当前区 id（世界地图渲染源）。
+// best-effort：失败（404/网络/字段缺）回 {zones:[], current_zone_id:""}，不打断导航浮层。
+export async function getZones(
+  sessionID: string,
+): Promise<{ zones: ZoneSummary[]; current_zone_id: string }> {
+  try {
+    const data = await request<{ zones?: ZoneSummary[]; current_zone_id?: string }>(
+      `/api/sessions/${encodeURIComponent(sessionID)}/zones`,
+    );
+    return { zones: data.zones ?? [], current_zone_id: data.current_zone_id ?? "" };
+  } catch {
+    return { zones: [], current_zone_id: "" };
+  }
+}
+
+// travelToZone 让某角色前往目标区域（边界过渡 / 已解锁传送门）。
+// toCoord 可选落点坐标，**字符串坐标键 "q,r"**（与后端 session/zone.go parseCoordKey 同口径）；
+// 省略时由后端选默认入口。后端校验可达/解锁，失败抛中文错误
+// （「从这里去不了」/「这道传送门尚未开通」/「她已身在此地」…）。
+export async function travelToZone(
+  sessionID: string,
+  unitID: string,
+  toZoneID: string,
+  toCoord?: string,
+): Promise<void> {
+  const body: { to_zone_id: string; to_coord?: string } = { to_zone_id: toZoneID };
+  if (toCoord) body.to_coord = toCoord;
+  await request<{ ok?: boolean }>(
+    `/api/sessions/${encodeURIComponent(sessionID)}/units/${encodeURIComponent(unitID)}/travel`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
 // ── 地块事件系统客户端（开发计划 2026-06-10 §3.7）：点地块→动作目录→直发动作/POI 遭遇/交易 ──
 
 // TileAction 是动作目录里的一个可点条目（available=false 时置灰并展示 reason_zh）。

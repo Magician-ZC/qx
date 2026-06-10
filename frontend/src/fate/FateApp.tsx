@@ -25,6 +25,8 @@ import {
 } from "../session/api";
 import { FateView } from "./FateView";
 import { FateBoard } from "./FateBoard";
+import { WorldMap } from "./WorldMap";
+import { Minimap } from "./Minimap";
 import { CharacterSheet } from "./CharacterSheet";
 import { AccountSettings } from "./AccountSettings";
 import { OnboardingTour } from "../components/OnboardingTour";
@@ -38,6 +40,7 @@ import {
   type PersonaTraits,
   type SnapshotResult,
 } from "./personaSnapshot";
+import type { SessionSnapshot } from "../session/types";
 import "./fate.css";
 
 // crossFileNeeds（本波 W-B 三人分工，本文件只编辑 FateApp.tsx）：
@@ -109,6 +112,41 @@ const charterToggleBtnStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+// 舆图入口浮层按钮：顶部居中，与 .fate-restart(左上)/.fate-drawer-toggle(右上) 同款墨色宣纸卡风格、同层级(z 21)，
+// 不碰 fate.css 故内联。translateX(-50%) 让它真正水平居中而不被左右两个角浮层挤偏。
+const worldMapToggleBtnStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 14,
+  left: "50%",
+  transform: "translateX(-50%)",
+  zIndex: 21,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(140, 100, 50, 0.5)",
+  background: "rgba(250, 244, 232, 0.96)",
+  color: "#6b4a22",
+  fontFamily: "'Noto Serif SC', 'Songti SC', serif",
+  fontSize: 14,
+  cursor: "pointer",
+  boxShadow: "0 4px 14px rgba(60, 44, 27, 0.2)",
+};
+
+// 小地图定位容器：Minimap 自身 position:absolute top:12 left:12（贴最近定位祖先左上角）。
+// 直接挂在 .fate-play-fullscreen(position:fixed) 下会与「换个账号」按钮(top:14 left:14)叠在一起，
+// 故套一个偏下的相对容器(top:52)，让小地图落到 restart 按钮下方。容器尺寸贴合小地图(~172×150)。
+const minimapWrapStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 52,
+  left: 0,
+  width: 184,
+  height: 156,
+  zIndex: 14,
+  pointerEvents: "none",
+};
+
 export function FateApp() {
   // 初始相位恒为 gate：AuthGate 已保证挂载即已登录，进入直接拉「我的主世界角色」。
   const [phase, setPhase] = useState<Phase>("gate");
@@ -124,6 +162,12 @@ export function FateApp() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // drawerOpen：命运 UI 浮层抽屉是否展开（默认开，让玩家同时看到全屏地图 + 命运卡；可收起独看地图）。
   const [drawerOpen, setDrawerOpen] = useState(true);
+  // worldMapOpen：世界地图（舆图）浮层是否展开——点顶部「舆图」按钮打开，选区前往后自动关闭（仿 charterOpen 范式）。
+  const [worldMapOpen, setWorldMapOpen] = useState(false);
+  // boardRefresh：传给 FateBoard 的 refreshSignal——前往新区成功后 bump，使 board 重拉快照切到新区地图(state.map 已投影)+新区NPC。
+  const [boardRefresh, setBoardRefresh] = useState(0);
+  // boardSnap：FateBoard 经 onSnapshot 上抛的最新整快照——存着喂给小地图 Minimap（与 FateBoard 同源，不另起 getSession 轮询）。
+  const [boardSnap, setBoardSnap] = useState<SessionSnapshot | null>(null);
   // guidanceDraft：点地图格子/人生成的「指向型指引草稿」——FateBoard 写、FateView 读并预填进指引框（消费后清空）。
   const [guidanceDraft, setGuidanceDraft] = useState("");
 
@@ -276,19 +320,34 @@ export function FateApp() {
   if (phase === "play" && saved) {
     return (
       <div className="fate-play-fullscreen">
-        {/* 全屏世界地图（主舞台）：她生活的天地——拖拽平移、滚轮缩放、观战她与身边二十余人。 */}
+        {/* 全屏世界地图（主舞台）：她生活的天地——拖拽平移、滚轮缩放、观战她与身边二十余人。
+            refreshSignal=boardRefresh：前往新区成功后父层 bump 它，board 重拉快照切到新区地图(state.map 已投影)+新区NPC。
+            onSnapshot：把 board 已拉的整快照上抛，存进 boardSnap 喂给左上小地图 Minimap（同源，不另起 getSession 轮询）。 */}
         <FateBoard
           sessionId={saved.sessionId}
           unitId={saved.unitId}
+          refreshSignal={boardRefresh}
+          onSnapshot={setBoardSnap}
           onGuidanceSuggested={(t) => {
             setGuidanceDraft(t);
             setDrawerOpen(true);
           }}
         />
 
+        {/* 小地图：当前区缩略 + 她的红点（左上角，偏下避开「换个账号」按钮）。数据来自 FateBoard 上抛的同一份快照。
+            Minimap 自身 position:absolute top:12 left:12，故套一个偏下定位的相对容器，使它落在 restart 按钮下方而非盖住它。 */}
+        <div style={minimapWrapStyle}>
+          <Minimap snap={boardSnap} unitId={saved.unitId} />
+        </div>
+
         {/* 左上浮层：换个账号。 */}
         <button className="fate-restart" onClick={() => void signOut()}>
           换个账号登入
+        </button>
+
+        {/* 顶部中央浮层：舆图 · 世界地图入口。点开 WorldMap 浮层，看全部区域、择一前往（仿 charterOpen/drawerOpen 范式）。 */}
+        <button style={worldMapToggleBtnStyle} onClick={() => setWorldMapOpen(true)} aria-haspopup="dialog">
+          🗺 舆图 · 天下
         </button>
 
         {/* 右上浮层：命运抽屉开关（收起则独看全屏地图）。 */}
@@ -355,6 +414,22 @@ export function FateApp() {
           <AccountSettings
             onSignOut={() => void signOut()}
             onClose={() => setSettingsOpen(false)}
+          />
+        )}
+
+        {/* 世界地图浮层（舆图）：看全部区域、择一前往。onTraveled（travel 成功）→ bump boardRefresh 让 FateBoard
+            重拉快照切到新区；WorldMap 内部已在成功后自调 onClose 收起浮层，这里 onClose 再兜底置 worldMapOpen=false。 */}
+        {worldMapOpen && (
+          <WorldMap
+            sessionId={saved.sessionId}
+            unitId={saved.unitId}
+            onClose={() => setWorldMapOpen(false)}
+            onTraveled={() => {
+              // 先清快照：避免「旧区地形图 + 新区主角坐标」的错位帧——Minimap 在 snap=null 时不渲染，
+              // 等 FateBoard 重拉到新区快照再显（boardRefresh bump 触发重拉）。
+              setBoardSnap(null);
+              setBoardRefresh((v) => v + 1);
+            }}
           />
         )}
 
