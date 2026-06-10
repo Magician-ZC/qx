@@ -51,6 +51,15 @@ func (service *Service) AdvanceFateWorld(ctx context.Context, sessionID string) 
 	if loadErr != nil {
 		return false, loadErr
 	}
+	// 停双推进者（Phase 5 最高优先红线）：共享世界（world_shared_v1）的角色由中心化 region-runner 统一推进
+	// （同一世界 tick 节拍 co-tick），**绝不**再由 fate autotick 各推一拍——否则同一共享主角会被两个驱动各做一次
+	// 自治决策 + 状态写，造成双重决策/写竞态。故 region-runner 接管开启时，AdvanceFateWorld 对共享世界 session 直接早返回。
+	// 这是「二选一」的硬边界 + 防御纵深：runFateAutoTickPass 本就只扫 world_default（不扫共享世代），这里再在
+	// 单 session 推进入口钉死一道，使任何直传共享 session id 的调用方（指引/端点/未来 ticker 改动）也不会双推。
+	// 私有档（world_default）/ flag 关时不命中 → 仍由 fate autotick 推进，零影响。
+	if service.sharedWorldDrivenByRegionRunner(&state) {
+		return false, nil
+	}
 	// 已在执行中（同步标志或进程级异步注册表）→ 一拍正进行中，不重复推。
 	if state.ExecutionInProgress || isAsyncExecutionRunning(sessionID) {
 		return true, nil
@@ -286,8 +295,28 @@ func fateAutoTickEnabled() bool {
 	}
 }
 
+// sharedWorldDrivenByRegionRunner 判定某 session 是否「已由 region-runner 统一推进」——满足三条同时成立：
+//   - inSharedWorld(state)：flag QUNXIANG_SHARED_WORLD 开 + state.WorldID==world_shared_v1（共享世代）；
+//   - service.ambientSchedulingEnabled：region-runner 启用（main 按 QUNXIANG_REGION_RUNNER_ENABLED 注入）——
+//     未启用则没有 region-runner 在推共享主角，此时仍由 fate autotick 兜底，不能早返回。
+//
+// 这是「停双推进者」二选一的判定核心：满足 → fate autotick 让位 region-runner（AdvanceFateWorld 早返回）；
+// 不满足（私有档 / 共享 flag 关 / region-runner 未启用）→ 仍由 fate autotick 推进，零影响。
+//
+// 注意：只看 ENABLED 不看 APPLY——即便 RUNNER_APPLY 关（region-runner 处于 shadow、不真改状态），也应让 fate autotick
+// 让位：shadow 模式下共享主角本就该「在场但不被任一驱动改写状态」（与 region-runner 的 shadow 语义一致），由 fate
+// autotick 越俎代庖去真改共享主角状态反而破坏 shadow 隔离、且重新引入双驱动语义错位。统一推进的真应用受 APPLY 门控于
+// region-runner 一侧，与本让位判定正交。
+func (service *Service) sharedWorldDrivenByRegionRunner(state *State) bool {
+	return service != nil && service.ambientSchedulingEnabled && inSharedWorld(state)
+}
+
 // RunFateAutoTickLoop 是后台低频 ticker：每 interval 唤醒一次，flag QUNXIANG_FATE_AUTOTICK 开启时扫
 // world_default 下的活跃主世界 session，各推一拍（AdvanceFateWorld）。默认关时零行为（每次唤醒只查一次 flag 即 return）。
+//
+// 停双推进者（Phase 5）：本 ticker **只扫 world_default**（EnsureDefaultWorld + ListMainWorldSessionIDs(world_default)），
+// 天然不触达共享世代 world_shared_v1 的 session——共享世界角色由 region-runner 统一推进。即便如此，AdvanceFateWorld
+// 入口仍有 sharedWorldDrivenByRegionRunner 硬守门（防御纵深：未来若改本扫描源或有别处直传共享 session id，也不会双推）。
 //
 // 成本：每拍 1 次 LLM 自治决策（每个被推进的 session 一拍）；低频（interval 默认 60s）+ best-effort + flag 默认关 控成本。
 // 随 ctx 取消优雅退出（与 region-runner 同模式，main.go 启动并在关停信号时等其退出）。

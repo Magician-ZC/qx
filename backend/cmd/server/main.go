@@ -191,6 +191,20 @@ func main() {
 		close(runnerDone)
 	}()
 
+	// 私有世代双推进者运维告警（修 Phase5 major-2，docs §5 风险5）：region-runner 是 session-agnostic、纯按 region_id 调度，
+	// 对单位属哪个世代无感——REGION_RUNNER_APPLY=true 时它会对 world_default 私有主角（region_id==sessionID）真应用 ambient L1，
+	// 而 FATE_AUTOTICK=true 时 RunFateAutoTickLoop 又扫同一私有 session 各推一拍命运自治。Phase5「二选一」只硬隔离了共享世代
+	// （sharedWorldDrivenByRegionRunner + 扫描排除），私有世代未硬隔离：同一私有主角会被两条 goroutine 各推一拍（觅食/休息 vs
+	// 命运自治各写一次），仅靠 execGuard 在「两者时间窗恰好重叠」时软让位，非重叠窗口仍双驱动语义错位。私有世代是 fate-autotick
+	// 的地盘，两者**不应同开 APPLY**。此处启动即检测同开并 Warn（最小运维契约；不拒启以免误伤 shadow/共享场景）。
+	// 读 FATE_AUTOTICK 用 EnvOrOverride（与 fateAutoTickEnabled 同口径，含已回灌的 GM 持久 override）；APPLY 是纯环境变量。
+	if envBool("QUNXIANG_REGION_RUNNER_APPLY") && fateAutoTickFlagOn() {
+		logger.Warn("double-driver risk: REGION_RUNNER_APPLY and FATE_AUTOTICK both ON — " +
+			"region-runner and fate-autotick will each advance the SAME world_default (private) protagonist per tick " +
+			"(shared world is isolated, private world is NOT). Disable one of them for private generations. " +
+			"See docs/共享世界改造方案-方向B-2026-06-10.md §5 risk 5.")
+	}
+
 	// 命运世界自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认关，关时每次唤醒只查一次 flag 即返回、零行为）：
 	// 开启时低频（默认 60s，QUNXIANG_FATE_AUTOTICK_SECONDS 可调）扫 world_default 活跃主世界角色，各推一拍自治生活。
 	// 专用长生命 Service：异步执行（与生产 router 一致，AdvanceFateWorld 才会起后台执行一轮）+ 广播器（生活 beat/快照 WS 实时推送）+
@@ -201,6 +215,12 @@ func main() {
 		fateSvc.SetAsyncExecution(true)
 		fateSvc.SetBroadcaster(hub)
 		fateSvc.SetAttributionEnforcement(true)
+		// 停双推进者纵深守门通电（修 Phase5 major-1）：fateSvc 必须与生产 HTTP Service（router.go 的 newSessionService）
+		// 一样按 region-runner 是否启用武装 ambientSchedulingEnabled，否则 AdvanceFateWorld 入口的 sharedWorldDrivenByRegionRunner
+		// 守门在「唯一会循环喂 session 给 AdvanceFateWorld 的生产路径=本 autotick loop」上恒为 false、永不让位——
+		// 共享主角红线只剩 ListMainWorldSessionIDs 扫描排除单层兜底，注释自称的「防御纵深」名存实亡（async-boundary-hooks-trap
+		// 同型坑：只接一路=纵深线上永不通电）。武装后：扫描排除 + 入口守门双层，任一被改/被绕都不会双推共享主角。
+		fateSvc.SetAmbientSchedulingEnabled(regionRunnerEnabled)
 		fateSvc.SetReflexShortCircuit(envBoolDefault("QUNXIANG_REFLEX_SHORTCIRCUIT", true))
 		interval := time.Duration(envIntDefault("QUNXIANG_FATE_AUTOTICK_SECONDS", 60)) * time.Second
 		fateSvc.RunFateAutoTickLoop(ctx, interval)
@@ -268,6 +288,17 @@ func main() {
 // envBool 读布尔环境变量（true/1/yes/on 视为真，不区分大小写）。
 func envBool(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// fateAutoTickFlagOn 读 QUNXIANG_FATE_AUTOTICK，与 session.fateAutoTickEnabled 同口径——经 featureflags.EnvOrOverride
+// 读（含已回灌的 GM 持久 override，非仅环境变量），使启动期双推进者告警与运行期 ticker 的实际开关判定一致。
+func fateAutoTickFlagOn() bool {
+	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FATE_AUTOTICK"))) {
 	case "true", "1", "yes", "on":
 		return true
 	default:

@@ -23,6 +23,8 @@ import (
 	"context"
 	"strings"
 
+	"qunxiang/backend/internal/agentqueue"
+	"qunxiang/backend/internal/engine/scheduler"
 	"qunxiang/backend/internal/unit"
 )
 
@@ -32,8 +34,14 @@ import (
 // 维持 ambient_scheduling 的 sessionID 口径——§5 风险 2 兼容分支不被破坏）。world_id 一并写回共享世代（与 region_id 同事务列），
 // 使 ListActiveByRegion(复合 region_id) 能跨 session 命中这些单位。
 //
+// Phase 5「统一世界推进」对齐（关键）：除了把 units 表的 region_id 列改成复合 region，**还须把该单位在唤醒队列
+// （agent_wake_queue）里的 region_id 一并改成同一复合值**——否则 seedAmbientForUnits 先以 region_id==sessionID 入队的 wake
+// 与 units 列的复合 region_id 长期分裂：region-runner 仍把共享主角调度在 sessionID 这个「每会话自成一区」的桶里，
+// 永远不会与同区别玩家在「worldID#zoneID」这个真·地理子区下同节拍 co-tick（也对不上 ListActiveByRegion 的相遇/撮合视图）。
+// requeueSharedWorldWakeBestEffort 把 wake 的 region_id 对齐到 units 列，让共享主角真正进入其地理区的唤醒队列。
+//
 // best-effort：逐个 SetUnitScope，任一失败只跳过该单位、不中断调用方（降生/travel 绝不因相遇可见性拖垮）。
-// 只动作用域列（world_id/region_id），不碰单位记录主体、不改受保护字段、不触发 Mutator。
+// 只动作用域列（world_id/region_id）+ 唤醒队列 region_id，不碰单位记录主体、不改受保护字段、不触发 Mutator。
 func (service *Service) scopeSharedWorldUnitsToZoneBestEffort(ctx context.Context, state *State, zoneID string, unitIDs []string) {
 	if service == nil || service.units == nil {
 		return
@@ -50,8 +58,39 @@ func (service *Service) scopeSharedWorldUnitsToZoneBestEffort(ctx context.Contex
 		if id == "" {
 			continue
 		}
-		_ = service.units.SetUnitScope(ctx, id, state.WorldID, regionID)
+		if err := service.units.SetUnitScope(ctx, id, state.WorldID, regionID); err != nil {
+			continue // 该单位 scope 失败 → 不再对它重排 wake（避免 units 列与 wake 分裂的反向不一致）。
+		}
+		// 把唤醒队列里这条单位的 wake 对齐到复合 region_id，使 region-runner 在共享地理子区下调度它（Phase 5）。
+		service.requeueSharedWorldWakeBestEffort(ctx, state, id, regionID)
 	}
+}
+
+// requeueSharedWorldWakeBestEffort 把共享世界单位在唤醒队列里的 region_id 对齐到复合 region_id=worldID#zoneID。
+//
+// 背景：seedAmbientForUnits 在降生时以 region_id==sessionID（分片关时的默认口径）把单位入队；随后本玩家
+// scope 到复合 region 改了 units 列，但 wake 仍停在 sessionID。region-runner 按 wake 的 region_id 调度，
+// 故不对齐 wake 就等于「共享主角的 units 列说它在 worldID#zoneID，调度器却在 sessionID 桶里唤醒它」——
+// 永远进不了与同区别玩家同节拍的统一推进。本方法用幂等 EnqueueWake（按 unit_id upsert）把 wake 的 region_id
+// 改成复合值，wake_at_tick=0 起始 COLD（首次 processOne 按真实空闲度重分层，与 seed 同口径）。
+//
+// 门控/安全：
+//   - 仅 ambientSchedulingEnabled（region-runner 启用，main 按 QUNXIANG_REGION_RUNNER_ENABLED 注入）+ inSharedWorld 才执行；
+//     flag 关 / 私有档 → 整体 no-op，wake 维持 seedAmbientForUnits 的 sessionID 口径，零影响。
+//   - best-effort：吞错（相遇/统一推进是增强，绝不拖垮降生/travel）。
+//   - 幂等：重复 scope（降生→多次 travel 回同区）安全——按 unit_id upsert 覆盖同一复合 region_id。
+//   - SessionID 仍填本单位 owner 的 state.ID（保留期清理键 PurgeExpiredSessionData 按它删，与 seed 口径一致）。
+func (service *Service) requeueSharedWorldWakeBestEffort(ctx context.Context, state *State, unitID, regionID string) {
+	if service == nil || service.db == nil || !service.ambientSchedulingEnabled {
+		return // region-runner 未启用：不动唤醒队列（与 seedAmbientForUnits 的开关口径一致）。
+	}
+	if !inSharedWorld(state) || strings.TrimSpace(unitID) == "" || strings.TrimSpace(regionID) == "" {
+		return
+	}
+	_ = agentqueue.EnqueueWake(ctx, service.db, agentqueue.WakeEntry{
+		UnitID: unitID, SessionID: state.ID, WorldID: state.WorldID, RegionID: regionID,
+		WakeAtTick: 0, Tier: string(scheduler.TierCold),
+	})
 }
 
 // enrichSnapshotWithSharedWorldPeers 在快照构造完成后，把**同区别玩家的主角**并入 snapshot.OtherWorldUnits（只读上图）。
