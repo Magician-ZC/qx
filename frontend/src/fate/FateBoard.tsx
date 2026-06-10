@@ -682,6 +682,18 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
           <div style={whoCardLineStyle}>
             坐标（{tile.q}, {tile.r}）
           </div>
+          {/* 本格设施信息（A9）：世界里已存在的建筑（NPC 自治建造产生）——展示类型 + 修建进度/成熟状态。
+              玩家不能自建（共享大世界），但完工的己方农田/铁匠铺会在动作目录里给出收割/锻造按钮。 */}
+          {affordances && affordances.q === tile.q && affordances.r === tile.r && affordances.structure && (
+            <div style={{ ...whoCardLineStyle, marginTop: 6, color: "#6b4a22" }}>
+              🏗 {affordances.structure.type_zh}
+              {!affordances.structure.complete
+                ? `（修建中 ${affordances.structure.progress}/${affordances.structure.required}）`
+                : affordances.structure.harvest_ready
+                  ? "（已成熟，可收割）"
+                  : "（已建成）"}
+            </div>
+          )}
           {/* 玩家在线操作：让她直接走到这里（混合模型——你可指挥她，世界也自治推进）。 */}
           <button
             type="button"
