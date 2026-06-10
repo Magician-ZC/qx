@@ -14,12 +14,13 @@ import { ChroniclePanel } from "../components/ChroniclePanel";
 import {
   equipItem,
   getChronicleFeed,
-  getItemCatalog,
+  getItemCatalogFull,
   getUnitRelations,
   getUnitStatus,
   unequipItem,
   // useItem 起别名（不以 use 开头）：api 函数 `use` 前缀会被 eslint react-hooks/rules-of-hooks 误判为 React Hook。
   useItem as apiUseItem,
+  type ItemCatalogEntry,
   type UnitRelationView,
 } from "../session/api";
 
@@ -122,6 +123,20 @@ function slotLabel(slot: string): string {
   return SLOT_LABELS[slot] ?? slot;
 }
 
+// equipBonusText 从目录条目取装备属性加成，拼成「攻+8 防+5 移+1」（只列非零项；都为零/查不到目录返空串）。
+// Bug3：装备槽/行囊装备旁显示穿上后的攻防加成，从目录查 attack/defense/move_bonus。
+function equipBonusText(entry: ItemCatalogEntry | undefined): string {
+  if (!entry) return "";
+  const parts: string[] = [];
+  const atk = typeof entry.attack_bonus === "number" ? entry.attack_bonus : 0;
+  const def = typeof entry.defense_bonus === "number" ? entry.defense_bonus : 0;
+  const mov = typeof entry.move_bonus === "number" ? entry.move_bonus : 0;
+  if (atk) parts.push(`攻${atk > 0 ? "+" : ""}${atk}`);
+  if (def) parts.push(`防${def > 0 ? "+" : ""}${def}`);
+  if (mov) parts.push(`移${mov > 0 ? "+" : ""}${mov}`);
+  return parts.join(" ");
+}
+
 // lifeStateLabel 把 status.life_state 译成中文（与后端 unit life_state 字面量对齐，未知退原值）。
 function lifeStateLabel(state: string): string {
   const map: Record<string, string> = {
@@ -156,8 +171,8 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
   const [relLoading, setRelLoading] = useState(false);
   const [relError, setRelError] = useState("");
 
-  // 物品目录：id→中文名（背包 tab 译名用，best-effort，失败回空 Map 全退原 id）。
-  const [catalog, setCatalog] = useState<Map<string, string>>(new Map());
+  // 物品目录：id→完整条目（背包 tab 译名 + 装备属性加成显示用，best-effort，失败回空 Map：译名退原 id、属性不显）。
+  const [catalog, setCatalog] = useState<Map<string, ItemCatalogEntry>>(new Map());
 
   // 挂载即拉整条 unit + 物品目录（目录失败回空 Map 不影响）。
   useEffect(() => {
@@ -166,7 +181,7 @@ export function CharacterSheet({ sessionId, unitId, fallbackName, onClose }: Pro
     setError("");
     void (async () => {
       try {
-        const [rec, cat] = await Promise.all([getUnitStatus(unitId), getItemCatalog()]);
+        const [rec, cat] = await Promise.all([getUnitStatus(unitId), getItemCatalogFull()]);
         if (!alive) return;
         setCatalog(cat);
         if (rec) {
@@ -505,7 +520,7 @@ function SkillsTab(props: { skills: Record<string, unknown> }) {
 function InventoryTab(props: {
   inventory: Record<string, unknown>;
   status: Record<string, unknown>;
-  catalog: Map<string, string>;
+  catalog: Map<string, ItemCatalogEntry>;
   onEquip?: (itemID: string) => void;
   equipBusy?: string;
   onUse?: (itemID: string) => void;
@@ -523,8 +538,14 @@ function InventoryTab(props: {
       const custom = asStr(it.custom_name);
       if (custom) return custom;
       const id = asStr(it.item_id);
-      return catalog.get(id) || id || "未知物品";
+      return catalog.get(id)?.display_name || id || "未知物品";
     },
+    [catalog],
+  );
+
+  // bonusText：从目录查该物的攻防加成（Bug3：装备属性显示）。非装备/无加成/查不到目录返空串。
+  const bonusText = useCallback(
+    (it: Record<string, unknown>): string => equipBonusText(catalog.get(asStr(it.item_id))),
     [catalog],
   );
 
@@ -553,12 +574,17 @@ function InventoryTab(props: {
           {equipSlots.map((slot) => {
             const it = asRecord(equipment[slot]);
             const lvl = asNum(it.level);
+            // Bug3：从目录查这件已穿装备的攻防加成（攻+8 / 防+5 / 移+1），非零项就近展示在装备名后。
+            const bonus = bonusText(it);
             return (
               <div className="cs-equip-cell" key={slot}>
                 <span className="cs-equip-slot">{slotLabel(slot)}</span>
                 <span className="cs-equip-name">
                   {itemName(it)}
                   {lvl > 0 ? <span className="cs-equip-lvl"> +{lvl}</span> : null}
+                  {bonus ? (
+                    <span style={{ color: "#9a6b2e", fontSize: 11, marginLeft: 6 }}>{bonus}</span>
+                  ) : null}
                   {renderBadges(it)}
                 </span>
                 {/* 玩家在线操作：卸下该槽位装备回行囊（A11）。slot 键本身即后端 unequip 契约
@@ -595,11 +621,16 @@ function InventoryTab(props: {
             // 可直接使用的消耗品（后端只开 ration/healing_potion 两条结算）：显示「使用」；
             // 消耗品穿不上（后端必拒「这件东西不是用来吃的」），故这两件不再显示死按钮「穿上」。
             const usable = USABLE_ITEM_IDS.has(itemID);
+            // Bug3（顺带）：行囊里的装备物品也显示其攻防加成（消耗品/无加成返空串不显）。
+            const bonus = bonusText(it);
             return (
               <li className="cs-backpack-row" key={`${itemID}-${i}`}>
                 <span className="cs-backpack-name">
                   {itemName(it)}
                   {lvl > 0 ? <span className="cs-equip-lvl"> +{lvl}</span> : null}
+                  {bonus ? (
+                    <span style={{ color: "#9a6b2e", fontSize: 11, marginLeft: 6 }}>{bonus}</span>
+                  ) : null}
                   {renderBadges(it)}
                 </span>
                 <span className="cs-backpack-qty">×{qty}</span>

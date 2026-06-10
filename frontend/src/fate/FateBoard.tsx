@@ -5,8 +5,9 @@
      渲染采集/收割/锻造/探遭遇/交谈/交易等动作按钮：不可用置灰带 reason_zh 小字；
      （共享大世界：玩家不能在共用地图上建造/拆除建筑，故无建造/拆除；收割/锻造仅「使用」世界已有的己方设施。）
    - 直发动作（gather/harvest/forge/upgrade）→ executeTileAction，结算摘要+明细内嵌小卡展示；
-   - POI 遭遇（poi_encounter）→ resolvePOIEncounter；撞上行商则展开「行商货单」交易小面板（买/卖对照 sell_price）；
-   - 普通 NPC 交易复用同款小面板但只开「卖」侧（基准卖价后端结算，前端不显示预估价）；
+   - POI 遭遇（poi_encounter）→ resolvePOIEncounter；撞上行商则展开交易小面板（买侧=行商货单，卖侧=她的行囊）；
+   - 任何 NPC 交易都买+卖双向对称（Bug1/Bug2）：买侧读对方背包查目录得买价（price）；卖侧读她行囊、每件预显
+     预估卖价 floor(price*0.8)（与后端 merchantSellPrice 一致）。买价/卖价均为预估，成交以后端权威结算为准；
    - 交谈：同阵营单位复用战棋 /dialogue 链路（talkToUnit）弹简易输入框；据点 NPC/野外散人不在该链路
      鉴权范围内（router.go 校验 commander faction），降级把「与TA交谈」预填进指引草稿。
    结果叙事同时经 WS fate_life_beat 冒进命运 feed（父层）；面板内嵌小卡是即时反馈、可「×」关掉。
@@ -18,16 +19,24 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   executeTileAction,
-  getItemCatalog,
+  getItemCatalogFull,
   getMapPOIs,
   getSession,
   getTileAffordances,
   moveUnit,
   resolvePOIEncounter,
+  sellPriceOf,
   talkToUnit,
   tradeWithUnit,
 } from "../session/api";
-import type { MapPOI, MerchantGood, POIEncounterResult, TileAction, TileAffordances } from "../session/api";
+import type {
+  ItemCatalogEntry,
+  MapPOI,
+  MerchantGood,
+  POIEncounterResult,
+  TileAction,
+  TileAffordances,
+} from "../session/api";
 import type { BattleUnit, InventoryItem, SessionSnapshot } from "../session/types";
 
 // LazyPixiBoard 与 App.tsx 同款懒加载 PixiBoard：让 Pixi 战场代码留在独立 chunk（不并进命运首屏主包），
@@ -283,12 +292,22 @@ type ActionResultCard = {
   lines: string[];
 };
 
-// TradePanel 是交易小面板：行商带货单（可买可卖）；普通 NPC 无货单只开「卖」侧。
+// BuyGood 是交易面板买侧的一件可买物（统一行商货单 MerchantGood 与「读 NPC 背包 + 查目录」两条来源）。
+// buy_price：买价（=目录 price；查不到目录时为 0，调用方退显「—」、买按钮仍可点，成交以后端为准）。
+type BuyGood = {
+  item_id: string;
+  display_name: string;
+  quantity: number;
+  buy_price: number;
+};
+
+// TradePanel 是交易小面板：买侧（对方背包/行商货单）+ 卖侧（她的行囊）双向对称。
+// 任何 NPC 交易都给买+卖两侧——买侧空（对方背包无可出手物）时显示「对方没有要出手的东西」。
 type TradePanel = {
   targetUnitId: string;
   targetName: string;
-  goods: MerchantGood[];
-  isMerchant: boolean;
+  // buyGoods：对方可出手的货（行商=货单；普通 NPC=读其背包查目录）。空数组=对方没有要出手的东西。
+  buyGoods: BuyGood[];
 };
 
 // TalkPanel 是与同阵营单位交谈的简易输入框目标。
@@ -315,8 +334,13 @@ function effectLines(effects: { kind: string; item_id?: string; label_zh: string
   return (effects ?? []).map((e) => `${e.label_zh} ${signedNum(e.delta)}`);
 }
 
+// catalogNameOf 从完整目录里取某物的中文名（查不到退原 id）。
+function catalogNameOf(catalog: Map<string, ItemCatalogEntry>, itemId: string): string {
+  return catalog.get(itemId)?.display_name || itemId;
+}
+
 // outcomeLines 把 POI 遭遇 outcome 摘要成中文行（钱囊/饱腹/心绪/得物/受创/胜负/关系/战获）。
-function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<string, string>): string[] {
+function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<string, ItemCatalogEntry>): string[] {
   if (!outcome) return [];
   const lines: string[] = [];
   if (outcome.wallet_delta) lines.push(`钱囊 ${signedNum(outcome.wallet_delta)} 文`);
@@ -324,7 +348,7 @@ function outcomeLines(outcome: POIEncounterResult["outcome"], catalog: Map<strin
   if (outcome.morale_delta) lines.push(`心绪 ${signedNum(outcome.morale_delta)}`);
   const gainedName =
     outcome.gained_item_name ||
-    (outcome.gained_item_id ? catalog.get(outcome.gained_item_id) || outcome.gained_item_id : "");
+    (outcome.gained_item_id ? catalogNameOf(catalog, outcome.gained_item_id) : "");
   if (gainedName) lines.push(`得「${gainedName}」×${outcome.gained_item_qty ?? 1}`);
   if (outcome.damage_taken && outcome.damage_taken > 0) lines.push(`受创 -${outcome.damage_taken}`);
   if (outcome.encounter_outcome) lines.push(ENCOUNTER_OUTCOME_ZH[outcome.encounter_outcome] ?? outcome.encounter_outcome);
@@ -362,8 +386,9 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
   const [talk, setTalk] = useState<TalkPanel | null>(null);
   const [talkDraft, setTalkDraft] = useState("");
   const [talkReply, setTalkReply] = useState("");
-  // itemCatalog：物品 id→中文名（卖给行商区译名用），挂载时 best-effort 拉一次（失败回空 Map 退原 id）。
-  const [itemCatalog, setItemCatalog] = useState<Map<string, string>>(() => new Map());
+  // itemCatalog：物品 id→完整目录条目（译名 + 买价 price + 卖价折算用），挂载时 best-effort 拉一次
+  // （失败回空 Map：译名退原 id、价格退显「—」）。买卖双向都要查 price，故拉完整目录而非仅译名表。
+  const [itemCatalog, setItemCatalog] = useState<Map<string, ItemCatalogEntry>>(() => new Map());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -373,7 +398,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
   }, []);
 
   useEffect(() => {
-    void getItemCatalog().then((map) => {
+    void getItemCatalogFull().then((map) => {
       if (mountedRef.current) setItemCatalog(map);
     });
   }, []);
@@ -508,17 +533,41 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
     [affordances, snap],
   );
 
-  // herBackpack：她的行囊（卖给行商区数据源）。快照里 player_units 中 id===unitId 的 inventory.backpack。
+  // herBackpack：她的行囊（卖侧数据源）。快照里 player_units 中 id===unitId 的 inventory.backpack。
   const herBackpack = useMemo<InventoryItem[]>(() => {
     const her = snap?.player_units?.find((u) => u.id === unitId);
     return her?.inventory?.backpack ?? [];
   }, [snap, unitId]);
 
+  // buildBuyGoods：组装某 NPC 的「可买货单」（Bug1 买侧）——读对方背包（ambient_units / wild_units 里 target 那个
+  // 单位的 inventory.backpack），每件查目录得买价（price）与中文名。查不到目录的（罕见）也列出、买价记 0
+  // （UI 退显「—」，买按钮仍可点，成交以后端为准）。大多数 NPC 背包空 → 返回空数组 → 面板显示「对方没有要出手的东西」。
+  const buildBuyGoods = useCallback(
+    (targetUnitId: string): BuyGood[] => {
+      const npc =
+        snap?.ambient_units?.find((u) => u.id === targetUnitId) ??
+        snap?.wild_units?.find((u) => u.id === targetUnitId);
+      const backpack = npc?.inventory?.backpack ?? [];
+      return backpack
+        .filter((it) => it.item_id && it.quantity > 0)
+        .map((it) => {
+          const entry = itemCatalog.get(it.item_id);
+          return {
+            item_id: it.item_id,
+            display_name: it.custom_name || entry?.display_name || it.item_id,
+            quantity: it.quantity,
+            buy_price: typeof entry?.price === "number" ? entry.price : 0,
+          };
+        });
+    },
+    [snap, itemCatalog],
+  );
+
   // itemNameOf：行囊物品译名（custom_name 优先，其次物品目录，再退原 id）。
   const itemNameOf = useCallback(
     (it: InventoryItem): string => {
       if (it.custom_name) return it.custom_name;
-      return itemCatalog.get(it.item_id) || it.item_id || "未知物品";
+      return itemCatalog.get(it.item_id)?.display_name || it.item_id || "未知物品";
     },
     [itemCatalog],
   );
@@ -547,13 +596,18 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         }
         return;
       }
-      // 普通 NPC 交易（非行商）：无货单，只开「卖」侧（基准卖价后端结算，前端不显示预估价）。
+      // 普通 NPC 交易（Bug1）：买+卖双向对称。买侧读对方背包查目录得货单（buildBuyGoods），
+      // 卖侧用她的行囊（herBackpack，渲染处取）。买侧空 → 面板显示「对方没有要出手的东西」。
       if (a.action === "trade") {
         const targetId = (a.target_unit_id ?? "").trim();
         if (!targetId) return;
         setTalk(null);
         setActionResult(null);
-        setTrade({ targetUnitId: targetId, targetName: unitNameOf(targetId, "对方"), goods: [], isMerchant: false });
+        setTrade({
+          targetUnitId: targetId,
+          targetName: unitNameOf(targetId, "对方"),
+          buyGoods: buildBuyGoods(targetId),
+        });
         return;
       }
       setActionBusy(true);
@@ -561,14 +615,20 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         if (a.action === "poi_encounter") {
           const res = await resolvePOIEncounter(sessionId, unitId, tile.q, tile.r);
           setActionResult({ summary: res.summary_zh, lines: outcomeLines(res.outcome, itemCatalog) });
-          // 行商：带货单展开「行商货单」交易小面板（可买可卖）。
+          // 行商：带货单展开交易小面板（可买可卖）。行商货单已铺货，把 merchant_goods（带 buy_price）映成
+          // 统一买侧 BuyGood；与普通 NPC 读背包同一渲染路径（卖侧仍用她的行囊）。
           if (res.kind === "merchant" && res.merchant_unit_id && (res.merchant_goods?.length ?? 0) > 0) {
             setTalk(null);
+            const goods: MerchantGood[] = res.merchant_goods ?? [];
             setTrade({
               targetUnitId: res.merchant_unit_id,
               targetName: unitNameOf(res.merchant_unit_id, "行商"),
-              goods: res.merchant_goods ?? [],
-              isMerchant: true,
+              buyGoods: goods.map((g) => ({
+                item_id: g.item_id,
+                display_name: g.display_name,
+                quantity: g.quantity,
+                buy_price: g.buy_price,
+              })),
             });
           }
         } else {
@@ -590,7 +650,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         setActionBusy(false);
       }
     },
-    [tile, snap, sessionId, unitId, itemCatalog, refresh, fetchAffordances, unitNameOf, onGuidanceSuggested],
+    [tile, snap, sessionId, unitId, itemCatalog, refresh, fetchAffordances, unitNameOf, buildBuyGoods, onGuidanceSuggested],
   );
 
   // onTrade：与行商/NPC 买卖一件（quantity 恒 1，后端权威结算）。买成后货单本地扣减作即时反馈。
@@ -611,7 +671,7 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
             cur
               ? {
                   ...cur,
-                  goods: cur.goods
+                  buyGoods: cur.buyGoods
                     .map((g) => (g.item_id === itemId ? { ...g, quantity: g.quantity - 1 } : g))
                     .filter((g) => g.quantity > 0),
                 }
@@ -752,20 +812,27 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
               )}
             </div>
           )}
-          {/* 交易小面板：行商带货单（买/卖对照 sell_price）；普通 NPC 只开卖侧（基准价后端结算不预估）。 */}
+          {/* 交易小面板（Bug1+Bug2）：任何 NPC 都买+卖双向对称。
+              买侧（对方背包/行商货单）：每件显示买价 `price 文`（查不到目录退「—」）。
+              卖侧（她的行囊）：每件显示预估卖价 floor(price*0.8)（≥1，与后端 merchantSellPrice 一致）。
+              买价/卖价均为**预估**——成交以后端 summary_zh/wallet_after 为准。 */}
           {trade && (
             <div style={resultCardStyle} aria-label="交易">
               <button style={subCloseStyle} aria-label="收起交易" onClick={() => setTrade(null)}>
                 ×
               </button>
               <div style={{ fontSize: 13, color: "#6b4a22" }}>🪙 与「{trade.targetName}」交易</div>
-              {trade.isMerchant && trade.goods.length > 0 && (
-                <div style={{ marginTop: 4 }}>
-                  <div style={{ fontSize: 11, color: "#8a7556" }}>行商货单</div>
-                  {trade.goods.map((g) => (
+              {/* 买侧：对方要出手的东西（行商货单 / 普通 NPC 背包）。空 → 显示「对方没有要出手的东西」。 */}
+              <div style={{ marginTop: 4 }}>
+                <div style={{ fontSize: 11, color: "#8a7556" }}>买入（TA 出手的东西）</div>
+                {trade.buyGoods.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#8a7556", marginTop: 2 }}>对方没有要出手的东西。</div>
+                ) : (
+                  trade.buyGoods.map((g) => (
                     <div key={g.item_id} style={tradeRowStyle}>
                       <span>
-                        {g.display_name} ×{g.quantity} · {g.buy_price}文
+                        {g.display_name} ×{g.quantity}
+                        <span style={{ color: "#8a7556" }}> · {g.buy_price > 0 ? `${g.buy_price}文` : "—"}</span>
                       </span>
                       <button
                         type="button"
@@ -776,34 +843,31 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
                         买下
                       </button>
                     </div>
-                  ))}
-                </div>
-              )}
+                  ))
+                )}
+              </div>
+              {/* 卖侧：她的行囊。每件显示预估卖价（Bug2：卖前即可见，不必卖出去才知道）。 */}
               <div style={{ marginTop: 6 }}>
-                <div style={{ fontSize: 11, color: "#8a7556" }}>
-                  {trade.isMerchant ? "卖给行商" : "把行囊里的东西卖给TA"}
-                </div>
+                <div style={{ fontSize: 11, color: "#8a7556" }}>卖出（把行囊里的东西卖给 TA）</div>
                 {herBackpack.length === 0 ? (
                   <div style={{ fontSize: 12, color: "#8a7556", marginTop: 2 }}>她的行囊空空如也。</div>
                 ) : (
                   herBackpack.map((it, i) => {
-                    // 行商只收货单上标了 sell_price 的物件（其余按钮禁用「不收」）；普通 NPC 全可卖、不显示预估价。
-                    const good = trade.isMerchant ? trade.goods.find((g) => g.item_id === it.item_id) : undefined;
-                    const sellPrice = good && good.sell_price > 0 ? good.sell_price : 0;
-                    const sellable = !trade.isMerchant || sellPrice > 0;
+                    // 预估卖价 = floor(price*0.8)（≥1），从目录查 price 折算；查不到目录退显「—」。
+                    const sellPrice = sellPriceOf(itemCatalog.get(it.item_id)?.price);
                     return (
                       <div key={`${it.item_id}-${i}`} style={tradeRowStyle}>
                         <span>
                           {itemNameOf(it)} ×{it.quantity}
-                          {sellPrice > 0 && <span style={{ color: "#8a7556" }}> · 可卖{sellPrice}文</span>}
+                          <span style={{ color: "#8a7556" }}> · {sellPrice > 0 ? `可卖${sellPrice}文` : "—"}</span>
                         </span>
                         <button
                           type="button"
-                          style={tradeBtnStyle(busyAll || !sellable)}
-                          disabled={busyAll || !sellable}
+                          style={tradeBtnStyle(busyAll)}
+                          disabled={busyAll}
                           onClick={() => void onTrade("sell", it.item_id)}
                         >
-                          {sellable ? "卖出" : "不收"}
+                          卖出
                         </button>
                       </div>
                     );

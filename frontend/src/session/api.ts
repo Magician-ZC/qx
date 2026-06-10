@@ -1807,13 +1807,44 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   return { ok: Boolean(data.ok) };
 }
 
-// ItemCatalogEntry 对齐后端 item.Definition（json tag 小写）：仅取角色档案译名/标注用到的少数字段，其余忽略。
+// ItemCatalogEntry 对齐后端 item.Definition（json tag 小写）：译名/标注/交易报价/装备属性用到的字段，其余忽略。
+// price 是目录标价（买入即此价；卖出口径见 sellPriceOf）；attack/defense/move_bonus 是装备穿上后的属性加成。
 export type ItemCatalogEntry = {
   id: string;
   display_name: string;
   category?: string;
   slot?: string;
+  // 交易报价：price 为买价（与后端目录 price 同口径）；卖价由 sellPriceOf 据此折算（与后端 merchantSellPrice 一致）。
+  price?: number;
+  // 装备穿上后的属性加成（非装备/无加成为 0）：攻/防/移。
+  attack_bonus?: number;
+  defense_bonus?: number;
+  move_bonus?: number;
 };
+
+// sellPriceOf 把目录买价折算成卖价（必须与后端 merchantSellPrice 一致：floor(price*0.8)，至少 1 文）。
+// 前端显示的是**预估价**——成交以后端 summary_zh/wallet_after 为准。price 缺失（未拉到目录）返回 0（调用方退显「—」）。
+export function sellPriceOf(price?: number): number {
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) return 0;
+  return Math.max(1, Math.floor(price * 0.8));
+}
+
+// getItemCatalogFull 拉物品目录并物化成 id→完整 entry 的 Map（交易报价/装备属性用，比 getItemCatalog 多带 price/加成）。
+// 纯读、best-effort；失败回空 Map（调用方据此退显价格「—」、不显属性，绝不打断渲染）。不改既有 getItemCatalog 签名（别处在用）。
+export async function getItemCatalogFull(): Promise<Map<string, ItemCatalogEntry>> {
+  try {
+    const data = await request<{ items?: ItemCatalogEntry[] }>(`/api/items/catalog`);
+    const map = new Map<string, ItemCatalogEntry>();
+    for (const it of data.items ?? []) {
+      if (it && typeof it.id === "string" && it.id !== "") {
+        map.set(it.id, it);
+      }
+    }
+    return map;
+  } catch {
+    return new Map<string, ItemCatalogEntry>();
+  }
+}
 
 // getItemCatalog 拉物品目录（GET /api/items/catalog）并物化成 id→中文名 的 Map（把 item_id 译成中文名）。
 // 译不到的 id 由调用方退显原 id。纯读；失败回空 Map（调用方据此全退原 id，不打断渲染）。
