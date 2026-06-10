@@ -1429,26 +1429,29 @@ export async function resolveModerationReport(
 
 // ---- 跨玩家：异步同意闸 + 跨事件投递 ----
 
-// listPendingConsents 列出某 target 角色待处理的同意请求（其玩家可接受/拒绝）。运营态 X-Ops-Token。
+// listPendingConsents 列出某 target 角色待处理的同意请求（其玩家可接受/拒绝）。
+// 走玩家档路由 /api/fate/consent/*（按账号→角色归属鉴权），强制带 Authorization: Bearer——
+// 玩家自处理自己角色名下的 consent 是玩家权限，而非 ops/GM 运营权限（修复 major-4：生产配 OPS_TOKEN 后旧 ops 路由对玩家 403）。
 export async function listPendingConsents(unitID: string): Promise<ConsentRequest[]> {
   const data = await request<{ pending?: ConsentRequest[] }>(
-    `/api/consent/pending/${encodeURIComponent(unitID)}`,
+    `/api/fate/consent/pending/${encodeURIComponent(unitID)}`,
     undefined,
-    { withOps: true },
+    { bearer: "require" },
   );
   return data.pending ?? [];
 }
 
-// resolveConsent 处理一条同意请求（accept=true 应用关系效果，false 不应用）。运营态 X-Ops-Token。
+// resolveConsent 处理一条同意请求（accept=true 应用关系效果，false 不应用）。
+// 走玩家档路由 /api/fate/consent/:reqId/resolve（后端按账号→target 角色归属鉴权），强制带 Bearer。
 export async function resolveConsent(reqID: string, accept: boolean): Promise<ConsentRequest> {
   return request<ConsentRequest>(
-    `/api/consent/${encodeURIComponent(reqID)}/resolve`,
+    `/api/fate/consent/${encodeURIComponent(reqID)}/resolve`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accept }),
     },
-    { withOps: true },
+    { bearer: "require" },
   );
 }
 

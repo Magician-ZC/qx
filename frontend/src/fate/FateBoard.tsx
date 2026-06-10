@@ -315,8 +315,10 @@ const boardLoadingStyle: React.CSSProperties = {
 
 // allUnitsOf 把一份快照里各类单位（玩家/敌方/据点 NPC/野外散人 + 共享世界同区其他玩家）汇成可查列表，
 // 供点格子时定位「这格上站的是谁」与按 unit_id 反查名字。
-// other_world_units（共享世界 Phase 2）也并进来仅供**只读定位/反查名字**——它们绝不进任何可操作链路
-// （交易/交谈只在 player_units/ambient_units/wild_units 里找目标，查不到 peer 自然不给动作按钮，那是 Phase 3）。
+// other_world_units（共享世界同区别玩家主角）也并进来仅供**只读定位/反查名字**——它们绝不进任何**玩家直驱**可操作链路
+// （交易/交谈只在 player_units/ambient_units/wild_units 里找目标，查不到 peer 自然不给动作按钮）。
+// Phase 3 的跨玩家七交互（结识/反目/复仇）是**后端玩法内自动发起**（同区相遇按关系/概率确定性触发，走零和裁决 + 异步同意）、
+// 结果经命运 feed 呈现——前端无玩家发起入口（设计宪法红线：一个玩家绝不直接对另一玩家的角色发起写）。
 function allUnitsOf(snap: SessionSnapshot | null): BattleUnit[] {
   if (!snap) return [];
   return [
@@ -334,7 +336,8 @@ type TileOccupant = {
   lineage: string;
   faction: string;
   isHer: boolean;
-  // isPeer：共享世界 Phase 2「同区其他真人玩家的主角」。仅只读展示「这是另一位玩家」，不给交互/操作按钮。
+  // isPeer：共享世界「同区其他真人玩家的主角」。仅只读展示「这是另一位玩家」，不给玩家直驱交互/操作按钮——
+  // 跨玩家七交互由后端玩法内自动发起（Phase 3），结果经命运 feed 呈现（设计宪法红线：玩家不直接对他人角色发起写）。
   isPeer: boolean;
 };
 
@@ -619,9 +622,11 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
         const namedOther = occupants.find((o) => !o.isHer);
         let draft = "";
         if (namedOther) {
-          // 别的真人玩家（Phase 2 只读）：指引草稿用「远远望见」措辞，不暗示能对其直接动手（交互是 Phase 3）。
+          // 别的真人玩家：Phase 3 跨玩家交互是**玩法内自动发起**（同区相遇即按关系/概率确定性触发结识/反目/复仇，
+          // 走零和裁决 + 异步同意，结果经命运 feed 呈现）——玩家不能替她指定向某位 peer「动手」（设计宪法红线：
+          // 一个玩家绝不直接对另一玩家的角色发起写）。故草稿仍是「留意/惦记」这缕同游的命，而非下达交互指令。
           draft = namedOther.isPeer
-            ? `远远望见另一位旅人「${namedOther.name}」`
+            ? `惦记着另一位旅人「${namedOther.name}」，看这两缕命会不会相缠`
             : `留意「${namedOther.name}」`;
         } else if (tilePois.length > 0) {
           draft = `去探一探那处${tilePois[0].label}`;
@@ -1239,7 +1244,8 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
                   <div style={{ fontSize: 14, color: "#4a3417" }}>
                     {o.name}
                     {o.isHer && <span style={{ fontSize: 11, color: "#a83a28", marginLeft: 6 }}>· 就是她</span>}
-                    {/* 共享世界 Phase 2：别的真人玩家——紫金徽记 + 「另一位玩家」，只读告知（不可操作，交互是 Phase 3）。 */}
+                    {/* 共享世界：别的真人玩家——紫金徽记 + 「另一位玩家」。
+                        Phase 3 起，同区相遇即可能玩法内**自动**生出交互（结识/反目/复仇），结果落她的命运 feed。 */}
                     {o.isPeer && !o.isHer && (
                       <span
                         style={{
@@ -1256,7 +1262,13 @@ export function FateBoard({ sessionId, unitId, refreshSignal, onGuidanceSuggeste
                     )}
                   </div>
                   {o.isPeer && !o.isHer ? (
-                    <div style={whoCardLineStyle}>这是另一位玩家「{o.name}」，与你同游此地（暂只可远观）。</div>
+                    // Phase 3 跨玩家交互=玩法内自动发起（同区相遇按关系/概率确定性触发结识/反目/复仇，走零和裁决 + 异步同意）。
+                    // 玩家无「主动对该 peer 发起」入口（设计宪法红线：绝不直接对另一玩家的角色发起写）——
+                    // 她与这缕命相缠与否由世界推进自然决定，结果（结识了/起了嫌隙/被记下一笔）会冒进右侧命运 feed。
+                    <div style={whoCardLineStyle}>
+                      这是另一位玩家「{o.name}」，与你的她同游此地。两缕命若在此处相缠（结识、生隙、乃至结仇），
+                      自会在「她近来经历的」里写下一笔——你无需、也无法替她去拨弄别人的命。
+                    </div>
                   ) : (
                     (o.lineage || o.faction) && (
                       <div style={whoCardLineStyle}>

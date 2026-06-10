@@ -45,7 +45,10 @@ func TestSevenInteractionsAndConsent(t *testing.T) {
 	}
 
 	// 高后果交互（联姻，层3 requires_consent）：建 pending，关系暂不变。
-	affBefore := relAxis(t, service, "affection", "a", "b")
+	// 跨玩家硬不变量：accept 写的是**接受方 b 自己 owner 一侧**出边 b→a（不写发起方 a 的 a→b），故这里追踪 b→a。
+	affBefore := relAxis(t, service, "affection", "b", "a")
+	// 发起方 a→b 出边的 affection 基线（结识只增 a→b trust，affection 仍 0）——accept 后它绝不应被改（红线）。
+	affAB0 := relAxis(t, service, "affection", "a", "b")
 	res2, err := service.RecordSevenInteraction(ctx, "w1", "a", "b", InteractionMarriage, 8)
 	if err != nil {
 		t.Fatalf("marriage: %v", err)
@@ -53,7 +56,7 @@ func TestSevenInteractionsAndConsent(t *testing.T) {
 	if res2.Applied || res2.Tier != "requires_consent" || res2.ConsentRequestID == "" {
 		t.Fatalf("联姻应需同意、暂不应用，得 %+v", res2)
 	}
-	if relAxis(t, service, "affection", "a", "b") != affBefore {
+	if relAxis(t, service, "affection", "b", "a") != affBefore {
 		t.Fatalf("待同意期间关系不应变")
 	}
 
@@ -63,13 +66,17 @@ func TestSevenInteractionsAndConsent(t *testing.T) {
 		t.Fatalf("b 应有 1 条待决同意，得 %v err=%v", pend, err)
 	}
 
-	// accept → 应用 affection（联姻 +5）。
+	// accept → 应用接受方本侧出边 b→a 的 affection（联姻 +5）。
 	req, err := service.ResolveConsentRequest(ctx, res2.ConsentRequestID, true)
 	if err != nil || req.Status != "accepted" {
 		t.Fatalf("accept 应置 accepted，得 %+v err=%v", req, err)
 	}
-	if relAxis(t, service, "affection", "a", "b") <= affBefore {
-		t.Fatalf("accept 后应增 a→b 好感")
+	if relAxis(t, service, "affection", "b", "a") <= affBefore {
+		t.Fatalf("accept 后应增接受方本侧 b→a 好感")
+	}
+	// 红线：绝不替发起方 a 写其出边 a→b 的 affection（a→b 由结识既存，但 affection 必须仍为基线、未被 accept 改）。
+	if relAxis(t, service, "affection", "a", "b") != affAB0 {
+		t.Fatalf("跨玩家硬不变量被破坏：accept 不应改发起方 a 的出边 a→b（affection 期望 %v 得 %v）", affAB0, relAxis(t, service, "affection", "a", "b"))
 	}
 	// 重复 resolve 守门。
 	if _, err := service.ResolveConsentRequest(ctx, res2.ConsentRequestID, true); err == nil {

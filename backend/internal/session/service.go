@@ -970,8 +970,9 @@ func (service *Service) settleExecutionToDeploymentBoundary(ctx context.Context,
 			appendLog(state, "world", fmt.Sprintf("世界Boss自动刷新失败：%v", err), "", "")
 		}
 	}
-	service.scanAndMatch(ctx, state, units)                    // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort）
+	service.scanAndMatch(ctx, state, units)                    // 撮合自动扫描（QUNXIANG_AUTO_MATCH 默认关，低频确定性触发，best-effort；共享世界时候选池跨 session）
 	service.scanAndSocialize(ctx, state, units)                // 社交自治扫描（QUNXIANG_AUTO_SOCIAL 默认开，低频确定性，best-effort，仅本会话单位对、WorldID 非空时生效）
+	service.scanAndSocializeCrossPlayer(ctx, state, units)     // 跨玩家七交互自动发起（QUNXIANG_AUTO_SOCIAL_CROSS 默认关，仅共享世界局，同区相遇真人 A 对 B 发起，走 consent 三档，best-effort）
 	service.scanFactionConflicts(ctx, state, units)            // 阵营冲突遭遇扫描（QUNXIANG_FACTION_PVE 默认关零行为；F4 H3：不再 append EnemyUnitIDs 走离线自动战，只出可接管命运卡）
 	service.scanExclusiveContestsAtBoundary(ctx, state, units) // 排他标的零和裁决（QUNXIANG_ZEROSUM_CONTEST 默认开，低频确定性，best-effort，先做联姻冲突）
 	service.wanderAmbientUnits(ctx, state, units)              // 出生点公共 NPC 轻量游走（QUNXIANG_AMBIENT_WANDER 默认关零行为；纯代码零 LLM，让命运地图舞台活起来）

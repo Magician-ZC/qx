@@ -207,6 +207,18 @@ func main() {
 		close(fateTickDone)
 	}()
 
+	// 跨玩家 consent 超时 sweep（修复 major-3）：独立于 FATE_AUTOTICK 的全局低频清理，**恒开**（无 flag 门控）。
+	// 只做全局安全操作——把超 72h TTL 的 pending 置 expired + 对层3 给发起方投回响卡（写发起方自己收件箱，不写他人 units/relations、不跑 LLM）——
+	// 保证「真离线、从不上线」的 B 的层2/3 pending 也按 TTL 失效，不无限挂起。层2「据归因自治接受」仍由 target 自己 session 边界驱动。
+	// 默认 10min 一拍（QUNXIANG_CONSENT_SWEEP_SECONDS 可调），随 ctx 取消优雅退出。
+	consentSweepDone := make(chan struct{})
+	go func() {
+		sweepSvc := session.NewServiceWithColdStore(db, aiService, coldStore)
+		interval := time.Duration(envIntDefault("QUNXIANG_CONSENT_SWEEP_SECONDS", 600)) * time.Second
+		sweepSvc.RunConsentExpirySweepLoop(ctx, interval)
+		close(consentSweepDone)
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("backend listening", "addr", cfg.HTTPAddr, "db_driver", cfg.DBDriver, "sqlite_path", cfg.SQLitePath)
@@ -235,6 +247,13 @@ func main() {
 		case <-fateTickDone:
 		case <-time.After(10 * time.Second):
 			logger.Warn("fate auto-tick did not stop in time")
+		}
+
+		// 等 consent 超时 sweep 循环优雅退出（ctx 已取消，下一次 select 即返回；有界等待防卡死）。
+		select {
+		case <-consentSweepDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("consent expiry sweep did not stop in time")
 		}
 
 		logger.Info("backend stopped")

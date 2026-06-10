@@ -141,9 +141,14 @@ func TestAutonomousConsentResponse_GroundedAccepts(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("有源（显著关系）应自治接受 1 条，得 %d", accepted)
 	}
-	// accept 应用本侧 a→b 关系增量（联姻 affection+5）。
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 5 {
-		t.Fatalf("自治接受后 a→b affection 应为联姻增量 5，得 %v", aff)
+	// 跨玩家硬不变量：accept 只写**接受方 b 自己 owner 一侧**出边 b→a（联姻 affection+5）。
+	// b→a 已种 affection=7，叠加 +5=12，clamp 到上限 10。
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 10 {
+		t.Fatalf("自治接受后接受方本侧 b→a affection 应为 7+5 clamp 到 10，得 %v", aff)
+	}
+	// 红线：绝不替发起方 a 写其出边 a→b。
+	if relationRowCount(t, service, "a", "b") != 0 {
+		t.Fatalf("跨玩家硬不变量被破坏：接受方结算不应替发起方写 a→b 出边")
 	}
 	if st := cgConsentState(t, service, res.EventID); st != consentStateAccepted {
 		t.Fatalf("接受后 consent_state 应为 %q，得 %q", consentStateAccepted, st)
@@ -174,11 +179,11 @@ func TestAutonomousConsentResponse_UngroundedHolds(t *testing.T) {
 	if accepted != 0 {
 		t.Fatalf("无源应保守隐忍 0 接受，得 %d", accepted)
 	}
-	// 仍 pending、关系不变。
+	// 仍 pending、关系不变（接受方本侧出边 b→a 也未写）。
 	if pend, _ := service.ListPendingConsents(ctx, "b"); len(pend) != 1 {
 		t.Fatalf("隐忍应留 pending，得 %d 条", len(pend))
 	}
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 0 {
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 0 {
 		t.Fatalf("隐忍不应用任何关系增量，得 affection=%v", aff)
 	}
 	if st := cgConsentState(t, service, res.EventID); st != consentStateDeclined {
@@ -213,8 +218,8 @@ func TestConsentTimeout_RequiresConsentEchoesToInitiator(t *testing.T) {
 	if st := cgConsentState(t, service, res.EventID); st != consentStateTimeout {
 		t.Fatalf("层3 超时 consent_state 应为 %q，得 %q", consentStateTimeout, st)
 	}
-	// 不应用任何关系效果（联姻 affection 增量未落）。
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 0 {
+	// 不应用任何关系效果（联姻 affection 增量未落，接受方本侧出边 b→a 也未写）。
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 0 {
 		t.Fatalf("超时失效不应用关系效果，得 affection=%v", aff)
 	}
 }
@@ -240,12 +245,12 @@ func TestConsentTimeout_ContestedCharterFallback(t *testing.T) {
 	if _, err := service.ExpireStaleConsents(ctx, "9999-12-31 00:00:00"); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	// 层2 兜底接受 → 不再 pending，关系效果应用（反目 trust-3/rivalry+3）。
+	// 层2 兜底接受 → 不再 pending，关系效果应用到**接受方本侧出边 b→a**（反目 trust-3/rivalry+3）。
 	if pend, _ := service.ListPendingConsents(ctx, "b"); len(pend) != 0 {
 		t.Fatalf("层2 兜底接受后不应仍 pending，得 %d 条", len(pend))
 	}
-	if tr := relAxis(t, service, "trust", "a", "b"); tr != -3 {
-		t.Fatalf("反目兜底接受应应用 a→b trust 增量 -3，得 %v", tr)
+	if tr := relAxis(t, service, "trust", "b", "a"); tr != -3 {
+		t.Fatalf("反目兜底接受应应用接受方本侧 b→a trust 增量 -3，得 %v", tr)
 	}
 	if st := cgConsentState(t, service, res.EventID); st != consentStateAccepted {
 		t.Fatalf("层2 兜底接受 consent_state 应为 %q，得 %q", consentStateAccepted, st)
@@ -273,8 +278,8 @@ func TestSettleConsentsAtBoundary_AutonomousReachesNoCharterUnit(t *testing.T) {
 	if pend, _ := service.ListPendingConsents(ctx, "b"); len(pend) != 0 {
 		t.Fatalf("无宪章但有源的 A 应在边界被自治接受，pending 应清空，得 %d 条", len(pend))
 	}
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 5 {
-		t.Fatalf("边界自治接受后应应用联姻 affection 增量 5，得 %v", aff)
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 5 {
+		t.Fatalf("边界自治接受后应应用接受方本侧 b→a 联姻 affection 增量 5，得 %v", aff)
 	}
 }
 
@@ -293,10 +298,11 @@ func cgSeedUnitInSession(t *testing.T, ctx context.Context, repo *unit.Repositor
 // TestSettleConsentsAtBoundary_DoesNotWriteOtherSessionRelations 是本次 HIGH 修复的核心回归（跨玩家硬不变量）：
 // 两局共享同一 world，离线 A(a1)/发起方 B(b1) 都属 session-1；A 对 B 有显著关系（若被处理必接受）。
 // session-2 推进部署边界（settleConsentsAtBoundary，State{ID:"s2"}）——它既不辖 A 也不辖 B——**绝不得**替 session-1 的
-// 离线 A 自治接受、绝不得直写发起方 B 一侧 (b1→a1) relations。仿 blood_feud_test 的「绝不直写他人一侧」断言。
+// 离线 A 自治接受、绝不得写 session-1 的任何关系（发起方 B 一侧 b1→a1、接受方 A 一侧 a1→b1 均不得）。
 //
-// 修复前：listPendingConsentTargets 全库扫 pending（无 session/world 谓词），session-2 边界会捞到 a1 的 pending、
-// 经 autoResolveConsentsByCharter→ResolveConsentRequest(true)→applyRelationShiftTx 直写 source=b1 的 relations，越界污染 session-1。
+// 作用域门修复前：listPendingConsentTargets 全库扫 pending（无 session 谓词），session-2 边界会捞到 a1 的 pending 越界结算。
+// major-2 修复后：accept 只写**接受方 a1 自己 owner 一侧**出边 a1→b1（不再写发起方 b1 的出边）；本测试同时回归
+// 「a1 的合法 owner session-1 才结算」与「accept 写的是接受方本侧出边、绝不碰发起方 b1→a1 出边」两道红线。
 func TestSettleConsentsAtBoundary_DoesNotWriteOtherSessionRelations(t *testing.T) {
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()
@@ -334,13 +340,14 @@ func TestSettleConsentsAtBoundary_DoesNotWriteOtherSessionRelations(t *testing.T
 		t.Fatalf("session-2 不辖 a1，pending 应原封不动留 1 条，得 %d 条", len(pend))
 	}
 
-	// ③ 正向对照：a1 的合法 owner session-1 推进边界 → 才会自治接受并写本侧 (b1→a1) 关系。
+	// ③ 正向对照：a1 的合法 owner session-1 推进边界 → 才会自治接受并写**接受方 a1 自己 owner 一侧**出边 (a1→b1)。
 	service.settleConsentsAtBoundary(ctx, &State{ID: "s1"})
 	if pend, _ := service.ListPendingConsents(ctx, "a1"); len(pend) != 0 {
 		t.Fatalf("session-1（a1 的 owner）边界应自治接受、清空 pending，得 %d 条", len(pend))
 	}
-	if aff := relAxis(t, service, "affection", "b1", "a1"); aff != 5 {
-		t.Fatalf("owner session-1 自治接受后应写本侧联姻 affection 增量 5，得 %v", aff)
+	// 接受方 a1 的本侧出边 a1→b1：已种 affection=0，联姻 +5=5。绝不写发起方 b1 的出边（上方 ① 已断言 b1→a1 为 0 行）。
+	if aff := relAxis(t, service, "affection", "a1", "b1"); aff != 5 {
+		t.Fatalf("owner session-1 自治接受后应写接受方本侧 a1→b1 联姻 affection 增量 5，得 %v", aff)
 	}
 }
 
@@ -416,6 +423,44 @@ func TestExpireStaleConsents_ContestedScopedFallbackIsolation(t *testing.T) {
 	// 但全局 expire 仍把超 TTL 的 pending 清成 expired（不写他人 relations，可保持全局——避免别局 pending 永挂）。
 	if pend, _ := service.ListPendingConsents(ctx, "a1"); len(pend) != 0 {
 		t.Fatalf("超 TTL 的 pending 应被全局置 expired，得 %d 条仍 pending", len(pend))
+	}
+}
+
+// TestSweepStaleConsentsTimeoutOnly_ExpiresOfflineWithoutWritingRelations 是 major-3 修复的核心回归：
+// 一个**真离线、从不推进 session** 的 B 的层3 pending，被全局 sweep（不依赖 FATE_AUTOTICK / 不依赖任何 session 边界）
+// 按 TTL 失效 + 给发起方投回响卡，且 sweep **绝不写任何关系**（层2 自治接受不在全局 sweep 内）。
+func TestSweepStaleConsentsTimeoutOnly_ExpiresOfflineWithoutWritingRelations(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	cgSeedWorldAndUnit(t, ctx, service, repo, "w1", "a", "b")
+	// 给接受方 b 对发起方 a 种显著关系——证明：即便「若被层2 自治接受会写关系」，全局 sweep 也绝不替它写（只 expire + 层3 回响）。
+	cgSeedRelationRow(t, service, "b", "a", 0, 0, 7, 0)
+
+	// 层3 联姻：建 target=b 的 pending（b 从此「真离线」——下面绝不调用任何 settleConsentsAtBoundary）。
+	res, err := service.RecordSevenInteraction(ctx, "w1", "a", "b", InteractionMarriage, 8)
+	if err != nil || res.ConsentRequestID == "" {
+		t.Fatalf("联姻应建 pending，得 %+v err=%v", res, err)
+	}
+
+	// 全局 sweep：以远未来为「现在」使其超 TTL（确定性）。不依赖任何 session 边界 / flag。
+	n, err := service.sweepStaleConsentsTimeoutOnly(ctx, "9999-12-31 00:00:00")
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("全局 sweep 应至少 expire 1 条离线 pending，得 %d", n)
+	}
+	// ① pending 被置 expired（不再挂起）。
+	if pend, _ := service.ListPendingConsents(ctx, "b"); len(pend) != 0 {
+		t.Fatalf("全局 sweep 后离线 B 的 pending 应被置 expired，得 %d 条仍 pending", len(pend))
+	}
+	// ② 层3 给发起方 a 投了回响卡。
+	if got := cgCardCount(t, service, "a", events.ReasonCrossConsentTimeout); got < 1 {
+		t.Fatalf("层3 全局 sweep 超时应给发起方投回响卡，得卡数 %d", got)
+	}
+	// ③ 红线：全局 sweep 绝不跑层2 自治接受、绝不写任何关系（接受方本侧出边 b→a 的 affection 仍是种入的 7，未被 +5）。
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 7 {
+		t.Fatalf("全局 sweep 绝不应写关系（层2 自治接受不在 sweep 内），b→a affection 应仍为种入的 7，得 %v", aff)
 	}
 }
 

@@ -52,8 +52,8 @@ func TestResolveConsent_AcceptCommitsAtomically(t *testing.T) {
 	if res.ConsentRequestID == "" || res.Applied {
 		t.Fatalf("联姻应建待决请求且暂不应用，得 %+v", res)
 	}
-	// 待同意期间关系不应有任何行。
-	if relAxis(t, service, "affection", "a", "b") != 0 {
+	// 待同意期间关系不应有任何行（接受方 b 的本侧出边 b→a 也尚未写）。
+	if relAxis(t, service, "affection", "b", "a") != 0 {
 		t.Fatalf("待同意期间不应有关系增量")
 	}
 
@@ -68,11 +68,16 @@ func TestResolveConsent_AcceptCommitsAtomically(t *testing.T) {
 	if got := consentStatus(t, service, res.ConsentRequestID); got != "accepted" {
 		t.Fatalf("DB status 应为 accepted，得 %q", got)
 	}
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 5 {
-		t.Fatalf("accept 后 a→b affection 应为联姻增量 5，得 %v", aff)
+	// 跨玩家硬不变量：accept 只写**接受方 b 自己 owner 一侧**出边 b→a（绝不替发起方 a 写 a→b）。
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 5 {
+		t.Fatalf("accept 后接受方本侧 b→a affection 应为联姻增量 5，得 %v", aff)
 	}
-	if tr := relAxis(t, service, "trust", "a", "b"); tr != 3 {
-		t.Fatalf("accept 后 a→b trust 应为联姻增量 3，得 %v", tr)
+	if tr := relAxis(t, service, "trust", "b", "a"); tr != 3 {
+		t.Fatalf("accept 后接受方本侧 b→a trust 应为联姻增量 3，得 %v", tr)
+	}
+	// 红线回归：发起方 a 的出边 a→b 绝不被接受方结算写入。
+	if relationRowCount(t, service, "a", "b") != 0 {
+		t.Fatalf("跨玩家硬不变量被破坏：接受方结算不应替发起方写 a→b 出边")
 	}
 
 	// 重复 resolve 守门：已 accepted 不能再处理。
@@ -135,8 +140,8 @@ func TestResolveConsent_RelationFailureRollsBackAndRetriable(t *testing.T) {
 	if got := consentStatus(t, service, res.ConsentRequestID); got != "accepted" {
 		t.Fatalf("重试后 DB status 应为 accepted，得 %q", got)
 	}
-	if aff := relAxis(t, service, "affection", "a", "b"); aff != 5 {
-		t.Fatalf("重试 accept 后关系增量应生效（affection=5），得 %v", aff)
+	if aff := relAxis(t, service, "affection", "b", "a"); aff != 5 {
+		t.Fatalf("重试 accept 后接受方本侧关系增量应生效（b→a affection=5），得 %v", aff)
 	}
 }
 

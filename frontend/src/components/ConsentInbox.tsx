@@ -3,7 +3,8 @@
    联姻/反目/复仇/开战。这些后果层互动需要被请求方先点头才生效（异步同意），故由其玩家
    在此逐条「接受/拒绝」（resolveConsent）。另有「世界事件主动同步」按钮：把世界总线上与该
    角色有关的跨玩家事件主动拉进她的命运收件箱（surfaceCrossEvents），告知「N 件与你相关的
-   世界之事已惊动」。鉴权：consent 端点需 X-Ops-Token，原型默认放行，无 token 也可用。
+   世界之事已惊动」。鉴权：consent 走玩家档路由 /api/fate/consent/*（强制 Bearer，后端按账号→角色归属校验，
+   只能列/处理 target 属本账号角色的 pending），不再复用 ops/GM 的 X-Ops-Token 路由——生产配 OPS_TOKEN 后玩家仍可用。
    祖魂语气：玩家是替后人拿主意的先祖，措辞不出现「命令/操控」。自包含内联样式。*/
 
 import { useCallback, useEffect, useMemo, useState } from "react";

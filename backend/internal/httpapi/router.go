@@ -2625,6 +2625,59 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
+	// ── 玩家档跨玩家同意收件箱（修复 major-4）──────────────────────────────────────────
+	// 玩家处理落到自己角色名下的跨玩家同意请求（联姻/结盟/反目等层2/3 待决卡），是**玩家权限**而非 ops/GM 运营权限。
+	// 既有 /api/consent/* 走 opsViewer/opsWriter（生产配 OPS_TOKEN 后对普通玩家 403），故玩家专用一条非 ops-gated 路由，
+	// 按「账号→角色归属」鉴权：只能列/处理 target 属本账号角色的 pending（AccountOwnsUnit：units.session_id→account_id）。
+	// 鉴权用 authedAccountID（Bearer，强制），与 compliance/billing「只能操作自己账户」同口径——未登录/越权一律拒。
+	// 保留 /api/consent/* 作 ops 巡检/兜底。
+	router.GET("/api/fate/consent/pending/:unitId", func(c *gin.Context) {
+		accountID, ok := authedAccountID(deps.Accounts, c)
+		if !ok {
+			return // authedAccountID 已写 401/503 响应
+		}
+		unitID := strings.TrimSpace(c.Param("unitId"))
+		svc := newSessionService()
+		if !svc.AccountOwnsUnit(c.Request.Context(), accountID, unitID) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "unit does not belong to your account"})
+			return
+		}
+		reqs, err := svc.ListPendingConsents(c.Request.Context(), unitID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"pending": reqs})
+	})
+	router.POST("/api/fate/consent/:reqId/resolve", func(c *gin.Context) {
+		accountID, ok := authedAccountID(deps.Accounts, c)
+		if !ok {
+			return
+		}
+		var body struct {
+			Accept bool `json:"accept"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		reqID := strings.TrimSpace(c.Param("reqId"))
+		svc := newSessionService()
+		// 归属校验：先读出该同意请求，确认其 target 角色属本账号，才允许处理（防越权处理他人角色的 pending）。
+		cr, err := svc.GetConsentRequest(c.Request.Context(), reqID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "consent request not found"})
+			return
+		}
+		if !svc.AccountOwnsUnit(c.Request.Context(), accountID, cr.TargetID) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "consent target does not belong to your account"})
+			return
+		}
+		resolved, err := svc.ResolveConsentRequest(c.Request.Context(), reqID, body.Accept)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, resolved)
+	})
+
 	router.POST("/api/fate/decisions/:decisionId/resolve", func(c *gin.Context) {
 		var request struct {
 			SessionID   string `json:"session_id"`

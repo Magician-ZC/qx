@@ -199,6 +199,9 @@ const (
 	ReasonCrossConsentPending  ReasonCode = "CROSS_CONSENT_PENDING"  // 跨玩家高后果交互挂起，等离线 A 的角色自治回应
 	ReasonCrossConsentTimeout  ReasonCode = "CROSS_CONSENT_TIMEOUT"  // 跨玩家同意超时（按档失效/宪章兜底回应）
 	ReasonCrossDerived         ReasonCode = "CROSS_DERIVED"          // 跨玩家事件沿关系图衍生到第三方（你信任的人被偷袭了）
+	// 跨玩家硬不变量审计（共享世界 Phase 3）：一次「越界直写他人 units」企图被 storage/session 守卫挡下的留痕。
+	// 流程事件（EmitProcessEvent，不改保护字段、不触 FK）——红线被触发即落它，使越界企图可追溯（设计宪法红线 + §5 风险 6）。
+	ReasonCrossWriteDenied ReasonCode = "CROSS_WRITE_DENIED"
 
 	// 命运开盒「生活 beat」（大世界页游核心循环）：主世界玩家角色在执行期自治走过的一拍日常
 	// （她做了什么/去哪/遇见谁/心情），被低调 surface 进命运 feed，让「她近来经历的」始终有内容。
@@ -347,6 +350,7 @@ func Catalog() []ReasonCodeDefinition {
 		{Code: ReasonCrossConsentPending, Category: CategoryLifecycle, DisplayName: "待她回应", DefaultReasonText: "有人对她做了件大事，等她的命来回应", StatDomains: []string{}, ImportanceMin: 5, ImportanceMax: 8},
 		{Code: ReasonCrossConsentTimeout, Category: CategoryLifecycle, DisplayName: "未及回应", DefaultReasonText: "她的命没来得及回应，那桩事自有了结", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 7},
 		{Code: ReasonCrossDerived, Category: CategoryRelation, DisplayName: "殃及池鱼", DefaultReasonText: "她信任的人出了事，这事也牵到了她", StatDomains: []string{}, ImportanceMin: 4, ImportanceMax: 8},
+		{Code: ReasonCrossWriteDenied, Category: CategoryGovernance, DisplayName: "越界被拒", DefaultReasonText: "一次试图改写他人角色的写入被红线挡下了", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 3},
 		{Code: ReasonLifeBeat, Category: CategoryLifecycle, DisplayName: "她的日常", DefaultReasonText: "她又走过了寻常的一段日子", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 4},
 		{Code: ReasonPlayerTileAction, Category: CategoryLifecycle, DisplayName: "依你之意而为", DefaultReasonText: "她依你的指点，在这片土地上动了手", StatDomains: []string{}, ImportanceMin: 1, ImportanceMax: 5},
 		// 任务系统（阶段3 §5）：流程事件，StatDomains 空（发奖的状态变更另走 ReasonEconomyReward + 背包路径）。

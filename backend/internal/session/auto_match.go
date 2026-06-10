@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"hash/fnv"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,9 @@ const (
 	autoMatchSlots = 4
 	// autoMatchMaxCandidates 单次扫描最多取的候选数（控算量；按确定性强度截断）。
 	autoMatchMaxCandidates = 12
+	// autoMatchCrossPoolMax 共享世界 Phase 3 单次撮合最多并入的**跨 session** 候选数上限（防一个热门 zone 把跨 session
+	// 候选拉爆；按 unitID 确定性排序后取前 N，view-independent、可复现）。本 session 单位不占此额度（它们先入池）。
+	autoMatchCrossPoolMax = 24
 	// autoMatchKind / autoMatchLabel 自动撮合产出的社会客体类型与标签（party=临时同行小队）。
 	autoMatchKind  = "party"
 	autoMatchLabel = "野外同行"
@@ -133,6 +137,11 @@ func (service *Service) scanAndMatch(ctx context.Context, state *State, units []
 // buildMatchCandidates 把本局玩家阵营、且当日未超日配额的存活角色构造成带四因子的撮合候选。
 // 四因子全部确定性：地理临近=region 同区度（同主导 region 满分，否则按质心 hex 距衰减）；钩子契合=pair-stable 的 FNV 哈希；
 // 关系交集=该角色对其余候选的现有四轴关系强度；密度调节=锚密度反向（锚越少越易被撮合，反垄断）。
+//
+// 共享世界 Phase 3 分叉（撮合候选池跨 session）：inSharedWorld(state) 且当前区非空时，候选池在「本 session 单位」之外，
+// **额外并入同区跨 session 的活跃单位**（含别玩家的 protagonist）——复用 enrichMatchPoolWithSharedWorldPeers
+// 经 ListActiveByRegion(worldID#zoneID) 拉同区 active 单位，喂进同一套 MatchScore 四因子。这样真人 A、B 进同一撮合候选池。
+// 私有档 / flag 关：跨 session 并入整段 no-op，候选池仍只含本 session 单位（零影响）。
 func (service *Service) buildMatchCandidates(ctx context.Context, state *State, units []unit.Record) []MatchCandidate {
 	// 先筛出本局玩家阵营、存活、非战斗、且当日新绑定未达上限的角色作为候选池。
 	pool := make([]unit.Record, 0, len(units))
@@ -150,6 +159,8 @@ func (service *Service) buildMatchCandidates(ctx context.Context, state *State, 
 		}
 		pool = append(pool, u)
 	}
+	// 共享世界：把同区跨 session 的活跃单位（别玩家角色）并入候选池（私有档/flag 关 → no-op，pool 不变）。
+	pool = service.enrichMatchPoolWithSharedWorldPeers(ctx, state, pool)
 	if len(pool) < 2 {
 		return nil
 	}
@@ -179,6 +190,70 @@ func (service *Service) buildMatchCandidates(ctx context.Context, state *State, 
 		})
 	}
 	return candidates
+}
+
+// enrichMatchPoolWithSharedWorldPeers 在共享世界局把**同区跨 session 的活跃单位**并入撮合候选池（Phase 3）。
+// 仅 inSharedWorld(state)（flag 开 + 共享世代）且 CurrentZoneID 非空时生效；否则原样返回 localPool（私有档/flag 关零影响）。
+//
+// 候选来源：ListActiveByRegion(sharedRegionID=worldID#zoneID)（Phase 2 已把同区单位锚到此复合 region，跨 session 可见）——
+// **只读**载入，绝不写他人 units。过滤：
+//   - 去重：本 session 已在 localPool / 属本 session 的单位不重并入（它们已在池）。
+//   - 存活 + 当日新绑定未达上限（dailyBindExhausted 与本 session 单位同口径，反大 R 垄断 + 反洪泛）。
+//   - 死亡/无命单位剔除。
+// 控量：跨 session 并入数受 autoMatchCrossPoolMax 截断（按 unitID 确定性排序后取前 N，view-independent、可复现）。
+//
+// 注意：被撮进的社会客体成员可跨 session（socialobject.AddMember 支持多成员、按 (object_id,unit_id) 幂等）——
+// MatchIntoSocialObject 对每个胜出成员各自 AddMember + 留痕，本侧绝不直写他人 units，满足跨玩家硬不变量。
+func (service *Service) enrichMatchPoolWithSharedWorldPeers(ctx context.Context, state *State, localPool []unit.Record) []unit.Record {
+	if service == nil || service.units == nil || !inSharedWorld(state) {
+		return localPool
+	}
+	zoneID := strings.TrimSpace(state.CurrentZoneID)
+	if zoneID == "" {
+		return localPool
+	}
+	regionID := sharedRegionID(state.WorldID, zoneID)
+	if regionID == "" {
+		return localPool
+	}
+	peers, err := service.units.ListActiveByRegion(ctx, regionID)
+	if err != nil || len(peers) == 0 {
+		return localPool // 查错/同区无别人：best-effort 回退，候选池只含本 session 单位。
+	}
+
+	// 去重集合：本 session 已在 localPool 的 + 属本 session 的单位（按 sessionID 兜底），绝不重复并入。
+	seen := make(map[string]struct{}, len(localPool)+len(peers))
+	for i := range localPool {
+		seen[localPool[i].ID] = struct{}{}
+	}
+
+	// 按 unitID 确定性排序后截断（view-independent，与「谁先扫到」无关、可复现）。
+	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
+	added := 0
+	out := localPool
+	for i := range peers {
+		if added >= autoMatchCrossPoolMax {
+			break
+		}
+		p := peers[i]
+		if _, dup := seen[p.ID]; dup {
+			continue
+		}
+		if strings.TrimSpace(p.SessionID) == strings.TrimSpace(state.ID) {
+			continue // 双保险：本 session 单位（即便 localPool 漏收）绝不当「跨 session 候选」重并入。
+		}
+		if p.Status.LifeState == unit.LifeStateDead || p.Status.LivesRemaining <= 0 {
+			continue
+		}
+		// 跨 session 候选同样受当日新绑定日配额约束（反大 R 垄断社交、反洪泛）。
+		if service.dailyBindExhausted(ctx, p.ID) {
+			continue
+		}
+		seen[p.ID] = struct{}{}
+		out = append(out, p)
+		added++
+	}
+	return out
 }
 
 // geoNearByRegion 地理近项：候选与候选群主导 region 同区 → 满分 1.0（同一片地方的人最易同行）；

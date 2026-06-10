@@ -6,8 +6,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -156,6 +158,51 @@ func BootstrapRecord(seed int64, sessionID string, factionID string, name string
 // Save 写入单位记录（不存在则插入，存在则更新）。
 func (repository *Repository) Save(ctx context.Context, record Record) error {
 	return repository.saveWithExecer(ctx, repository.db, record)
+}
+
+// ErrCrossSessionWrite 表示一次写入越过了「跨玩家硬不变量」：试图改写不属于操作方 session 的他人单位
+// （设计宪法红线：B 永远只能写一条 cross_event，改不了 A 的 units）。SaveOwnedBy 命中此情形即返回本错误、拒绝写入。
+var ErrCrossSessionWrite = errors.New("cross-session unit write forbidden: a player may never directly write another player's unit (use cross_event)")
+
+// SaveOwnedBy 是带「本侧归属断言」的条件写：仅当目标单位的**已落库 session_id == ownerSessionID** 时才落盘，
+// 否则拒绝写入并返回 ErrCrossSessionWrite（共享世界 Phase 3 跨玩家硬不变量的 **storage 层强制**——
+// 设计文档 §2.1/§5：「跨玩家只产 append-only cross_event，各自 Mutator 只改本侧；storage 断言禁 cross-session UPDATE」）。
+//
+// 守门规则（先读 session_id 决定是否写）：
+//   - 行不存在（新插入，跨分片远端角色本就无本地行）→ 拒绝（SaveOwnedBy 只用于「改写已存在的本侧单位」，
+//     新建走 Save；这样误把他人 id 当新行插入也会被挡）。
+//   - 行存在且 session_id == ownerSessionID（本侧单位）→ 放行，走与 Save 等价的整记录 upsert。
+//   - 行存在但 session_id != ownerSessionID（他人单位）→ 拒绝写、返回 ErrCrossSessionWrite。
+//
+// ⚠️ **不开显式事务跨整段**（避免 SQLite 单连接 `SetMaxOpenConns(1)` 自死锁）：先用 db 读一次 session_id（连接随即释放），
+// 校验通过再走普通 Save（其内部各自取/还连接）。session_id 是单位创建时即固定、此后写入也**不改**它的不可变锚——
+// 故「先读后写」无实质 TOCTOU 风险（两步间 session_id 不会变），且并发丢更新由调用层的乐观并发（version/SaveOptimistic）兜底。
+//
+// ownerSessionID 为空时退化为不设归属约束（等价 Save）——仅供「无 session 上下文的合法系统写」用；
+// 跨玩家结算路径必须传**操作方自己的 sessionID**，让越界直写在 storage 层被挡。
+func (repository *Repository) SaveOwnedBy(ctx context.Context, record Record, ownerSessionID string) error {
+	if repository == nil || repository.db == nil {
+		return fmt.Errorf("save owned-by: nil repository or db")
+	}
+	if strings.TrimSpace(ownerSessionID) == "" {
+		return repository.Save(ctx, record) // 无归属上下文：退化为普通 Save（不施加跨玩家约束）。
+	}
+	var persistedSession string
+	err := repository.db.QueryRowContext(ctx, `SELECT session_id FROM units WHERE id = ?`, record.ID).Scan(&persistedSession)
+	if err == sql.ErrNoRows {
+		// 不存在本侧行：SaveOwnedBy 不负责新建（新建走 Save），且这样能挡住「把他人 id 误当新行插入」。
+		return fmt.Errorf("save owned-by %s: %w (no local row to update)", record.ID, ErrCrossSessionWrite)
+	}
+	if err != nil {
+		return fmt.Errorf("save owned-by lookup %s: %w", record.ID, err)
+	}
+	if strings.TrimSpace(persistedSession) != strings.TrimSpace(ownerSessionID) {
+		// 他人单位：storage 层硬拒（跨玩家硬不变量第一道防线）。
+		return fmt.Errorf("save owned-by %s (persisted session=%q, owner=%q): %w",
+			record.ID, persistedSession, ownerSessionID, ErrCrossSessionWrite)
+	}
+	// 本侧单位：走普通 Save（整记录 upsert，含 mergePersistentSocialState）——每步各自取/还连接，无单连接自死锁。
+	return repository.Save(ctx, record)
 }
 
 // mergePersistentSocialState 避免旧快照保存时把已成立的家庭关系清空。
