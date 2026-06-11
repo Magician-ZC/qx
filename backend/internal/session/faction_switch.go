@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
-	"strings"
 
 	"qunxiang/backend/internal/engine/events"
 	"qunxiang/backend/internal/faction"
@@ -27,7 +26,7 @@ import (
 	"qunxiang/backend/internal/unit"
 )
 
-// factionSwitchFlagEnv 是阵营切换的灰度开关环境变量名。**默认关** → maybeSwitchFaction 直接早返回（零行为）。
+// factionSwitchFlagEnv 是阵营切换的灰度开关环境变量名。**默认开** → 显式 false/0/no/off 可关，关时 maybeSwitchFaction 直接早返回（零行为）。
 const factionSwitchFlagEnv = "QUNXIANG_FACTION_SWITCH"
 
 // 阵营切换的隐藏条件阈值（确定性、苛刻——绝不轻易切）。
@@ -40,15 +39,9 @@ const (
 	switchProbability = 0.15
 )
 
-// factionSwitchEnabled 读 QUNXIANG_FACTION_SWITCH（**默认关**）。仅显式 true/1/yes/on 才开启阵营切换。
-// 自包含解析，对齐 ambition_scoring.go / courageCurve 的 flag idiom。
+// factionSwitchEnabled 读 QUNXIANG_FACTION_SWITCH，默认开（显式 false/0/no/off 可关）。开时才启用阵营切换。
 func factionSwitchEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(factionSwitchFlagEnv))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault(factionSwitchFlagEnv, true)
 }
 
 // factionAffinity 取单位道德轴对某阵营的亲和度（[0,100]）——某阵营 ID 对应道德轴的同名分量。

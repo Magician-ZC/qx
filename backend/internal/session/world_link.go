@@ -28,7 +28,7 @@ const defaultWorldID = "world_default"
 //   - sharedWorldGenesisSeed：RegionSeed 缺省时写入的确定性固定字符串根。共享世界的「同一张图」由它派生——
 //     所有开 flag 降生的玩家用 deriveSharedSeed(RegionSeed) 得到同一个 int64 种子，GenerateWorld 逐格相同。
 const (
-	sharedWorldID         = "world_shared_v1"
+	sharedWorldID          = "world_shared_v1"
 	sharedWorldGenesisSeed = "shared-world-genesis"
 )
 
@@ -45,16 +45,10 @@ func inSharedWorld(state *State) bool {
 	return state != nil && sharedWorldEnabled() && isSharedWorldID(state.WorldID)
 }
 
-// sharedWorldEnabled 读 QUNXIANG_SHARED_WORLD，**默认关**（未设/非法值 → 关，走旧私有副本路径，行为逐字节不变）。
-// 仅显式置 1/true/yes/on 时才开 → 降生分叉到共享世界几何（同 RegionSeed 派生同种子、逐格相同的世界）。
-// 默认关是 Phase 1 的硬隔离保证：旧 world_default 私有档、既有降生测试全部不受影响。
+// sharedWorldEnabled 读 QUNXIANG_SHARED_WORLD，**默认开**（显式 false/0/no/off 可关 → 走旧私有副本路径）。
+// 开时降生分叉到共享世界几何（同 RegionSeed 派生同种子、逐格相同的世界）；显式关是回退到旧 world_default 私有档的应急通道。
 func sharedWorldEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_SHARED_WORLD"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_SHARED_WORLD", true)
 }
 
 // deriveSharedSeed 把共享世界的 RegionSeed（字符串）确定性派生为 GenerateWorld 所需的 int64 种子。

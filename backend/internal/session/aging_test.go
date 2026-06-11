@@ -123,7 +123,7 @@ func TestSettleAging_FunctionalNeverDies(t *testing.T) {
 func TestSettleAging_FlagOffNoOp(t *testing.T) {
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()
-	t.Setenv("QUNXIANG_AGING", "") // flag 关（默认）
+	t.Setenv("QUNXIANG_AGING", "false") // 显式关闭（默认已开），测关闭路径
 
 	old := unit.BootstrapRecord(7, "s_off", "freedom", "本不该死的老者")
 	old.Identity.Age = agingAgeHardCap + 100

@@ -38,7 +38,7 @@ import (
 	"qunxiang/backend/internal/world"
 )
 
-// factionPvEFlagEnv 是阵营冲突遭遇的灰度开关环境变量名。**默认关** → 关时零行为。
+// factionPvEFlagEnv 是阵营冲突遭遇的灰度开关环境变量名。**默认开** → 显式 false/0/no/off 可关，关时零行为。
 const factionPvEFlagEnv = "QUNXIANG_FACTION_PVE"
 
 const (
@@ -50,15 +50,9 @@ const (
 	factionConflictMaxPerScan = 1
 )
 
-// factionPvEEnabled 读 QUNXIANG_FACTION_PVE（**默认关**）。仅显式 true/1/yes/on 才开启阵营冲突遭遇。
-// 自包含解析，对齐 faction_switch.go / ambition_scoring.go 的 flag idiom。
+// factionPvEEnabled 读 QUNXIANG_FACTION_PVE，默认开（显式 false/0/no/off 可关）。开时才启用阵营冲突遭遇。
 func factionPvEEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(factionPvEFlagEnv))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault(factionPvEFlagEnv, true)
 }
 
 // hostileFactionFor 返回某阵营在最小切片里的「天然敌对阵营」ID；无对立（freedom 游离/未知）返回空串。

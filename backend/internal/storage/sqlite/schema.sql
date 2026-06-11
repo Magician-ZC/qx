@@ -242,10 +242,29 @@ CREATE TABLE IF NOT EXISTS world_bosses (
   hp_remaining INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   region_id TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- defeated_at：boss 被讨平（active→defeated）的真实时间戳（UTC，可空）。
+  -- 仅 active→defeated 闩锁成功者写入，供「最近讨平 boss」按 defeated_at DESC 排序（created_at 在 SQLite 是建表时刻、不可靠作排序键）。
+  defeated_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_world_bosses_world ON world_bosses(world_id, status);
+
+-- 副本进入次数闸（dungeon lockout）：限某单位在某时间窗（window_key，如「每日」日期串）对某副本的进入次数。
+-- 唯一键 (world_id, unit_id, dungeon_id, window_key)：同窗同副本同单位至多一行，entered_count 累计、last_entered_at 留痕。
+-- world_id 可空（兼容私有/单机旧局留空，不接入世界）；append-or-upsert 语义，惰性检查由 session 业务层负责（本表只是地基）。
+CREATE TABLE IF NOT EXISTS dungeon_lockouts (
+  world_id TEXT,
+  unit_id TEXT NOT NULL DEFAULT '',
+  dungeon_id TEXT NOT NULL DEFAULT '',
+  window_key TEXT NOT NULL DEFAULT '',
+  entered_count INTEGER NOT NULL DEFAULT 0,
+  last_entered_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (world_id, unit_id, dungeon_id, window_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dungeon_lockouts_world_unit ON dungeon_lockouts(world_id, unit_id);
 
 -- 产品分析埋点（AARRR 漏斗，append-only，无 FK，与游戏状态解耦；设计 docs/验证实验设计.md §5.2）。
 -- user_id/ab_bucket/client_ts/app_version 供北极星/A-B 口径（按用户聚合、实验分桶、客户端校时、版本切片），

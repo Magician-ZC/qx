@@ -81,14 +81,14 @@ func main() {
 	hub := ws.NewHub(logger)
 	aiService := ai.NewService(cfg, logger)
 
-	// 大世界 region-runner（M7.3-real-1，默认关闭、纯影子）：按真实时钟低频唤醒离线单位决策。
-	// QUNXIANG_REGION_RUNNER_ENABLED=true 才启动；QUNXIANG_REGION_TICK_SECONDS 设逻辑 tick 的秒长（默认 30）。
-	// Apply=false 时纯 shadow（只记日志，real-1）；QUNXIANG_REGION_RUNNER_APPLY=true 才真应用 L1 决策（real-2 灰度）。
-	regionRunnerEnabled := envBool("QUNXIANG_REGION_RUNNER_ENABLED")
-	regionThreatsEnabled := envBool("QUNXIANG_REGION_RUNNER_THREATS")
+	// 大世界 region-runner（M7.3-real-1，默认开、全功率）：按真实时钟低频唤醒离线单位决策。
+	// QUNXIANG_REGION_RUNNER_ENABLED 默认开（显式设 false/0/no/off 仍能关）；QUNXIANG_REGION_TICK_SECONDS 设逻辑 tick 的秒长（默认 30）。
+	// Apply 默认开即真应用 L1 决策（real-2）；显式 QUNXIANG_REGION_RUNNER_APPLY=false 才退回纯 shadow（只记日志，real-1）。
+	regionRunnerEnabled := envBoolDefault("QUNXIANG_REGION_RUNNER_ENABLED", true)
+	regionThreatsEnabled := envBoolDefault("QUNXIANG_REGION_RUNNER_THREATS", true)
 	regionRunner := regionrunner.New(db, regionrunner.Config{
 		Enabled:     regionRunnerEnabled,
-		Apply:       envBool("QUNXIANG_REGION_RUNNER_APPLY"),
+		Apply:       envBoolDefault("QUNXIANG_REGION_RUNNER_APPLY", true),
 		Threats:     regionThreatsEnabled,
 		TickSeconds: int64(envIntDefault("QUNXIANG_REGION_TICK_SECONDS", 30)),
 	}, logger)
@@ -99,27 +99,28 @@ func main() {
 	if envBool("QUNXIANG_REGION_SHARDING") {
 		regionRunner.SetRegistry(region.New(db))
 	}
-	// PvE（默认关）：QUNXIANG_REGION_RUNNER_THREATS 开即 roll 威胁——注入 AnchorDensity 做锚加权（PvE-4，威胁扎堆她在乎处）；
-	// 再开 QUNXIANG_REGION_RUNNER_THREATS_APPLY 才注入真 elite 遭遇结算（PvE-2，命中→改 HP/钱包、分赃/惩罚、命运卡），仅 THREATS=shadow。
-	// ⚠️ 威胁 roll 还依赖 QUNXIANG_REGION_RUNNER_APPLY=true（roll 在 applyAmbientL1 内）——完整真打需 ENABLED+APPLY+THREATS+THREATS_APPLY 四者皆开。
+	// PvE（默认开）：QUNXIANG_REGION_RUNNER_THREATS 默认开即 roll 威胁——注入 AnchorDensity 做锚加权（PvE-4，威胁扎堆她在乎处）；
+	// QUNXIANG_REGION_RUNNER_THREATS_APPLY 默认开即注入真 elite 遭遇结算（PvE-2，命中→改 HP/钱包、分赃/惩罚、命运卡），显式设 false 才仅 THREATS=shadow。
+	// ⚠️ 威胁 roll 还依赖 QUNXIANG_REGION_RUNNER_APPLY=true（roll 在 applyAmbientL1 内）——四者皆默认开即完整真打；显式关任一即收窄。
 	// region-runner 专用的长生命 Service（造人/战斗/锚查询用同一 db）。遭遇前 maybeEncounterThreat 已查让位收窄并发窗口。
 	if regionThreatsEnabled {
 		threatSvc := session.NewService(db, aiService)
 		regionRunner.SetAnchorDensityProvider(threatSvc.AnchorDensity)
-		if envBool("QUNXIANG_REGION_RUNNER_THREATS_APPLY") {
+		if envBoolDefault("QUNXIANG_REGION_RUNNER_THREATS_APPLY", true) {
 			regionRunner.SetThreatHandler(func(ctx context.Context, sessionID, unitID string) error {
 				_, err := threatSvc.TriggerEliteEncounter(ctx, sessionID, unitID)
 				return err
 			})
 		}
 	}
-	// real-3 HOT-LLM（默认关）：QUNXIANG_REGION_RUNNER_LLM=true 才给 HOT 单位上 LLM 离线决策；
-	// 进程级成本上限 QUNXIANG_REGION_LLM_BUDGET_USD（默认 1.0 USD），沿用 session 同一单价表估算。
-	if envBool("QUNXIANG_REGION_RUNNER_LLM") {
-		budgetUSD := envFloatDefault("QUNXIANG_REGION_LLM_BUDGET_USD", 1.0)
+	// real-3 HOT-LLM（默认开）：默认给 HOT 单位上 LLM 离线决策；显式 QUNXIANG_REGION_RUNNER_LLM=false 才关。
+	// 进程级成本上限 QUNXIANG_REGION_LLM_BUDGET_USD 默认 100.0 USD（全功率默认开下若仍用 1.0 会秒烧到 $1 即 latch 降级、名不副实；
+	// 这是进程级累计上限，按部署规模上调/下调即可），沿用 session 同一单价表估算。
+	if envBoolDefault("QUNXIANG_REGION_RUNNER_LLM", true) {
+		budgetUSD := envFloatDefault("QUNXIANG_REGION_LLM_BUDGET_USD", 100.0)
 		if budgetUSD <= 0 { // 配置笔误 0/负数不得让烧钱护栏失效（SetLLMClient 还会再夹一层做防御纵深）。
-			logger.Warn("QUNXIANG_REGION_LLM_BUDGET_USD non-positive; using default", "got", budgetUSD, "default", 1.0)
-			budgetUSD = 1.0
+			logger.Warn("QUNXIANG_REGION_LLM_BUDGET_USD non-positive; using default", "got", budgetUSD, "default", 100.0)
+			budgetUSD = 100.0
 		}
 		regionRunner.SetLLMClient(aiService, session.EstimateLLMCostUSD, budgetUSD)
 	}
@@ -164,7 +165,7 @@ func main() {
 		ColdStore:    coldStore,
 		Accounts:     accountService,
 		RegionRunner: regionRunner,
-		// region-runner 启用时，建局/组队才把玩家单位 seed 进离线调度（M7.3-real-4b，默认关→零成本）。
+		// region-runner 启用时，建局/组队才把玩家单位 seed 进离线调度（M7.3-real-4b，默认开→默认 seed；显式关 ENABLED 即零成本）。
 		RegionRunnerEnabled: regionRunnerEnabled,
 		// 反射真短路（降本，默认开）：日常安静 tick 的单位决策由反射层零成本落地、跳过 LLM。
 		// 短路面已被 reflexShortCircuitApplies 收窄到极保守子集（immediateOrder gate + NeedsLLM=false + hold/continue），
@@ -198,17 +199,19 @@ func main() {
 	// 命运自治各写一次），仅靠 execGuard 在「两者时间窗恰好重叠」时软让位，非重叠窗口仍双驱动语义错位。私有世代是 fate-autotick
 	// 的地盘，两者**不应同开 APPLY**。此处启动即检测同开并 Warn（最小运维契约；不拒启以免误伤 shadow/共享场景）。
 	// 读 FATE_AUTOTICK 用 EnvOrOverride（与 fateAutoTickEnabled 同口径，含已回灌的 GM 持久 override）；APPLY 是纯环境变量。
-	if envBool("QUNXIANG_REGION_RUNNER_APPLY") && fateAutoTickFlagOn() {
+	// 注：FATE_AUTOTICK 与 REGION_RUNNER_APPLY 现都默认开，故此 Warn 默认会打印——这是【预期】（私有遗留世代 world_default 的
+	// 已知权衡；共享世代 world_shared_v1 已硬隔离无冲突）。保留 Warn 作运维契约，勿删。
+	if envBoolDefault("QUNXIANG_REGION_RUNNER_APPLY", true) && fateAutoTickFlagOn() {
 		logger.Warn("double-driver risk: REGION_RUNNER_APPLY and FATE_AUTOTICK both ON — " +
 			"region-runner and fate-autotick will each advance the SAME world_default (private) protagonist per tick " +
 			"(shared world is isolated, private world is NOT). Disable one of them for private generations. " +
 			"See docs/共享世界改造方案-方向B-2026-06-10.md §5 risk 5.")
 	}
 
-	// 命运世界自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认关，关时每次唤醒只查一次 flag 即返回、零行为）：
-	// 开启时低频（默认 60s，QUNXIANG_FATE_AUTOTICK_SECONDS 可调）扫 world_default 活跃主世界角色，各推一拍自治生活。
+	// 命运世界自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认开，显式关时每次唤醒只查一次 flag 即返回、零行为）：
+	// 默认低频（默认 60s，QUNXIANG_FATE_AUTOTICK_SECONDS 可调）扫 world_default 活跃主世界角色，各推一拍自治生活。
 	// 专用长生命 Service：异步执行（与生产 router 一致，AdvanceFateWorld 才会起后台执行一轮）+ 广播器（生活 beat/快照 WS 实时推送）+
-	// 归因强制（与生产一致）。成本：每拍 1 次 LLM 自治决策，低频 + best-effort + flag 默认关 控成本。随 ctx 取消优雅退出。
+	// 归因强制（与生产一致）。成本：每拍 1 次 LLM 自治决策，低频 + best-effort 控成本；紧急回退置 QUNXIANG_FATE_AUTOTICK=false 即关。随 ctx 取消优雅退出。
 	fateTickDone := make(chan struct{})
 	go func() {
 		fateSvc := session.NewServiceWithColdStore(db, aiService, coldStore)
@@ -295,14 +298,15 @@ func envBool(key string) bool {
 	}
 }
 
-// fateAutoTickFlagOn 读 QUNXIANG_FATE_AUTOTICK，与 session.fateAutoTickEnabled 同口径——经 featureflags.EnvOrOverride
-// 读（含已回灌的 GM 持久 override，非仅环境变量），使启动期双推进者告警与运行期 ticker 的实际开关判定一致。
+// fateAutoTickFlagOn 读 QUNXIANG_FATE_AUTOTICK，与 session.fateAutoTickEnabled 同口径（默认开，可显式关）——经
+// featureflags.EnvOrOverride 读（含已回灌的 GM 持久 override，非仅环境变量），使启动期双推进者告警与运行期 ticker 的
+// 实际开关判定一致。session.fateAutoTickEnabled 已转默认开，此处必须同步默认开，否则启动 Warn 与运行期 ticker 判定漂移。
 func fateAutoTickFlagOn() bool {
 	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FATE_AUTOTICK"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
+	case "false", "0", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 

@@ -123,7 +123,7 @@ func countEvents(t *testing.T, service *Service, ctx context.Context, actorID st
 // --- Freeze List 动作落地前拦截 ---
 
 func TestMaybeFreezeOfflineAction_FlagGate(t *testing.T) {
-	t.Setenv("QUNXIANG_FREEZE_LIST", "")
+	t.Setenv("QUNXIANG_FREEZE_LIST", "false") // 显式关（默认已开），测关闭路径
 	service, ctx := newWireService(t)
 	actor := unit.BootstrapRecord(2, "s1", "player", "行舟")
 	_ = unit.AddBackpackItem(&actor, "ration", 1)

@@ -89,6 +89,19 @@ func EnvOrOverride(name string) string {
 	return getenv(name)
 }
 
+// EnabledWithDefault 解析布尔 flag：未设（空串）时返回 defaultOn；显式 true/1/yes/on→true、false/0/no/off→false；非法值回落 defaultOn。
+// 关键：显式 false 永远优先于 default，保证「默认开但可显式关」（GM override 或环境变量设 false 仍能关）。
+func EnabledWithDefault(name string, defaultOn bool) bool {
+	switch strings.ToLower(strings.TrimSpace(EnvOrOverride(name))) {
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return defaultOn
+	}
+}
+
 // SetOverride 设置一条运行时 override（GM 后台调用）。空 name 忽略。
 // 持久化 best-effort：store 注入时同步落库（返回其错误供端点透传），未注入时纯内存。
 func SetOverride(name, value string) error {
@@ -153,35 +166,41 @@ type FlagSpec struct {
 // 顺序即 KnownGameplayFlags 的稳定返回顺序（已按主题分组）。
 var knownGameplayFlags = []FlagSpec{
 	// —— PvE / 威胁 / 世界 Boss —— //
-	{Name: "QUNXIANG_DUNGEON", Description: "副本（多层逐层 PvE 推进）；默认关，开后玩家可入副本逐层消耗战分赃。", DefaultOn: false},
-	{Name: "QUNXIANG_AUTO_PVE", Description: "野外威胁自动开打（撞见威胁的合格单位按比例真实交战，否则仅投高光卡）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_WORLD_BOSS_AUTO", Description: "世界 Boss 自动刷新（按世界确定性投放可多人协作消耗的世界 Boss）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_DUNGEON", Description: "副本（多层逐层 PvE 推进）；默认开，可显式关；开后玩家可入副本逐层消耗战分赃。", DefaultOn: true},
+	{Name: "QUNXIANG_AUTO_PVE", Description: "野外威胁自动开打（撞见威胁的合格单位按比例真实交战，否则仅投高光卡）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_WORLD_BOSS_AUTO", Description: "世界 Boss 自动刷新（按世界确定性投放可多人协作消耗的世界 Boss）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_DUNGEON_LOCKOUT", Description: "副本进入次数闸（按时间窗限单位对副本的进入次数，防刷场）；默认开，可显式关；关时不限次。", DefaultOn: true},
+	// 注：副本 Boss 重生间隔由 QUNXIANG_WORLD_BOSS_RESPAWN_HOURS 控制——它是**数值型** flag（小时数），
+	// 不进本布尔白名单（本清单只承载 GM 后台可开关的布尔/多档字符串 flag）；由 world_boss.go 自取 os.Getenv 解析。
 
 	// —— 命运 / 跨玩家关联 / 世界化 —— //
-	{Name: "QUNXIANG_FATE_AUTOTICK", Description: "命运世界自动 tick（后台低频扫 world_default 活跃主世界角色各推一拍自治生活）；默认关，关时玩家手动指引/按钮推进。", DefaultOn: false},
-	{Name: "QUNXIANG_SERENDIPITY", Description: "破圈预算（每日≤1 件零锚来源事件升档进高光卡作新锚种子）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_WORLDIZE_INBOUND", Description: "入向世界化扇出（玩家做出会激起涟漪的事时反查谁的锚被点亮）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_AUTO_MATCH", Description: "野外同行自动撮合（确定性四因子撮合并绑社会客体）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_FATE_AUTOTICK", Description: "命运世界自动 tick（后台低频扫 world_default 活跃主世界角色各推一拍自治生活）；默认开，可显式关；关时玩家手动指引/按钮推进。", DefaultOn: true},
+	{Name: "QUNXIANG_SERENDIPITY", Description: "破圈预算（每日≤1 件零锚来源事件升档进高光卡作新锚种子）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_WORLDIZE_INBOUND", Description: "入向世界化扇出（玩家做出会激起涟漪的事时反查谁的锚被点亮）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_WORLD_GENESIS", Description: "世界序章（首个玩家降生时为该世界写一笔创世编年史，每世界一次幂等）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_AUTO_MATCH", Description: "野外同行自动撮合（确定性四因子撮合并绑社会客体）；默认开，可显式关。", DefaultOn: true},
 	{Name: "QUNXIANG_AUTO_SOCIAL", Description: "社交自治（玩家不在场时本局单位间自动结识/结盟/反目/复仇）；**默认开**。", DefaultOn: true},
 
 	// —— 零和 / 一致性 / 冻结 / 血仇 —— //
 	{Name: "QUNXIANG_ZEROSUM_CONTEST", Description: "排他标的确定性零和裁决（反 P2W 机制基石，胜率∝Score、与频率无关）；**默认开**。", DefaultOn: true},
 	{Name: "QUNXIANG_BLOOD_FEUD", Description: "血仇沿关系图传播（在乎死者的人继承敌意，按跳数失真衰减）；**默认开**。", DefaultOn: true},
-	{Name: "QUNXIANG_FREEZE_LIST", Description: "冻结清单（传家宝/红线动作拦截，让角色「向命运低头」而非自动卖/叛）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_CONSISTENCY_TIGHTEN", Description: "一致性收紧闭环（OOC 率高时压低突然戏剧性动作的惊喜上限）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_FREEZE_LIST", Description: "冻结清单（传家宝/红线动作拦截，让角色「向命运低头」而非自动卖/叛）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_CONSISTENCY_TIGHTEN", Description: "一致性收紧闭环（OOC 率高时压低突然戏剧性动作的惊喜上限）；默认开，可显式关。", DefaultOn: true},
 
 	// —— 自治曲线 / 野心 / 村庄 —— //
-	{Name: "QUNXIANG_COURAGE_CURVE", Description: "自治胆量曲线（离线越久越自主但越保守，进抗命概率与广度门）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_AMBITION_SCORING", Description: "野心打分（带野心语义的候选动作按角色野心引力加权）；默认关。", DefaultOn: false},
+	{Name: "QUNXIANG_COURAGE_CURVE", Description: "自治胆量曲线（离线越久越自主但越保守，进抗命概率与广度门）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_AMBITION_SCORING", Description: "野心打分（带野心语义的候选动作按角色野心引力加权）；默认关（有平衡劣化风险，需 GM 显式开启）。", DefaultOn: false},
 	{Name: "QUNXIANG_MAIN_VILLAGE", Description: "主战局出生织 20 人关系网（命运开盒「身边已有二十个有名有姓的人」）；**默认开**。", DefaultOn: true},
+	{Name: "QUNXIANG_AGING", Description: "NPC 衰老死亡（mortal NPC 会变老/高龄自然离世→血脉传承→入编年史；主角与功能性NPC双保险绝不死）；**默认开**。", DefaultOn: true},
 
 	// —— 三阵营开放世界（F2/F3） —— //
-	{Name: "QUNXIANG_FACTION_SWITCH", Description: "阵营切换（满足隐藏条件时角色概率切换阵营）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_FACTION_PVE", Description: "阵营冲突遭遇（游历中撞见敌对阵营的人时低频概率触发一次冲突遭遇，对手入敌方队列、出命运卡可接管）；默认关。", DefaultOn: false},
-	{Name: "QUNXIANG_AMBIENT_WANDER", Description: "出生点公共 NPC 轻量游走（回合边界确定性低概率挪一格，让命运地图舞台活起来，纯代码零 LLM）；默认关，关时 NPC 静态站着。", DefaultOn: false},
+	{Name: "QUNXIANG_FACTION_SWITCH", Description: "阵营切换（满足隐藏条件时角色概率切换阵营）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_FACTION_PVE", Description: "阵营冲突遭遇（游历中撞见敌对阵营的人时低频概率触发一次冲突遭遇，对手入敌方队列、出命运卡可接管）；默认开，可显式关。", DefaultOn: true},
+	{Name: "QUNXIANG_AMBIENT_WANDER", Description: "出生点公共 NPC 轻量游走（回合边界确定性低概率挪一格，让命运地图舞台活起来，纯代码零 LLM）；默认开，可显式关；关时 NPC 静态站着。", DefaultOn: true},
 
 	// —— 共享世界（方向 B Phase 1） —— //
-	{Name: "QUNXIANG_SHARED_WORLD", Description: "共享世界几何（Phase 1）：开后新降生进 world_shared_v1 新世代，所有玩家用同一 RegionSeed 派生种子拿到逐格相同的世界；默认关，关时各玩家各自独立私有世界（world_default，旧行为不变）。", DefaultOn: false},
+	{Name: "QUNXIANG_SHARED_WORLD", Description: "共享世界几何（Phase 1）：开后新降生进 world_shared_v1 新世代，所有玩家用同一 RegionSeed 派生种子拿到逐格相同的世界；默认开，可显式关；关时各玩家各自独立私有世界（world_default，旧行为不变）。", DefaultOn: true},
+	{Name: "QUNXIANG_AUTO_SOCIAL_CROSS", Description: "跨玩家七交互自动发起（共享世界同区跨session玩家间自动结识/反目等，仅写本侧+cross_event）；**默认开**。", DefaultOn: true},
 
 	// —— 多档字符串型 —— //
 	{

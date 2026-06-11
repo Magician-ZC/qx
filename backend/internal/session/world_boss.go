@@ -28,7 +28,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -182,9 +185,13 @@ func (service *Service) strikeSharedBossCore(ctx context.Context, worldID, bossI
 	}
 
 	// 3) 这一击清零了血池 → 抢结算闩锁：只有把 active 翻成 defeated 成功的那个请求才结算（防并发双结算）。
+	//    模块2：闩锁同时写 defeated_at（boss 被讨平的真实时间戳，UTC RFC3339）——只有 affected==1（真结算者）那一笔会写，
+	//    供「最近讨平 boss」按 defeated_at DESC 排序（驱动世界Boss 真实时间刷新间隔门 worldBossRespawnHours）。
+	//    defeated_at 是「真实时间语义」（与 created_at 同口径），铁律允许此处用 time.Now().UTC()。
 	result.Defeated = true
+	defeatedAt := time.Now().UTC().Format(time.RFC3339)
 	res, err := service.db.ExecContext(ctx, `
-		UPDATE world_bosses SET status = 'defeated' WHERE id = ? AND status = 'active'`, bossID)
+		UPDATE world_bosses SET status = 'defeated', defeated_at = ? WHERE id = ? AND status = 'active'`, defeatedAt, bossID)
 	if err != nil {
 		return result, fmt.Errorf("latch world boss defeat: %w", err)
 	}
@@ -409,9 +416,9 @@ func (service *Service) surfaceWorldBossSoloLock(ctx context.Context, worldID st
 // 在「全世界 world_boss」与「区域共享 zone boss」（Phase4 共享进度）之间复用同一套贡献账本读取 + 分赃 + 仲裁 + 发钱链路，
 // 仅掉落物/key 不同。反 P2W：货币池来自 hp_max（战力派生），绝不含 wallet/billing。
 type bossLootSpec struct {
-	RelicID  string // 排他遗物 ID（走 arbitration 胜率∝贡献归属）
-	GoldQty  int    // 可分割货币总量（按贡献 SplitProportional 瓜分）
-	KeyTag   string // loot key 里的档位标签（worldboss / zoneboss），保证不同档 boss 的仲裁 key 不撞
+	RelicID string // 排他遗物 ID（走 arbitration 胜率∝贡献归属）
+	GoldQty int    // 可分割货币总量（按贡献 SplitProportional 瓜分）
+	KeyTag  string // loot key 里的档位标签（worldboss / zoneboss），保证不同档 boss 的仲裁 key 不撞
 }
 
 // worldBossLootSpec 是全世界 world_boss 的默认掉落规格（与历史行为逐字节一致）。
@@ -537,15 +544,28 @@ var autoWorldBossNames = []string{
 // 自动生成世界Boss的血量梯度（确定性按 FNV(worldID) 取一档；均在 maxWorldBossHP 内、足够多人协作消耗）。
 var autoWorldBossHPTiers = []int{120_000, 200_000, 360_000, 600_000}
 
-// worldBossAutoEnabled 读 QUNXIANG_WORLD_BOSS_AUTO（true/1/yes/on 视为开，大小写不敏感、忽略首尾空白），
-// 默认关 → maybeRefreshWorldBoss 整方法 no-op、零行为变化、零 DB 写。
+// worldBossAutoEnabled 读 QUNXIANG_WORLD_BOSS_AUTO，默认开（显式 false/0/no/off 可关 →
+// maybeRefreshWorldBoss 整方法 no-op、零行为变化、零 DB 写）。
 func worldBossAutoEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_WORLD_BOSS_AUTO"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
+	return featureflags.EnabledWithDefault("QUNXIANG_WORLD_BOSS_AUTO", true)
+}
+
+// worldBossRespawnHours 读 QUNXIANG_WORLD_BOSS_RESPAWN_HOURS（整数小时），驱动世界Boss的真实时间刷新间隔门：
+//   - 默认 0（未设/非法/<0 一律归 0）→ 不限间隔，沿用旧行为（被讨平后下一个部署边界即可重刷，仅受 provenance 门约束）。
+//   - >0 → 该 world 最近一头 defeated 的 boss 的 defeated_at + N 小时未到，则本次不刷（间隔节流）。
+//
+// 这是**数值型**配置，故意不进 featureflags 布尔白名单（白名单只承载布尔/多档字符串），直接自取 os.Getenv 解析。
+// 只在 QUNXIANG_WORLD_BOSS_AUTO 开启后才有意义（auto 关时 maybeRefreshWorldBoss 整方法 no-op）。
+func worldBossRespawnHours() int {
+	raw := strings.TrimSpace(os.Getenv("QUNXIANG_WORLD_BOSS_RESPAWN_HOURS"))
+	if raw == "" {
+		return 0
 	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0 // 非法/负值一律归 0=不限（保守：解析失败不意外拦刷新）
+	}
+	return n
 }
 
 // worldBossNameHash 确定性哈希（项目约定的 FNV）：把 worldID + salt 映射到稳定的 uint64，用于选名/定血。
@@ -592,8 +612,26 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 		return nil // 无 provenance 信号（该 region 尚无沉淀的 field_boss/elite 痕迹）→ 不凭空刷，正常 no-op
 	}
 
+	// (a) 真实时间刷新间隔门（模块2）：QUNXIANG_WORLD_BOSS_RESPAWN_HOURS>0 时，查该 world 最近一头 defeated 的 boss 的
+	//     defeated_at；若 now 距上次讨平未满 N 小时则本次不刷（间隔节流，return nil）。无 defeated 记录则不拦（首次/从未讨平）。
+	//     best-effort：读/解析失败按「不拦」放行（绝不因读失败把本可刷新的世界卡住——节流是软门，宁可早刷不可永不刷）。
+	if hours := worldBossRespawnHours(); hours > 0 {
+		if blocked := service.worldBossRespawnBlocked(ctx, worldID, hours); blocked {
+			return nil // 距最近一次讨平未满 N 小时 → 间隔节流，本次不刷
+		}
+	}
+
+	// (b) 历史→boss 缘起（模块2）：best-effort 读该 world 最近一条 importance>=7 的世界编年史标题作 boss「缘起」，
+	//     拼进新 boss 的名字修饰/叙事。无可用历史则 origin 为空、沿用现有通用生成（不记 boss_arisen）。
+	origin := service.recentWorldChronicleOrigin(ctx, worldID)
+
 	// 名/血都由 FNV(worldID) 派生：同一世界稳定可复现，不同世界各异，不用全局 rand。
-	name := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
+	baseName := autoWorldBossNames[worldBossNameHash(worldID, "name")%uint64(len(autoWorldBossNames))]
+	name := baseName
+	if origin != "" {
+		// 缘起非空：名字带「因『<缘起>』之回响」修饰，让自动刷新的 boss 与世界历史有可见因果（叙事用，确定性派生自历史标题）。
+		name = fmt.Sprintf("%s（因『%s』之回响而生）", baseName, origin)
+	}
 	hp := autoWorldBossHPTiers[worldBossNameHash(worldID, "hp")%uint64(len(autoWorldBossHPTiers))]
 	id := "wboss_" + uuid.NewString()
 
@@ -634,8 +672,91 @@ func (service *Service) maybeRefreshWorldBoss(ctx context.Context, worldID strin
 		// 记明本次升级的威胁度链依据（沉淀的 field_boss/elite 痕迹数 + FNV 派生的名/血档），append-only 留痕、不改任何状态字段。
 		// best-effort：留痕失败只吞错（Boss 已成功落库，绝不因「记依据失败」回滚或外抛）。
 		service.recordWorldBossProvenance(ctx, worldID, id, name, hp, emergedTraces)
+		// (b) 历史缘起入史（模块2）：仅当有可用历史（origin 非空）才记一条 category=boss_arisen 的世界编年史，
+		//     让「凶煞自虚无凝形」与触发它的历史回响在世界史面板上可见因果。无历史则不记（沿用旧行为）。
+		//     best-effort：入史失败吞错（Boss 已落库，绝不回滚/外抛/中断回合推进）。
+		if origin != "" {
+			service.chronicleBossArisen(ctx, worldID, origin, name)
+		}
 	}
 	return nil
+}
+
+// worldBossRespawnBlocked best-effort 判定「距该 world 最近一次世界Boss 讨平是否未满 respawnHours 小时」。
+//   - 查最近一头 defeated 的 boss 的 defeated_at（按 defeated_at DESC 取一行；created_at 不可靠不作排序键）。
+//   - 无 defeated 记录 / defeated_at 为空 / 解析失败 → 返 false（不拦：从未讨平或读不出时间，间隔门不该误挡刷新）。
+//   - now 距 defeated_at 未满 N 小时 → 返 true（拦）；已满 → 返 false（放行）。
+//
+// 纯读、确定性比较；time.Now().UTC() 是真实时间语义（与 defeated_at 同口径，铁律允许）。
+func (service *Service) worldBossRespawnBlocked(ctx context.Context, worldID string, respawnHours int) bool {
+	if service == nil || service.db == nil || worldID == "" || respawnHours <= 0 {
+		return false
+	}
+	var defeatedAt sql.NullString
+	err := service.db.QueryRowContext(ctx, `
+		SELECT defeated_at FROM world_bosses
+		WHERE world_id = ? AND status = 'defeated' AND defeated_at IS NOT NULL AND defeated_at <> ''
+		ORDER BY defeated_at DESC LIMIT 1`, worldID).Scan(&defeatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false // 该 world 从未讨平过任何 boss → 不拦
+	}
+	if err != nil {
+		return false // best-effort：读失败不拦（间隔门是软节流，宁可早刷不可因读错永不刷）
+	}
+	if !defeatedAt.Valid || strings.TrimSpace(defeatedAt.String) == "" {
+		return false
+	}
+	t, perr := time.Parse(time.RFC3339, strings.TrimSpace(defeatedAt.String))
+	if perr != nil {
+		return false // 解析失败不拦（不因脏数据卡刷新）
+	}
+	// now < defeated_at + N 小时 → 未到刷新间隔 → 拦。
+	return time.Now().UTC().Before(t.Add(time.Duration(respawnHours) * time.Hour))
+}
+
+// recentWorldChronicleOrigin best-effort 读该 world 最近一条 importance>=7 的世界编年史标题，作自动刷新 boss 的「缘起」。
+// 读一页（取重大事件足够多的窗口）→ 已按 world_tick DESC, created_at DESC 倒序 → 顺序找首条 importance>=7 即「最近重大事件」。
+// 无世界史 / 无 importance>=7 条目 / 读失败 → 返空串（调用方据此走「无缘起」通用生成、不记 boss_arisen）。纯读、确定性。
+func (service *Service) recentWorldChronicleOrigin(ctx context.Context, worldID string) string {
+	if service == nil || service.db == nil || strings.TrimSpace(worldID) == "" {
+		return ""
+	}
+	entries, err := world.ListWorldChronicle(ctx, service.db, worldID, 50)
+	if err != nil {
+		return "" // best-effort：读失败 → 无缘起，沿用通用生成
+	}
+	for _, e := range entries {
+		// 跳过创世序章：它是世界开篇背景（importance=10、world_tick=0）而非可作 boss 缘起的「重大事件」，
+		// 否则开服初期（尚无其它大事时）会把序章选作缘起、刷出「因『创世序章』之回响而生」的怪异 boss。
+		if e.Category == WorldChronicleGenesis {
+			continue
+		}
+		if e.Importance >= 7 {
+			title := strings.TrimSpace(e.TitleZH)
+			if title != "" {
+				return title // 已倒序：首条 importance>=7 即最近一条重大事件
+			}
+		}
+	}
+	return "" // 无 importance>=7 的可用历史
+}
+
+// chronicleBossArisen best-effort 记一条「凶煞因历史回响凝形」的世界编年史（category=boss_arisen，importance=6）。
+// origin 是触发它的历史重大事件标题（缘起）、bossName 是新生 boss 名（可能已含「因『…』之回响」修饰）。
+// 走统一写入口 recordWorldChronicleBestEffort（worldTick 取该 world 当前世界时钟，best-effort 失败回退 0）。
+// 全 best-effort：写不进去最多丢一笔记述，绝不回滚已落库的 boss、绝不中断回合推进。
+func (service *Service) chronicleBossArisen(ctx context.Context, worldID, origin, bossName string) {
+	if service == nil || service.db == nil || strings.TrimSpace(worldID) == "" {
+		return
+	}
+	// 世界时钟作 worldTick（与其它入史 helper 同口径）：best-effort 读，失败回退 0。
+	tick := 0
+	if w, err := world.Get(ctx, service.db, worldID); err == nil {
+		tick = w.Tick
+	}
+	title := fmt.Sprintf("凶兆降世·%s", strings.TrimSpace(bossName))
+	narrative := fmt.Sprintf("天地震动——因『%s』之回响，凶煞『%s』自虚无凝形。", strings.TrimSpace(origin), strings.TrimSpace(bossName))
+	service.recordWorldChronicleBestEffort(ctx, worldID, tick, WorldChronicleBossArisen, title, narrative, 6, nil)
 }
 
 // countThreatEmergedTraces 数某世界已沉淀的 field_boss/elite「威胁浮现」痕迹（events 表 reason_code=THREAT_EMERGED、world_id 命中）。

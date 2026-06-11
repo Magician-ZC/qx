@@ -163,7 +163,7 @@ func TestFactionSpawn_AmbientUnitsInSnapshotNotInExecutionOrder(t *testing.T) {
 
 // TestAmbientWander_FlagOffStatic 验证 QUNXIANG_AMBIENT_WANDER 关时 NPC 静态站着（坐标不变）。
 func TestAmbientWander_FlagOffStatic(t *testing.T) {
-	t.Setenv("QUNXIANG_AMBIENT_WANDER", "") // 显式关（默认即关，防外部环境干扰）
+	t.Setenv("QUNXIANG_AMBIENT_WANDER", "false") // 显式关（默认已开），测关闭路径
 	_, service := newMainWorldTestService(t)
 	ctx := context.Background()
 	sessionID, npcIDs := seedSpawnSessionWithMap(t, service)

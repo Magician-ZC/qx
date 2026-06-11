@@ -73,7 +73,7 @@ func isDungeonTerminalAction(a DungeonNextAction) bool {
 
 // TestStartDungeonAsync_DisabledZeroBehavior 验证 flag 关时入口零行为（不建段、不读单位）。
 func TestStartDungeonAsync_DisabledZeroBehavior(t *testing.T) {
-	withDungeonFlag(t, "")
+	withDungeonFlag(t, "false")
 	db, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 
@@ -295,7 +295,7 @@ func TestResolveDungeonTimeout_CharterFallback(t *testing.T) {
 
 // TestResolveDungeonTimeout_DisabledZeroBehavior 验证 flag 关时超时钩子零行为（绝不误结算）。
 func TestResolveDungeonTimeout_DisabledZeroBehavior(t *testing.T) {
-	withDungeonFlag(t, "")
+	withDungeonFlag(t, "false")
 	_, _, service := newThreatTestService(t)
 	ctx := context.Background()
 	n, err := service.ResolveDungeonTimeout(ctx, &State{ID: "s1"})

@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -164,8 +165,22 @@ func (service *Service) StartDungeonAsync(ctx context.Context, sessionID string,
 	// L1：踏入回合钉死——用建段时刻的 live Turn 作为整段副本 combat_roll 的回合 salt，
 	// 使后续 resume/兜底续跑的骰序与玩家何时回来（live Turn 可能已漂移）无关，确定性可复现。
 	enteredTurn := 0
+	worldID := ""
 	if state := service.loadStateForFate(ctx, sessionID); state != nil {
 		enteredTurn = state.TurnState.Turn
+		worldID = state.WorldID
+	}
+
+	// 进入闸（模块3：每日次数/冷却）：异步副本与同步同口径，在落首段（=真正踏入）前校验并消费一次进入名额。
+	// 队伍以队长=首位单位计名额；flag 关时恒放行、零行为；DB 故障 best-effort 放行（仅记 warn）。
+	if leaderID := unitIDs[0]; leaderID != "" {
+		allowed, _, lockErr := service.checkAndConsumeDungeonEntry(ctx, worldID, leaderID, dungeonLockoutKey)
+		if lockErr != nil {
+			slog.WarnContext(ctx, "dungeon async lockout gate error; allowing entry", "session_id", sessionID, "unit_id", leaderID, "error", lockErr)
+		}
+		if !allowed {
+			return nil, ErrDungeonDailyCapReached
+		}
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)

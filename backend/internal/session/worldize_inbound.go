@@ -40,14 +40,9 @@ const (
 	inboundHopFidelity = 1.0
 )
 
-// worldizeInboundEnabled 读 QUNXIANG_WORLDIZE_INBOUND（true/1/yes/on 视为开），默认关 → 入向扇出 no-op、零行为变化。
+// worldizeInboundEnabled 读 QUNXIANG_WORLDIZE_INBOUND，默认开（显式 false/0/no/off 可关 → 入向扇出 no-op、零行为变化）。
 func worldizeInboundEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_WORLDIZE_INBOUND"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_WORLDIZE_INBOUND", true)
 }
 
 // worldizingInboundCodes 是触发入向反查的白名单 reason-code（设计 §1.3：背叛/救援/倒地/社交/债务）。

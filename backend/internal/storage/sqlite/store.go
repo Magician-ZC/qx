@@ -146,6 +146,11 @@ func Open(path string) (*sql.DB, error) {
 	if _, err := db.ExecContext(ctx, dbmigrate.WorldBossActiveUniqueIndexSQLite); err != nil {
 		log.Printf("ensure world_boss active unique index best-effort failed: %v", err)
 	}
+	// world_bosses 补 defeated_at（boss 被讨平的真实时间戳，可空，供「最近讨平 boss」排序键；存量库幂等补列）。
+	if err := dbmigrate.EnsureColumns(ctx, db, "world_bosses", dbmigrate.WorldBossDefeatedAtColumn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// Wave2 跨玩家：cross_events 设计列 + social_objects 撮合列 + cross_event_echoes 视角层表。
 	if err := dbmigrate.EnsureColumns(ctx, db, "cross_events", dbmigrate.CrossEventColumns); err != nil {
 		_ = db.Close()

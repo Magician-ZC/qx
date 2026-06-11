@@ -23,6 +23,8 @@ type Props = {
 //   - faction_war / town_fall：阵营冲突 / 城镇易主（赭红，烽烟）。
 //   - cataclysm：天灾巨变（紫，异变）。
 const CATEGORY_META: Record<string, { icon: string; label: string; color: string }> = {
+  genesis: { icon: "🌅", label: "创世", color: "#b8860b" },
+  boss_arisen: { icon: "👁", label: "凶兆", color: "#7b3f5f" },
   boss_slain: { icon: "⚔", label: "霸主讨平", color: "#a3433f" },
   hero_born: { icon: "✦", label: "英雄诞生", color: "#c79a3a" },
   hero_died: { icon: "🕯", label: "英雄陨落", color: "#6b7a82" },
@@ -89,7 +91,18 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const groups = useMemo(() => groupByEra(entries), [entries]);
+  // genesis（创世序章）从普通流里抽出，固定置顶卷首渲染（比普通条目更大、有「序」字标记），
+  // 不参与按纪元倒序的普通流。理论上每世界至多一条 genesis；若有多条只取首条作卷首，余者并入普通流容错。
+  const genesisEntry = useMemo(
+    () => entries.find((e) => e.category === "genesis") ?? null,
+    [entries],
+  );
+  const groups = useMemo(() => {
+    const rest = genesisEntry
+      ? entries.filter((e) => e.id !== genesisEntry.id)
+      : entries;
+    return groupByEra(rest);
+  }, [entries, genesisEntry]);
 
   const onOverlayClick = useCallback(
     (e: React.MouseEvent) => {
@@ -120,7 +133,7 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
         <div style={bodyStyle}>
           {loading ? (
             <div style={hintStyle}>正在翻阅史册…</div>
-          ) : groups.length === 0 ? (
+          ) : !genesisEntry && groups.length === 0 ? (
             <div style={emptyStyle}>
               <div style={emptyMarkStyle}>𐤟</div>
               <div style={emptyTitleStyle}>史册尚未落笔</div>
@@ -132,6 +145,7 @@ export function WorldChroniclePanel({ sessionId, onClose }: Props) {
             </div>
           ) : (
             <div style={scrollStyle}>
+              {genesisEntry ? <GenesisPreface entry={genesisEntry} /> : null}
               {groups.map((g, gi) => (
                 <section key={`${g.era}-${gi}`} style={eraSectionStyle}>
                   <div style={eraHeadStyle}>
@@ -181,6 +195,29 @@ function ChronicleRow({ entry }: { entry: WorldChronicleEntry }) {
         </div>
       </div>
     </li>
+  );
+}
+
+// GenesisPreface 渲染创世序章卷首：固定置顶、比普通条目更大、有「序」字朱印标记，
+// 史前楔子口吻（含世界名、三阵营分立、舞台让给后人），不参与按纪元倒序的普通流。
+function GenesisPreface({ entry }: { entry: WorldChronicleEntry }) {
+  const meta = categoryMeta("genesis");
+  return (
+    <section style={prefaceStyle}>
+      <div style={prefaceSealStyle} aria-hidden="true">
+        序
+      </div>
+      <div style={prefaceBodyStyle}>
+        <div style={prefaceTopStyle}>
+          <span style={prefaceIconStyle} aria-hidden="true">
+            {meta.icon}
+          </span>
+          <span style={prefaceTitleStyle}>{entry.title_zh || "创世序章"}</span>
+        </div>
+        {entry.narrative_zh ? <p style={prefaceNarrativeStyle}>{entry.narrative_zh}</p> : null}
+        <div style={prefaceMetaStyle}>{entry.era || "混沌之初"} · 卷首</div>
+      </div>
+    </section>
   );
 }
 
@@ -293,6 +330,76 @@ const emptyHintStyle: React.CSSProperties = {
   color: "#9a8a72",
   maxWidth: 380,
   margin: "0 auto",
+};
+
+// 创世序章卷首样式：朱印「序」字 + 描金边框，比普通纪元段更突出，固定置顶。
+const prefaceStyle: React.CSSProperties = {
+  position: "relative",
+  display: "flex",
+  gap: 16,
+  padding: "20px 22px 20px 18px",
+  marginBottom: 26,
+  borderRadius: 12,
+  border: "1.5px solid rgba(184, 134, 11, 0.55)",
+  background:
+    "linear-gradient(180deg, rgba(250, 242, 222, 0.95) 0%, rgba(244, 231, 200, 0.95) 100%)",
+  boxShadow: "0 6px 18px rgba(120, 86, 20, 0.18), inset 0 0 32px rgba(184, 134, 11, 0.08)",
+  boxSizing: "border-box",
+};
+
+const prefaceSealStyle: React.CSSProperties = {
+  flexShrink: 0,
+  width: 38,
+  height: 38,
+  borderRadius: 6,
+  border: "2px solid #9a3b2e",
+  color: "#9a3b2e",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 20,
+  fontWeight: 700,
+  letterSpacing: 0,
+  background: "rgba(255, 250, 242, 0.7)",
+};
+
+const prefaceBodyStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const prefaceTopStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+};
+
+const prefaceIconStyle: React.CSSProperties = {
+  fontSize: 20,
+};
+
+const prefaceTitleStyle: React.CSSProperties = {
+  fontSize: 19,
+  fontWeight: 700,
+  letterSpacing: 3,
+  color: "#7a5510",
+};
+
+const prefaceNarrativeStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 14.5,
+  lineHeight: 2,
+  color: "#4a3a22",
+  textIndent: "2em",
+};
+
+const prefaceMetaStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#a07a2a",
+  letterSpacing: 1,
 };
 
 const eraSectionStyle: React.CSSProperties = {

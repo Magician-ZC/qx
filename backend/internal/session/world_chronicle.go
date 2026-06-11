@@ -31,6 +31,8 @@ const (
 	WorldChronicleHeroBorn     = "hero_born"     // 传奇角色诞生（高 importance）
 	WorldChronicleHeroDied     = "hero_died"     // 传奇角色陨落（含 mortal 高龄逝去 + 血脉传承联动）
 	WorldChronicleFactionWar   = "faction_war"   // 阵营冲突/城镇易主
+	WorldChronicleGenesis      = "genesis"       // 创世序章（每世界一条、卷首楔子，模块1）
+	WorldChronicleBossArisen   = "boss_arisen"   // 凶煞自虚无凝形的「降世」前兆（历史→boss 反向链路，模块2 引用）
 )
 
 // 纪元名称表（§7.2 纪元更替）：按累计重大事件段数命名，叙事用、循环复用末名以防越界。

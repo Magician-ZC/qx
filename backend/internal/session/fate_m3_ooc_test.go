@@ -115,7 +115,8 @@ func TestRefreshConsistencyTightening(t *testing.T) {
 		}
 	}
 
-	// flag 关：即便堆高 OOC 也零行为（永不 latch）。
+	// flag 关：即便堆高 OOC 也零行为（永不 latch）。显式关（默认已开）。
+	t.Setenv("QUNXIANG_CONSISTENCY_TIGHTEN", "false")
 	for i := 0; i < 10; i++ {
 		emit(analytics.EventFateReactOoc)
 	}

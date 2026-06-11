@@ -68,14 +68,9 @@ const (
 	autoMatchTimeLayout = "2006-01-02 15:04:05"
 )
 
-// autoMatchEnabled 读 QUNXIANG_AUTO_MATCH（true/1/yes/on 视为开），默认关 → scanAndMatch 整方法 no-op、零行为变化、零 DB 写。
+// autoMatchEnabled 读 QUNXIANG_AUTO_MATCH，默认开（显式 false/0/no/off 可关 → scanAndMatch 整方法 no-op、零行为变化、零 DB 写）。
 func autoMatchEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_MATCH"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_AUTO_MATCH", true)
 }
 
 // scanAndMatch 在部署边界低频自动撮合：先回收过期客体，再挑本局玩家阵营的存活角色作候选、确定性算四因子、
@@ -200,6 +195,7 @@ func (service *Service) buildMatchCandidates(ctx context.Context, state *State, 
 //   - 去重：本 session 已在 localPool / 属本 session 的单位不重并入（它们已在池）。
 //   - 存活 + 当日新绑定未达上限（dailyBindExhausted 与本 session 单位同口径，反大 R 垄断 + 反洪泛）。
 //   - 死亡/无命单位剔除。
+//
 // 控量：跨 session 并入数受 autoMatchCrossPoolMax 截断（按 unitID 确定性排序后取前 N，view-independent、可复现）。
 //
 // 注意：被撮进的社会客体成员可跨 session（socialobject.AddMember 支持多成员、按 (object_id,unit_id) 幂等）——

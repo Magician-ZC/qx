@@ -37,14 +37,16 @@ const (
 	dungeonMaxFloors = 10 // 防滥用上限：单次副本最多 10 层
 )
 
-// dungeonEnabled 读 QUNXIANG_DUNGEON（true/1/yes/on 视为开），默认关 → RunDungeon 直接返回 ErrDungeonDisabled、零行为。
+// dungeonOutcomeLocked 是「今日进入次数已尽」的整局终局（模块3 进入闸）：不开打、不结算、不分赃、不惩罚。
+const dungeonOutcomeLocked = "locked"
+
+// dungeonLockoutKey 是同步/异步副本玩法在进入闸里的逻辑 dungeon_id。
+// 同步副本是 ad-hoc 逐层生成、没有稳定档位 ID，故用固定逻辑键代表「副本玩法」整体的每日次数闸（与设计模块3 一致）。
+const dungeonLockoutKey = "dungeon"
+
+// dungeonEnabled 读 QUNXIANG_DUNGEON，默认开（显式 false/0/no/off 可关 → RunDungeon 直接返回 ErrDungeonDisabled、零行为）。
 func dungeonEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_DUNGEON"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_DUNGEON", true)
 }
 
 // DungeonFloorResult 单层结算结果。
@@ -118,6 +120,23 @@ func (service *Service) RunDungeon(ctx context.Context, state *State, unitIDs []
 	}
 	result.Floors = floors
 	result.DungeonID = "dungeon_" + uuid.NewString()
+
+	// 进入闸（模块3：每日次数/冷却）：在真正开打前校验并消费一次进入名额。
+	// 闸键 dungeonID 用「这座副本的逻辑标识」——同步副本是 ad-hoc 生成、无稳定档位 ID，
+	// 故用固定逻辑键 dungeonLockoutKey 表示「副本玩法」整体的每日次数（队伍以队长=首位单位计名额）。
+	// flag 关时 checkAndConsumeDungeonEntry 恒放行、零行为；DB 故障 best-effort 放行（仅记日志，不卡玩家）。
+	if leaderID := unitIDs[0]; leaderID != "" {
+		allowed, _, lockErr := service.checkAndConsumeDungeonEntry(ctx, state.WorldID, leaderID, dungeonLockoutKey)
+		if lockErr != nil {
+			// best-effort：闸自身故障不阻断玩法，仅记日志后照常开打。
+			appendLog(state, "dungeon_lockout_error", fmt.Sprintf("副本进入闸异常（已放行）：%v", lockErr), leaderID, result.DungeonID)
+		}
+		if !allowed {
+			// 今日次数已尽：不开打、不结算、不消耗其它资源，返回 locked 终局。
+			result.Outcome = dungeonOutcomeLocked
+			return result, nil
+		}
+	}
 
 	// 载入参战单位，建立逐层累计的战斗态。
 	members := make([]*memberCombatState, 0, len(unitIDs))

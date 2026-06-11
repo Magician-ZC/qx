@@ -48,6 +48,7 @@ func newMainWorldTestService(t *testing.T) (*sql.DB, *Service) {
 // TestCreateMainWorldCharacter_BirthBindingAndCharter 验证捏人降生的正确性：
 // 单玩家角色 + 出身/夙愿入传记 + 离线宪章落 desire/redline + 绑 world_default + 敌方 NPC 保留。
 func TestCreateMainWorldCharacter_BirthBindingAndCharter(t *testing.T) {
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false") // 显式关共享世代（默认已开），测旧私有档绑 world_default 的路径
 	_, service := newMainWorldTestService(t)
 	ctx := context.Background()
 
@@ -180,6 +181,7 @@ func countRelationsForUnit(ctx context.Context, t *testing.T, db *sql.DB, unitID
 
 // TestCreateMainWorldCharacter_Idempotent 验证幂等持久：同账号二次 POST 不重复降生，GET resume 拿到同一角色。
 func TestCreateMainWorldCharacter_Idempotent(t *testing.T) {
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false") // 显式关共享世代（默认已开），测旧私有档 world_default 的幂等
 	_, service := newMainWorldTestService(t)
 	ctx := context.Background()
 
@@ -351,6 +353,7 @@ func TestSeedFactionSpawn_Idempotent(t *testing.T) {
 // uniq_single_player_sessions_account_world + Save 撞唯一冲突时回退查既有角色返回。
 // 校验：并发后库中该 (account, world_default) 恰 1 条 session，且两次返回收敛到同一 session/unit。
 func TestCreateMainWorldCharacter_ConcurrentNoDoubleCharacter(t *testing.T) {
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false") // 显式关共享世代（默认已开），测旧私有档 world_default 的并发防双角色
 	_, service := newMainWorldTestService(t)
 	ctx := context.Background()
 

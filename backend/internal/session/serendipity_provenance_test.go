@@ -262,11 +262,15 @@ func TestIsZeroAnchorEvent(t *testing.T) {
 	}
 }
 
-// TestSerendipityEnabledFlag 验证 flag 默认关、各开值识别。
+// TestSerendipityEnabledFlag 验证 flag 默认开、显式关值与各开值识别。
 func TestSerendipityEnabledFlag(t *testing.T) {
-	t.Setenv("QUNXIANG_SERENDIPITY", "")
+	t.Setenv("QUNXIANG_SERENDIPITY", "false")
 	if serendipityEnabled() {
-		t.Fatalf("未设置时破圈应默认关")
+		t.Fatalf("显式 false 时破圈应关")
+	}
+	t.Setenv("QUNXIANG_SERENDIPITY", "") // 空串=未设=默认开
+	if !serendipityEnabled() {
+		t.Fatalf("未设置时破圈应默认开")
 	}
 	for _, on := range []string{"true", "1", "yes", "on", "ON", "True"} {
 		t.Setenv("QUNXIANG_SERENDIPITY", on)
@@ -331,9 +335,9 @@ func TestSerendipityBreakout_DailyQuotaAndUpgrade(t *testing.T) {
 	}
 }
 
-// TestSerendipityBreakout_DisabledByDefault 验证 flag 默认关时破圈零行为：零锚来源事件仍走 RouteAutonomous。
+// TestSerendipityBreakout_Disabled 验证 flag 显式关时破圈零行为：零锚来源事件仍走 RouteAutonomous。
 func TestSerendipityBreakout_DisabledByDefault(t *testing.T) {
-	t.Setenv("QUNXIANG_SERENDIPITY", "")
+	t.Setenv("QUNXIANG_SERENDIPITY", "false") // 显式关（默认已开），测关闭路径
 	db, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 

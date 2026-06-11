@@ -31,7 +31,7 @@ func withDungeonFlag(t *testing.T, value string) {
 
 // TestRunDungeon_DisabledZeroBehavior 验证 flag 默认关时入口返回 ErrDungeonDisabled、零行为（不读单位、不改任何状态）。
 func TestRunDungeon_DisabledZeroBehavior(t *testing.T) {
-	withDungeonFlag(t, "") // 显式关
+	withDungeonFlag(t, "false") // 显式关
 	db, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 

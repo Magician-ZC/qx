@@ -108,8 +108,10 @@ func TestKnownGameplayFlagsContainsMainFlags(t *testing.T) {
 		"QUNXIANG_SERENDIPITY", "QUNXIANG_WORLDIZE_INBOUND", "QUNXIANG_AUTO_MATCH", "QUNXIANG_AUTO_SOCIAL",
 		"QUNXIANG_ZEROSUM_CONTEST", "QUNXIANG_BLOOD_FEUD", "QUNXIANG_FREEZE_LIST", "QUNXIANG_CONSISTENCY_TIGHTEN",
 		"QUNXIANG_COURAGE_CURVE", "QUNXIANG_AMBITION_SCORING", "QUNXIANG_MAIN_VILLAGE", "QUNXIANG_WORLD_BINDING",
-		// 三阵营开放世界 F2/F3：阵营切换 + 阵营冲突遭遇（均默认关，GM 后台可运行时开关）。
+		// 三阵营开放世界 F2/F3：阵营切换 + 阵营冲突遭遇（默认开，GM 后台可运行时显式关）。
 		"QUNXIANG_FACTION_SWITCH", "QUNXIANG_FACTION_PVE",
+		// 「flag 默认开」新增白名单（让 GM 能运行时热关）：NPC 衰老死亡 + 跨玩家七交互自动发起。
+		"QUNXIANG_AGING", "QUNXIANG_AUTO_SOCIAL_CROSS",
 	}
 	for _, name := range mustHave {
 		if _, ok := present[name]; !ok {
@@ -132,7 +134,16 @@ func TestKnownGameplayFlagsContainsMainFlags(t *testing.T) {
 	}
 
 	// 默认开的 flag 默认态标对（与各调用点 switch 的默认分支一致）。
-	defaultOn := []string{"QUNXIANG_AUTO_SOCIAL", "QUNXIANG_ZEROSUM_CONTEST", "QUNXIANG_BLOOD_FEUD", "QUNXIANG_MAIN_VILLAGE"}
+	// 「flag 默认开」铺地基后，原默认关的玩法 flag 整体翻为默认开（可显式关）。
+	defaultOn := []string{
+		"QUNXIANG_AUTO_SOCIAL", "QUNXIANG_ZEROSUM_CONTEST", "QUNXIANG_BLOOD_FEUD", "QUNXIANG_MAIN_VILLAGE",
+		"QUNXIANG_DUNGEON", "QUNXIANG_AUTO_PVE", "QUNXIANG_WORLD_BOSS_AUTO", "QUNXIANG_DUNGEON_LOCKOUT",
+		"QUNXIANG_FATE_AUTOTICK", "QUNXIANG_SERENDIPITY", "QUNXIANG_WORLDIZE_INBOUND", "QUNXIANG_WORLD_GENESIS",
+		"QUNXIANG_AUTO_MATCH", "QUNXIANG_FREEZE_LIST", "QUNXIANG_CONSISTENCY_TIGHTEN", "QUNXIANG_COURAGE_CURVE",
+		"QUNXIANG_FACTION_SWITCH", "QUNXIANG_FACTION_PVE", "QUNXIANG_AMBIENT_WANDER", "QUNXIANG_SHARED_WORLD",
+		// 新增白名单（让 GM 能运行时热关）：
+		"QUNXIANG_AGING", "QUNXIANG_AUTO_SOCIAL_CROSS",
+	}
 	for _, name := range defaultOn {
 		if !present[name].DefaultOn {
 			t.Errorf("%s 应标 DefaultOn=true", name)
@@ -144,8 +155,8 @@ func TestKnownGameplayFlagsContainsMainFlags(t *testing.T) {
 		t.Errorf("QUNXIANG_WORLD_BINDING 应是多档字符串型（带 Values）")
 	}
 
-	// 阵营切换 / 阵营冲突默认关（零行为，需 GM 显式开启）。
-	defaultOff := []string{"QUNXIANG_FACTION_SWITCH", "QUNXIANG_FACTION_PVE"}
+	// AMBITION_SCORING 保持默认关（有平衡劣化风险，需 GM 显式开启）。
+	defaultOff := []string{"QUNXIANG_AMBITION_SCORING"}
 	for _, name := range defaultOff {
 		if present[name].DefaultOn {
 			t.Errorf("%s 应默认关（DefaultOn=false）", name)

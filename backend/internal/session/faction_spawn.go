@@ -396,15 +396,10 @@ func (service *Service) SeedFactionSpawnBestEffort(ctx context.Context, sessionI
 // 单个公共 NPC 每个回合边界挪一格的概率（默认 0.30，低概率让舞台「活」而不喧宾夺主）现由
 // runtimeconfig "faction.ambient_wander_move_chance" 提供（默认值在 catalog 注册），读取站点在 advanceAmbientWander 热循环外。
 
-// ambientWanderEnabled 判定出生点公共 NPC 的轻量游走是否开启（QUNXIANG_AMBIENT_WANDER，默认关）。
+// ambientWanderEnabled 判定出生点公共 NPC 的轻量游走是否开启（QUNXIANG_AMBIENT_WANDER，默认开，显式 false/0/no/off 可关）。
 // 关时 wanderAmbientUnits 直接 no-op，NPC 静态站在出生散布点；开后才在回合边界做确定性微游走。
 func ambientWanderEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AMBIENT_WANDER"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_AMBIENT_WANDER", true)
 }
 
 // ambientWanderRoll 据 (sessionID, turn, npcID, salt) 的 FNV-32a 取确定性 [0,1) 随机值（同输入同序，可复现）。

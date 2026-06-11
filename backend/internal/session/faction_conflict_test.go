@@ -344,10 +344,10 @@ func newPersistedConflictState(t *testing.T, service *Service, id string) *State
 	return state
 }
 
-// resetFactionPvEFlag 清除 QUNXIANG_FACTION_PVE 的运行时 override 与环境（默认关态）。
+// resetFactionPvEFlag 显式关 QUNXIANG_FACTION_PVE（默认已开），并清运行时 override，测关闭路径。
 func resetFactionPvEFlag(t *testing.T) {
 	t.Helper()
-	t.Setenv(factionPvEFlagEnv, "")
+	t.Setenv(factionPvEFlagEnv, "false")
 	_, _ = featureflags.ClearOverride(factionPvEFlagEnv)
 	t.Cleanup(func() { _, _ = featureflags.ClearOverride(factionPvEFlagEnv) })
 }

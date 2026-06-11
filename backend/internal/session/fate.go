@@ -420,14 +420,9 @@ func (service *Service) pendingBudgetExhausted(ctx context.Context, ownerID stri
 // runtimeconfig "fate.serendipity_daily_budget" 提供（默认值在 catalog 注册），读取站点见 serendipityBudgetExhausted；
 // 此处原 const 已迁出、无残留引用。
 
-// serendipityEnabled 读 QUNXIANG_SERENDIPITY（true/1/yes/on 视为开），默认关 → 破圈逻辑零行为（与既有 flag 风格一致）。
+// serendipityEnabled 读 QUNXIANG_SERENDIPITY，默认开（显式 false/0/no/off 可关 → 破圈逻辑零行为）。
 func serendipityEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_SERENDIPITY"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_SERENDIPITY", true)
 }
 
 // isZeroAnchorEvent 判断一条事件对某 owner 是否为「零锚来源」种子候选（自包含、不跨 agent 依赖 worldize_inbound.go）：
@@ -1642,14 +1637,9 @@ func SetConsistencyTightened(on bool) {
 	consistencyTightened.Store(on)
 }
 
-// consistencyTightenEnabled 读 QUNXIANG_CONSISTENCY_TIGHTEN（true/1/yes/on 视为开），默认关 → 收紧闭环零行为。
+// consistencyTightenEnabled 读 QUNXIANG_CONSISTENCY_TIGHTEN，默认开（显式 false/0/no/off 可关 → 收紧闭环零行为）。
 func consistencyTightenEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_CONSISTENCY_TIGHTEN"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_CONSISTENCY_TIGHTEN", true)
 }
 
 // TightenedSurpriseCap 是收紧态下「突然戏剧性动作」允许的最高 SurpriseLevel（消费方据此抬高门槛）：

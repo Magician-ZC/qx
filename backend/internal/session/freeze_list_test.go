@@ -241,7 +241,7 @@ func TestFreezeAttributionPerReason(t *testing.T) {
 // --- flag 默认关：FreezeAndSurrenderToFate no-op 兜底 ---
 
 func TestFreezeAndSurrenderToFate_FlagOffNoop(t *testing.T) {
-	// QUNXIANG_FREEZE_LIST 未设（默认关）→ 即使 service/db 为 nil 也不应 panic、不报错、零行为。
+	t.Setenv("QUNXIANG_FREEZE_LIST", "false") // 显式关（默认已开）→ 即使 service/db 为 nil 也不应 panic、不报错、零行为。
 	service := &Service{}
 	routing, err := service.FreezeAndSurrenderToFate(
 		t.Context(), "sess1", nil,

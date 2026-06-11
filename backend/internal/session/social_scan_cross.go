@@ -44,15 +44,10 @@ const (
 	crossSocialFearHot    = 6.0 // 复仇门：高戒备（与高竞争同时满足才升级到复仇，否则反目）
 )
 
-// autoSocialCrossEnabled 读 QUNXIANG_AUTO_SOCIAL_CROSS，**默认关**：仅显式 1/true/yes/on 才开。
-// 默认关：私有档 / 未开此 flag 的共享世界局，跨玩家自动发起整段 no-op、零行为变化、零 DB 写。
+// autoSocialCrossEnabled 读 QUNXIANG_AUTO_SOCIAL_CROSS，**默认开**（显式 false/0/no/off 可关）。
+// 显式关时：私有档 / 显式关此 flag 的共享世界局，跨玩家自动发起整段 no-op、零行为变化、零 DB 写。
 func autoSocialCrossEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_SOCIAL_CROSS"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_AUTO_SOCIAL_CROSS", true)
 }
 
 // scanAndSocializeCrossPlayer 在部署边界让共享世界同区相遇的真人角色**玩法内自动发起**七交互（Phase 3）。

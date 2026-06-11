@@ -125,7 +125,7 @@ func TestWorldizeInbound_NotPayToWin(t *testing.T) {
 
 // TestWorldizeInbound_DisabledNoOp 验证 flag 关时入向 no-op（不写任何留痕）。
 func TestWorldizeInbound_DisabledNoOp(t *testing.T) {
-	// 不调 withInbound：保持默认关。
+	t.Setenv("QUNXIANG_WORLDIZE_INBOUND", "false") // 显式关（默认已开），测关闭路径
 	_, repo, service := newThreatTestService(t)
 	ctx := context.Background()
 	carer := unit.BootstrapRecord(2, "s1", "player", "挚友")

@@ -47,15 +47,10 @@ const (
 	agingDeathProbCap = 0.45
 )
 
-// agingEnabled 判定衰老死亡是否开启（QUNXIANG_AGING，默认关）。
+// agingEnabled 判定衰老死亡是否开启（QUNXIANG_AGING，默认开，显式 false/0/no/off 可关）。
 // 关时 settleAgingBestEffort 直接 no-op，NPC 年龄静止、永不老死；开后才在回合边界做 Age++ + 自然死亡掷骰。
 func agingEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AGING"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_AGING", true)
 }
 
 // agingDeathRoll 据 (sessionID, turn, unitID) 取确定性 [0,1) 掷骰（FNV-32a，禁全局 rand，同输入同序、可复现）。

@@ -237,8 +237,8 @@ func TestEnsureSharedZoneBoss_Idempotent(t *testing.T) {
 // 不开 QUNXIANG_SHARED_WORLD → inSharedWorld=false → 走 ResolveEliteEncounter + state.DefeatedBosses，
 // 绝不在 world_bosses 表落任何共享 boss 行（私有档零影响的硬证据）。
 func TestChallengeZoneBoss_FlagOffStaysPrivateElite(t *testing.T) {
-	// 不设 QUNXIANG_SHARED_WORLD（默认关）；显式清空隔离外部环境。
-	t.Setenv("QUNXIANG_SHARED_WORLD", "")
+	// 显式关 QUNXIANG_SHARED_WORLD（默认已开），测私有 elite 路径。
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false")
 	_, _, service := newThreatTestService(t)
 	ctx := context.Background()
 	mustCreateSharedWorld(t, ctx, service)

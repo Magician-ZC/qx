@@ -284,15 +284,10 @@ func isMainWorldPlayerUnit(state State, unitID string) bool {
 
 // ===== ④ 后台自动 tick（flag QUNXIANG_FATE_AUTOTICK 默认关）：让她自己活，世界自己往前走 =====
 
-// fateAutoTickEnabled 读 QUNXIANG_FATE_AUTOTICK（true/1/yes/on 视为开），默认关 → ticker 零行为
-//（与既有 flag 风格一致；默认玩家手动指引/按钮即可推进，开启=世界自己往前走）。
+// fateAutoTickEnabled 读 QUNXIANG_FATE_AUTOTICK，默认开（显式 false/0/no/off 可关 → ticker 零行为）。
+// （开启=世界自己往前走；显式关时回落玩家手动指引/按钮推进。）
 func fateAutoTickEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FATE_AUTOTICK"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_FATE_AUTOTICK", true)
 }
 
 // sharedWorldDrivenByRegionRunner 判定某 session 是否「已由 region-runner 统一推进」——满足三条同时成立：

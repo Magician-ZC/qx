@@ -156,14 +156,14 @@ func TestOfflineHoursFromState(t *testing.T) {
 
 // TestOfflineCourageRejectModifierFlagGated 验证 flag 默认关时桥恒 1.0（中性、零行为）。
 func TestOfflineCourageRejectModifierFlagGated(t *testing.T) {
-	withCourageCurve(t, "") // 显式置空 = 默认关
+	withCourageCurve(t, "false") // 显式关（默认已开）
 	st := State{UpdatedAt: time.Now().Add(-72 * time.Hour)}
 	dec := unitDecisionPayload{Action: DecisionActionRomance} // 高代价 + 长离线
 	if got := offlineCourageRejectModifier(st, dec); got != 1.0 {
 		t.Fatalf("flag 关时应恒 1.0（中性），得到 %v", got)
 	}
-	// 各非开值都视为关。
-	for _, v := range []string{"false", "0", "no", "off", "bogus"} {
+	// 各显式关值都视为关（注意：默认已开，未知值 "bogus" 会落 default→开，故不在此列）。
+	for _, v := range []string{"false", "0", "no", "off"} {
 		withCourageCurve(t, v)
 		if got := offlineCourageRejectModifier(st, dec); got != 1.0 {
 			t.Fatalf("flag=%q 应视为关（1.0），得到 %v", v, got)

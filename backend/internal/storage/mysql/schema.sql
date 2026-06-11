@@ -220,7 +220,26 @@ CREATE TABLE IF NOT EXISTS world_bosses (
   status VARCHAR(32) NOT NULL DEFAULT 'active',
   region_id VARCHAR(191) NOT NULL DEFAULT '',
   created_at VARCHAR(64) NOT NULL DEFAULT '',
+  -- defeated_at：boss 被讨平（active→defeated）的真实时间戳（UTC，可空）。仅 active→defeated 闩锁成功者写入，
+  -- 供「最近讨平 boss」按 defeated_at DESC 排序（created_at 不可靠作排序键）。
+  defeated_at VARCHAR(64) NULL,
   INDEX idx_world_bosses_world (world_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 副本进入次数闸（dungeon lockout）：限某单位在某时间窗（window_key，如「每日」日期串）对某副本的进入次数。
+-- 唯一键 (world_id, unit_id, dungeon_id, window_key)：同窗同副本同单位至多一行，entered_count 累计、last_entered_at 留痕。
+-- MySQL PRIMARY KEY 不容 NULL 列，故 world_id 可空 + 用 UNIQUE KEY uq_dungeon_lockout（NULL 不参与唯一比对，
+-- 兼容私有/单机旧局 world_id 留空；惰性检查由 session 业务层负责，本表只是地基）。idx 复合查询索引 (world_id, unit_id)。
+CREATE TABLE IF NOT EXISTS dungeon_lockouts (
+  world_id VARCHAR(191) NULL,
+  unit_id VARCHAR(191) NOT NULL DEFAULT '',
+  dungeon_id VARCHAR(191) NOT NULL DEFAULT '',
+  window_key VARCHAR(64) NOT NULL DEFAULT '',
+  entered_count INT NOT NULL DEFAULT 0,
+  last_entered_at VARCHAR(64) NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_dungeon_lockout (world_id, unit_id, dungeon_id, window_key),
+  INDEX idx_dungeon_lockouts_world_unit (world_id, unit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- user_id/ab_bucket/client_ts/app_version 供北极星/A-B 口径（按用户聚合、实验分桶、客户端校时、版本切片），

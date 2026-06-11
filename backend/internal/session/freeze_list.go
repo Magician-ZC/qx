@@ -24,15 +24,10 @@ import (
 	"qunxiang/backend/internal/unit"
 )
 
-// freezeListEnabled 读 QUNXIANG_FREEZE_LIST（true/1/yes/on 视为开），默认关 → FreezeAndSurrenderToFate 整段
-// no-op、零行为变化、零 DB 写。判定函数 shouldFreezeAction 本身是纯逻辑、不读 flag（供 Wire 在拦截点按需调用）。
+// freezeListEnabled 读 QUNXIANG_FREEZE_LIST，默认开（显式 false/0/no/off 可关 → FreezeAndSurrenderToFate 整段
+// no-op、零行为变化、零 DB 写）。判定函数 shouldFreezeAction 本身是纯逻辑、不读 flag（供 Wire 在拦截点按需调用）。
 func freezeListEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_FREEZE_LIST"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_FREEZE_LIST", true)
 }
 
 // FreezeReason 标识一个动作被冻结的依据类别（供留痕/前端文案区分「凭什么拦」）。

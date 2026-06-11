@@ -6,8 +6,10 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"qunxiang/backend/internal/engine/encounter"
 	"qunxiang/backend/internal/engine/events"
@@ -371,8 +373,8 @@ func TestWorldBossAutoRefreshIdempotentAndScoped(t *testing.T) {
 
 // flag 默认关时自动刷新整方法 no-op：零 DB 写、不生成任何 Boss。
 func TestWorldBossAutoRefreshDisabledNoOp(t *testing.T) {
-	// 不设 QUNXIANG_WORLD_BOSS_AUTO（默认关）；显式清空以隔离外部环境。
-	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "")
+	// 显式关 QUNXIANG_WORLD_BOSS_AUTO（默认已开），测关闭路径零行为。
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "false")
 	_, _, service := newThreatTestService(t)
 	ctx := context.Background()
 	wid := mustCreateWorld(t, ctx, service)
@@ -846,6 +848,203 @@ func TestWorldBossAutoRefreshWithProvenanceSpawnsAndRecords(t *testing.T) {
 	}
 	if got := countWorldBossProvenance(t, service, wid); got != 1 {
 		t.Fatalf("no-op 兜底不应重复记 provenance，仍应为 1，得到 %d", got)
+	}
+}
+
+// ---- 模块2：历史→boss 反向链路 + 世界Boss 真实时间刷新间隔 ----
+
+// activeWorldBossName 读某世界当前 active boss 的名字（断言「缘起」是否拼进名字用）；无 active 返空串。
+func activeWorldBossName(t *testing.T, service *Service, worldID string) string {
+	t.Helper()
+	var name string
+	err := service.db.QueryRowContext(context.Background(),
+		`SELECT name FROM world_bosses WHERE world_id = ? AND status = 'active' LIMIT 1`, worldID).Scan(&name)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// seedDefeatedBossAt 直接插入一头 status='defeated' 的世界Boss，defeated_at=给定时刻（控制真实时间门的相对位置）。
+// region_id 用非空值（不占自动刷新要插入的 region_id=” 槽，避免与新刷的 active 撞 partial unique）。
+func seedDefeatedBossAt(t *testing.T, ctx context.Context, service *Service, worldID string, defeatedAt time.Time) {
+	t.Helper()
+	id := "wboss_defeated_" + worldID
+	if _, err := service.db.ExecContext(ctx, `
+		INSERT INTO world_bosses (id, world_id, name, hp_max, hp_remaining, status, region_id, defeated_at)
+		VALUES (?, ?, ?, ?, ?, 'defeated', ?, ?)`,
+		id, worldID, "旧凶煞", 100, 0, "r_old", defeatedAt.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("插入 defeated boss 失败: %v", err)
+	}
+}
+
+// countBossArisenChronicle 数某世界 category=boss_arisen 的世界编年史条目数。
+func countBossArisenChronicle(t *testing.T, service *Service, worldID string) int {
+	t.Helper()
+	feed, err := service.WorldChronicleFeedByWorldID(context.Background(), worldID, 0)
+	if err != nil {
+		t.Fatalf("读世界编年史失败: %v", err)
+	}
+	n := 0
+	for _, e := range feed.Entries {
+		if e.Category == WorldChronicleBossArisen {
+			n++
+		}
+	}
+	return n
+}
+
+// 真实时间刷新间隔门：QUNXIANG_WORLD_BOSS_RESPAWN_HOURS>0 时，距最近一次讨平未满 N 小时不刷、已满才刷。
+func TestWorldBossRespawnHoursGate(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	t.Setenv("QUNXIANG_WORLD_BOSS_RESPAWN_HOURS", "6")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid) // provenance 门：先沉淀 field_boss 痕迹
+
+	// 1) 最近一次讨平在 2 小时前（< 6 小时间隔）→ 不应刷。
+	seedDefeatedBossAt(t, ctx, service, wid, time.Now().UTC().Add(-2*time.Hour))
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("间隔门内自动刷新不应报错: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 0 {
+		t.Fatalf("距上次讨平仅 2h(<6h)，间隔门应拦住刷新，得到 %d 头 active", got)
+	}
+
+	// 2) 把 defeated_at 改到 7 小时前（> 6 小时间隔）→ 应刷出一头。
+	if _, err := service.db.ExecContext(ctx,
+		`UPDATE world_bosses SET defeated_at = ? WHERE world_id = ? AND status = 'defeated'`,
+		time.Now().UTC().Add(-7*time.Hour).Format(time.RFC3339), wid); err != nil {
+		t.Fatalf("改 defeated_at 失败: %v", err)
+	}
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("间隔已满自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("距上次讨平已 7h(>6h)，间隔门应放行刷新，得到 %d 头 active", got)
+	}
+}
+
+// 无 defeated 记录时间隔门不拦（首次/从未讨平的世界，QUNXIANG_WORLD_BOSS_RESPAWN_HOURS>0 也照刷）。
+func TestWorldBossRespawnHoursNoDefeatedNoBlock(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	t.Setenv("QUNXIANG_WORLD_BOSS_RESPAWN_HOURS", "24")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid)
+
+	// 从未讨平过任何 boss → 间隔门无参照 → 不拦，正常刷。
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("无 defeated 记录时自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("从未讨平的世界应照刷（间隔门无参照），得到 %d 头 active", got)
+	}
+}
+
+// 真实讨平路径写 defeated_at：coopStrike 打死 boss 后，该行 defeated_at 应为非空 RFC3339 时间戳，且可被间隔门读出。
+func TestWorldBossSettleWritesDefeatedAt(t *testing.T) {
+	_, repo, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	bossID, err := service.SpawnWorldBoss(ctx, wid, "速死龙", 50, "r1")
+	if err != nil {
+		t.Fatalf("投放失败: %v", err)
+	}
+	a := bossStriker(t, ctx, repo, 301, "甲", 30)
+	b := bossStriker(t, ctx, repo, 302, "乙", 30)
+	if _, err := coopStrike(ctx, service, wid, bossID, a); err != nil {
+		t.Fatalf("甲出手失败: %v", err)
+	}
+	r, err := coopStrike(ctx, service, wid, bossID, b)
+	if err != nil || !r.SettledByMe {
+		t.Fatalf("致命一击应结算，得到 err=%v settled=%v", err, r.SettledByMe)
+	}
+	// 闩锁应已写 defeated_at（非空、可解析 RFC3339）。
+	var defeatedAt string
+	if err := service.db.QueryRowContext(ctx,
+		`SELECT defeated_at FROM world_bosses WHERE id = ?`, bossID).Scan(&defeatedAt); err != nil {
+		t.Fatalf("读 defeated_at 失败: %v", err)
+	}
+	if defeatedAt == "" {
+		t.Fatalf("讨平闩锁应写 defeated_at，得到空")
+	}
+	if _, perr := time.Parse(time.RFC3339, defeatedAt); perr != nil {
+		t.Fatalf("defeated_at 应为合法 RFC3339，得到 %q (err=%v)", defeatedAt, perr)
+	}
+}
+
+// 历史→boss 缘起：有 importance>=7 的世界编年史时，自动刷新的 boss 名带「因『<缘起>』之回响」修饰，并记一条 boss_arisen。
+func TestWorldBossHistoryOriginRecordsArisen(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid)
+
+	// 沉淀一条 importance>=7 的世界编年史（用既有 helper chronicleBossSlain，importance=7）作历史缘起。
+	originTitle := service.chronicleBossSlain(ctx, wid, 5, "u_slayer", "讨龙者", "黑鳞魔王", "焦土")
+	if originTitle == "" {
+		t.Fatalf("沉淀历史缘起编年史失败（空 id）")
+	}
+
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("有历史时自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("应刷出一头，得到 %d", got)
+	}
+	// boss 名应含「之回响」缘起修饰（缘起标题=「黑鳞魔王讨平」）。
+	name := activeWorldBossName(t, service, wid)
+	if name == "" || !strings.Contains(name, "之回响") || !strings.Contains(name, "黑鳞魔王讨平") {
+		t.Fatalf("有历史缘起时 boss 名应含『…之回响』修饰，得到 %q", name)
+	}
+	// 应记恰一条 boss_arisen 编年史。
+	if got := countBossArisenChronicle(t, service, wid); got != 1 {
+		t.Fatalf("有历史缘起应记恰 1 条 boss_arisen 编年史，得到 %d", got)
+	}
+}
+
+// 无历史时不记 boss_arisen、行为同旧：仅有 provenance 痕迹、无任何 importance>=7 编年史 → 刷出通用 boss、无缘起修饰、无 boss_arisen。
+func TestWorldBossNoHistoryNoArisen(t *testing.T) {
+	t.Setenv("QUNXIANG_WORLD_BOSS_AUTO", "1")
+	_, _, service := newThreatTestService(t)
+	ctx := context.Background()
+	wid := mustCreateWorld(t, ctx, service)
+	seedFieldBossTrace(t, ctx, service, wid)
+
+	if err := service.maybeRefreshWorldBoss(ctx, wid); err != nil {
+		t.Fatalf("无历史时自动刷新失败: %v", err)
+	}
+	if got := countActiveWorldBosses(t, service, wid); got != 1 {
+		t.Fatalf("应刷出一头通用 boss，得到 %d", got)
+	}
+	// boss 名应是通用名表里的名字（不含缘起修饰）。
+	name := activeWorldBossName(t, service, wid)
+	if strings.Contains(name, "之回响") {
+		t.Fatalf("无历史时 boss 名不应含缘起修饰，得到 %q", name)
+	}
+	// 不应记任何 boss_arisen。
+	if got := countBossArisenChronicle(t, service, wid); got != 0 {
+		t.Fatalf("无历史时不应记 boss_arisen，得到 %d", got)
+	}
+}
+
+// worldBossRespawnHours 纯解析：空/非法/负值归 0；正整数原样返回。
+func TestWorldBossRespawnHoursParse(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want int
+	}{
+		{"", 0}, {"  ", 0}, {"0", 0}, {"-3", 0}, {"abc", 0}, {"6", 6}, {" 24 ", 24}, {"168", 168},
+	}
+	for _, c := range cases {
+		t.Setenv("QUNXIANG_WORLD_BOSS_RESPAWN_HOURS", c.raw)
+		if got := worldBossRespawnHours(); got != c.want {
+			t.Fatalf("worldBossRespawnHours(%q) = %d, 期望 %d", c.raw, got, c.want)
+		}
 	}
 }
 

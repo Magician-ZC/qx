@@ -93,7 +93,7 @@ func TestFactionSwitchRoll_Deterministic(t *testing.T) {
 
 // TestMaybeSwitchFaction_FlagOffNoSwitch 验证 flag 关时绝不切（即便条件全满足）——零行为。
 func TestMaybeSwitchFaction_FlagOffNoSwitch(t *testing.T) {
-	t.Setenv(factionSwitchFlagEnv, "") // 默认关
+	t.Setenv(factionSwitchFlagEnv, "false") // 显式关（默认已开）
 	db, repo, service := newDriftTestService(t)
 	ctx := context.Background()
 

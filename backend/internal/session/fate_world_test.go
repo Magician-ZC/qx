@@ -35,7 +35,7 @@ func (s *fateWorldStubLLM) GenerateJSON(_ context.Context, req ai.CompletionRequ
 }
 
 // newFateWorldTestService 起一个临时 SQLite + 完整 Service（含 sessions/units/mutator），注入 stub LLM 并开异步执行
-//（与生产 router 一致：AdvanceFateWorld 才会经 fast-path 起后台执行一轮）。强制 world binding=shared 让降生绑 world_default。
+// （与生产 router 一致：AdvanceFateWorld 才会经 fast-path 起后台执行一轮）。强制 world binding=shared 让降生绑 world_default。
 func newFateWorldTestService(t *testing.T, llm completionClient) (*sql.DB, *Service) {
 	t.Helper()
 	t.Setenv("QUNXIANG_WORLD_BINDING", "shared")
@@ -161,6 +161,7 @@ func TestSurfaceLifeBeat_EntersFeed(t *testing.T) {
 // TestAdvanceFateWorld_ZeroEnemyEndToEnd 是核心证明（⑥ + 整链路）：降生 0 敌方主世界角色 → AdvanceFateWorld →
 // 等执行完 → OpenFateFeed 应有 ≥1 条 LIFE_BEAT。即「她确实经历了一拍、feed 真有内容」——命运循环真转起来。
 func TestAdvanceFateWorld_ZeroEnemyEndToEnd(t *testing.T) {
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false") // 显式关共享世代（默认已开），测旧私有档 world_default 的命运推进/生活 beat 路径
 	stub := &fateWorldStubLLM{decisionJSON: `{"action":"hold","next_action":"她沿着河岸往北走，想看看那座据点","speak":"总算能喘口气了","reasoning":"先摸清周遭再图后路"}`}
 	_, service := newFateWorldTestService(t, stub)
 	ctx := context.Background()
@@ -203,7 +204,7 @@ func TestAdvanceFateWorld_ZeroEnemyEndToEnd(t *testing.T) {
 // TestFateAutoTick_FlagOffNoBehavior 验证 ④：QUNXIANG_FATE_AUTOTICK 关时 runFateAutoTickPass 零行为——
 // 不推任何 session（部署中的主世界角色保持 Turn1/部署、ExecutionInProgress=false）。
 func TestFateAutoTick_FlagOffNoBehavior(t *testing.T) {
-	t.Setenv("QUNXIANG_FATE_AUTOTICK", "") // 显式关（默认即关）
+	t.Setenv("QUNXIANG_FATE_AUTOTICK", "false") // 显式关（默认已开），测关闭路径零行为
 	_, service := newFateWorldTestService(t, &fateWorldStubLLM{decisionJSON: `{"action":"hold","reasoning":"x"}`})
 	ctx := context.Background()
 
@@ -223,6 +224,7 @@ func TestFateAutoTick_FlagOffNoBehavior(t *testing.T) {
 // TestFateAutoTick_FlagOnAdvances 验证 ④ 反面：QUNXIANG_FATE_AUTOTICK 开时 runFateAutoTickPass 推 world_default 活跃主世界角色一拍。
 func TestFateAutoTick_FlagOnAdvances(t *testing.T) {
 	t.Setenv("QUNXIANG_FATE_AUTOTICK", "true")
+	t.Setenv("QUNXIANG_SHARED_WORLD", "false") // 显式关共享世代（默认已开）：autotick 只扫 world_default，共享档由 region-runner 推进
 	stub := &fateWorldStubLLM{decisionJSON: `{"action":"hold","next_action":"她生起一堆火","reasoning":"夜里得取暖"}`}
 	_, service := newFateWorldTestService(t, stub)
 	ctx := context.Background()

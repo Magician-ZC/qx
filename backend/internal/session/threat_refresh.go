@@ -66,14 +66,9 @@ var threatProvenanceCodes = []string{
 
 var wildThreatNames = []string{"山魈", "独眼熊", "赤鳞蜥", "断尾狼", "夜枭", "石背犀"}
 
-// autoPvEEnabled 读 QUNXIANG_AUTO_PVE（true/1/yes/on 视为开），默认关 → refreshThreats 保持 surface-only 行为完全不变。
+// autoPvEEnabled 读 QUNXIANG_AUTO_PVE，默认开（显式 false/0/no/off 可关 → refreshThreats 保持 surface-only 行为完全不变）。
 func autoPvEEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride("QUNXIANG_AUTO_PVE"))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault("QUNXIANG_AUTO_PVE", true)
 }
 
 // refreshThreats 在部署边界刷新野外威胁：按设计的 threat_spawn_score 真调度，为**至多一名**合格单位（非战斗、健康、有命）

@@ -517,18 +517,12 @@ func loyaltyRejectModifier(actor unit.Record) float64 {
 // （中性，对既有抗命概率逐位一致、零行为变化），仅在显式置 flag 后才灰度启用。
 // ──────────────────────────────────────────────────────────────────────────
 
-// courageCurveFlagEnv 是自治胆量曲线的灰度开关环境变量名。默认关 → 抗命修正恒 1.0（中性）。
+// courageCurveFlagEnv 是自治胆量曲线的灰度开关环境变量名。默认开 → 离线时长进抗命概率与广度门；显式 false/0/no/off 可关（恒 1.0 中性）。
 const courageCurveFlagEnv = "QUNXIANG_COURAGE_CURVE"
 
-// courageCurveEnabled 读 QUNXIANG_COURAGE_CURVE（默认关）。开时离线时长才进抗命概率与广度门。
-// 自包含解析，对齐 ambition_scoring.go / auto_match.go 的 flag idiom。
+// courageCurveEnabled 读 QUNXIANG_COURAGE_CURVE，默认开（显式 false/0/no/off 可关）。开时离线时长才进抗命概率与广度门。
 func courageCurveEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(featureflags.EnvOrOverride(courageCurveFlagEnv))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return featureflags.EnabledWithDefault(courageCurveFlagEnv, true)
 }
 
 // autonomyDomain 表示一个「可自决领域」标签——广度曲线按离线时长分档解锁/限制的最小单位。

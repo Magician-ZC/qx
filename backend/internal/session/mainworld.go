@@ -379,6 +379,11 @@ func (service *Service) CreateMainWorldCharacter(ctx context.Context, accountID 
 	// 世界共享 NPC 是 Phase 4 的事。
 	service.scopeSharedWorldUnitsToZoneBestEffort(ctx, &state, state.CurrentZoneID, append([]string{}, state.PlayerUnitIDs...))
 
+	// 创世序章（模块1）：在 worldID 已确定且 session 已落库后，best-effort 为该世界写一条卷首楔子
+	// （史前无名、三道并立、舞台让给后人亲历）。幂等/每世界一次（多玩家降生同共享世界不重复写）；
+	// flag QUNXIANG_WORLD_GENESIS 默认关时整方法 no-op。忽略返回、吞错——绝不影响降生主流程。
+	_ = service.ensureWorldGenesis(ctx, worldID)
+
 	return service.mainWorldCharacterView(ctx, sessionID, worldID, true)
 }
 

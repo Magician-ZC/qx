@@ -516,6 +516,37 @@ CREATE TABLE IF NOT EXISTS world_chronicle (
   INDEX idx_world_chronicle_world (world_id, world_tick, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 
+// DungeonLockoutsTable* 副本进入次数闸表（PvE 副本节流地基）：限某单位在某时间窗对某副本的进入次数。
+// schema.sql 的 fresh 库已含本表；本常量供存量旧库经 DesignClosureTables 幂等补建——否则副本 lockout 静默永不生效。
+// 唯一键 (world_id, unit_id, dungeon_id, window_key)：SQLite 用复合 PRIMARY KEY（允许 NULL world_id，各 NULL 视为相异，
+// 兼容私有/单机旧局），MySQL 因 PK 不容 NULL 列改用 UNIQUE KEY uq_dungeon_lockout（NULL 不参与唯一比对，语义一致）。
+// 复合查询索引 (world_id, unit_id)：SQLite 写在 schema.sql（applySchema 每次 Open 幂等建），MySQL 内联于本 DDL。
+// world_id 可空 → 业务层惰性检查（checkAndConsumeDungeonEntry 之类是模块 agent 的活，本表只是地基）。
+const DungeonLockoutsTableSQLite = `
+CREATE TABLE IF NOT EXISTS dungeon_lockouts (
+  world_id TEXT,
+  unit_id TEXT NOT NULL DEFAULT '',
+  dungeon_id TEXT NOT NULL DEFAULT '',
+  window_key TEXT NOT NULL DEFAULT '',
+  entered_count INTEGER NOT NULL DEFAULT 0,
+  last_entered_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (world_id, unit_id, dungeon_id, window_key)
+)`
+
+const DungeonLockoutsTableMySQL = `
+CREATE TABLE IF NOT EXISTS dungeon_lockouts (
+  world_id VARCHAR(191) NULL,
+  unit_id VARCHAR(191) NOT NULL DEFAULT '',
+  dungeon_id VARCHAR(191) NOT NULL DEFAULT '',
+  window_key VARCHAR(64) NOT NULL DEFAULT '',
+  entered_count INT NOT NULL DEFAULT 0,
+  last_entered_at VARCHAR(64) NULL,
+  created_at VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_dungeon_lockout (world_id, unit_id, dungeon_id, window_key),
+  INDEX idx_dungeon_lockouts_world_unit (world_id, unit_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+
 // DesignClosureTables 汇总本波新增表的双驱动 DDL，供 store.go 一次性幂等补建。
 var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{DungeonSegmentsTableSQLite, DungeonSegmentsTableMySQL},
@@ -527,6 +558,15 @@ var DesignClosureTables = []struct{ SQLite, MySQL string }{
 	{OpsOperatorsTableSQLite, OpsOperatorsTableMySQL},
 	{OpsAuditLogTableSQLite, OpsAuditLogTableMySQL},
 	{WorldChronicleTableSQLite, WorldChronicleTableMySQL},
+	{DungeonLockoutsTableSQLite, DungeonLockoutsTableMySQL},
+}
+
+// WorldBossDefeatedAtColumn 给 world_bosses 补 defeated_at（boss 被讨平的真实时间戳，可空）：
+// 供「最近讨平 boss」按 defeated_at DESC 排序（created_at 在 SQLite 是建表时刻 CURRENT_TIMESTAMP、MySQL 默认空串，
+// 均不可靠作排序键）。nullable 无默认 —— 历史 defeated 行留 NULL，由迁移幂等补列、不改既有语义。
+// 仅 active→defeated 闩锁成功者（strikeSharedBossCore 的 affected==1 分支）由业务层写入，本列只是地基。
+var WorldBossDefeatedAtColumn = []Column{
+	{Name: "defeated_at", SQLiteType: "TEXT", MySQLType: "VARCHAR(64) NULL"},
 }
 
 // DungeonSegmentEnteredTurnColumn 给 dungeon_segments 补 entered_turn（评审 L1：副本踏入回合钉死，
